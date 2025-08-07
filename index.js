@@ -50,18 +50,28 @@ app.post('/webhooks/order-created', async (req, res) => {
   const orderNumber = order.name;
   const lineItems = order.line_items || [];
 
-  const newProjects = lineItems.map(item => ({
-    lineItemId: item.id,
-    productId: item.product_id,
-    productTitle: item.title,
-    variantId: item.variant_id,
-    variantTitle: item.variant_title,
-    quantity: item.quantity,
-    properties: item.properties || [],
-    customerId,
-    orderNumber,
-    date: new Date().toISOString()
-  }));
+  const newProjects = lineItems.map(item => {
+    const properties = item.properties || [];
+    const previewUrl = properties.find(p => p.name === 'previewUrl')?.value || null;
+    const cloudinaryPublicId = properties.find(p => p.name === 'cloudinaryPublicId')?.value || null;
+    const instructions = properties.find(p => p.name?.toLowerCase().includes('instruktion'))?.value || null;
+
+    return {
+      lineItemId: item.id,
+      productId: item.product_id,
+      productTitle: item.title,
+      variantId: item.variant_id,
+      variantTitle: item.variant_title,
+      quantity: item.quantity,
+      previewUrl,
+      cloudinaryPublicId,
+      instructions,
+      properties,
+      customerId,
+      orderNumber,
+      date: new Date().toISOString()
+    };
+  });
 
   if (newProjects.length === 0) return res.sendStatus(200);
 
