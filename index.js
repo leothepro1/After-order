@@ -26,6 +26,7 @@ function verifyShopifyRequest(req) {
     .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
     .update(req.rawBody, 'utf8')
     .digest('base64');
+
   return digest === hmacHeader;
 }
 
@@ -72,11 +73,9 @@ app.post('/webhooks/order-created', async (req, res) => {
   const lineItems = order.line_items || [];
 
   const newProjects = lineItems.map(item => {
-    const properties = item.properties || [];
-    const fileName = properties.find(p => p.name === 'Tryckfil')?.value || '';
-    // Bygg nyckeln exakt som frontend gör: `${productId}-${productTitle}-${fileName}`
+    const fileName = item.properties?.find(p => p.name === 'Tryckfil')?.value || '';
     const key = `${item.product_id}-${item.title}-${fileName}`;
-    const fallback = temporaryStorage[key] || {};
+    const fallback = temporaryStorage[key] || temporaryStorage[item.id] || {};
 
     return {
       lineItemId: item.id,
@@ -85,13 +84,13 @@ app.post('/webhooks/order-created', async (req, res) => {
       variantId: item.variant_id,
       variantTitle: item.variant_title,
       quantity: item.quantity,
-      // Försök alltid ta från temporaryStorage (fallback) om inte properties finns
-      previewUrl: fallback.previewUrl || properties.find(p => p.name === 'previewUrl')?.value || null,
-      cloudinaryPublicId: fallback.cloudinaryPublicId || properties.find(p => p.name === 'cloudinaryPublicId')?.value || null,
-      instructions: fallback.instructions || properties.find(p => p.name?.toLowerCase().includes('instruktion'))?.value || null,
-      properties,
+      previewUrl: fallback.previewUrl || null,
+      cloudinaryPublicId: fallback.cloudinaryPublicId || null,
+      instructions: fallback.instructions || null,
+      properties: item.properties || [],
       customerId,
       orderNumber,
+      status: 'Väntar på korrektur',
       date: new Date().toISOString()
     };
   });
