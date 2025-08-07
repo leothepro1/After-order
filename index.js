@@ -91,6 +91,7 @@ app.post('/webhooks/order-created', async (req, res) => {
       customerId,
       orderNumber,
       status: 'Väntar på korrektur',
+      tag: 'Väntar på korrektur',
       date: new Date().toISOString()
     };
   });
