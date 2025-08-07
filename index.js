@@ -11,6 +11,9 @@ const SHOP = process.env.SHOP;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
+// Temporär lagring för förhandsdata från frontend
+const temporaryStorage = {}; // { [projectId]: { previewUrl, cloudinaryPublicId, instructions } }
+
 // Middleware
 app.use(bodyParser.json({ verify: (req, res, buf) => {
   req.rawBody = buf;
@@ -26,6 +29,25 @@ function verifyShopifyRequest(req) {
 
   return digest === hmacHeader;
 }
+
+// Tar emot förhandsdata innan order läggs
+app.post('/precheckout-store', (req, res) => {
+  const { projectId, previewUrl, cloudinaryPublicId, instructions } = req.body;
+
+  if (!projectId || !previewUrl) {
+    return res.status(400).json({ error: 'projectId och previewUrl krävs' });
+  }
+
+  temporaryStorage[projectId] = {
+    previewUrl,
+    cloudinaryPublicId,
+    instructions,
+    date: new Date().toISOString()
+  };
+
+  console.log(`💾 Sparade temporärt projekt för ${projectId}`);
+  res.sendStatus(200);
+});
 
 // Webhook: Order skapad
 app.post('/webhooks/order-created', async (req, res) => {
@@ -52,9 +74,7 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   const newProjects = lineItems.map(item => {
     const properties = item.properties || [];
-    const previewUrl = properties.find(p => p.name === 'previewUrl')?.value || null;
-    const cloudinaryPublicId = properties.find(p => p.name === 'cloudinaryPublicId')?.value || null;
-    const instructions = properties.find(p => p.name?.toLowerCase().includes('instruktion'))?.value || null;
+    const fallback = temporaryStorage[item.id] || {};
 
     return {
       lineItemId: item.id,
@@ -63,9 +83,9 @@ app.post('/webhooks/order-created', async (req, res) => {
       variantId: item.variant_id,
       variantTitle: item.variant_title,
       quantity: item.quantity,
-      previewUrl,
-      cloudinaryPublicId,
-      instructions,
+      previewUrl: properties.find(p => p.name === 'previewUrl')?.value || fallback.previewUrl || null,
+      cloudinaryPublicId: properties.find(p => p.name === 'cloudinaryPublicId')?.value || fallback.cloudinaryPublicId || null,
+      instructions: properties.find(p => p.name?.toLowerCase().includes('instruktion'))?.value || fallback.instructions || null,
       properties,
       customerId,
       orderNumber,
@@ -133,4 +153,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
-
