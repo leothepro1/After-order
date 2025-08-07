@@ -50,30 +50,18 @@ app.post('/webhooks/order-created', async (req, res) => {
   const orderNumber = order.name;
   const lineItems = order.line_items || [];
 
-  const newProjects = [];
-
-  for (const item of lineItems) {
-    const props = item.properties || [];
-
-    const fileName = props.find(p => p.name === "fileName")?.value;
-    const previewUrl = props.find(p => p.name === "previewUrl")?.value;
-    const cloudinaryPublicId = props.find(p => p.name === "cloudinaryPublicId")?.value;
-
-    if (!fileName || !previewUrl) continue;
-
-    newProjects.push({
-      projectId: item.id,
-      fileName,
-      previewUrl,
-      cloudinaryPublicId,
-      productId: item.product_id,
-      productTitle: item.title,
-      lineItemId: item.id,
-      customerId,
-      orderNumber,
-      date: new Date().toISOString()
-    });
-  }
+  const newProjects = lineItems.map(item => ({
+    lineItemId: item.id,
+    productId: item.product_id,
+    productTitle: item.title,
+    variantId: item.variant_id,
+    variantTitle: item.variant_title,
+    quantity: item.quantity,
+    properties: item.properties || [],
+    customerId,
+    orderNumber,
+    date: new Date().toISOString()
+  }));
 
   if (newProjects.length === 0) return res.sendStatus(200);
 
