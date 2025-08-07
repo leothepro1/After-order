@@ -29,10 +29,20 @@ function verifyShopifyRequest(req) {
 
 // Webhook: Order skapad
 app.post('/webhooks/order-created', async (req, res) => {
+  console.log('📬 Webhook mottagen');
+
   if (!verifyShopifyRequest(req)) {
     console.warn('❌ Ogiltig Shopify-signatur!');
+    console.log('📦 Header-hash:', req.get('X-Shopify-Hmac-Sha256'));
+    const testDigest = crypto
+      .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+      .update(req.rawBody, 'utf8')
+      .digest('base64');
+    console.log('🔐 Beräknad digest:', testDigest);
     return res.sendStatus(401);
   }
+
+  console.log('🔓 Signatur verifierad! Bearbetar order...');
 
   const order = req.body;
   const orderId = order.id;
