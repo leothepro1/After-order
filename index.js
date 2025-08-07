@@ -74,7 +74,8 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   const newProjects = lineItems.map(item => {
     const properties = item.properties || [];
-    const fallback = temporaryStorage[item.id] || {};
+const key = `${item.product_id}-${item.title}-${item.properties?.find(p => p.name === 'Tryckfil')?.value || ''}`;
+const fallback = temporaryStorage[key] || {};
 
     return {
       lineItemId: item.id,
