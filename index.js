@@ -74,8 +74,9 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   const newProjects = lineItems.map(item => {
     const properties = item.properties || [];
-const key = `${item.product_id}-${item.title}-${item.properties?.find(p => p.name === 'Tryckfil')?.value || ''}`;
-const fallback = temporaryStorage[key] || {};
+    const fileName = properties.find(p => p.name === 'Tryckfil')?.value || '';
+    const key = `${item.product_id}-${item.title}-${fileName}`;
+    const fallback = temporaryStorage[key] || {};
 
     return {
       lineItemId: item.id,
@@ -154,3 +155,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
