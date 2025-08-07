@@ -2,18 +2,38 @@
 
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 const bodyParser = require('body-parser');
 const app = express();
 
-// Middleware
-app.use(bodyParser.json());
+// Shopify-info från miljövariabler
+const SHOP = process.env.SHOP;
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
-// Shopify-info
-const SHOP = 'din-butik.myshopify.com'; // Byt ut till din butik
-const ACCESS_TOKEN = 'din_shopify_access_token'; // Din privata app-token
+// Middleware
+app.use(bodyParser.json({ verify: (req, res, buf) => {
+  req.rawBody = buf;
+}}));
+
+// Verifiera Shopify-signatur
+function verifyShopifyRequest(req) {
+  const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
+  const digest = crypto
+    .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+    .update(req.rawBody, 'utf8')
+    .digest('base64');
+
+  return digest === hmacHeader;
+}
 
 // Webhook: Order skapad
 app.post('/webhooks/order-created', async (req, res) => {
+  if (!verifyShopifyRequest(req)) {
+    console.warn('❌ Ogiltig Shopify-signatur!');
+    return res.sendStatus(401);
+  }
+
   const order = req.body;
   const orderId = order.id;
   const customerId = order.customer?.id;
@@ -48,7 +68,6 @@ app.post('/webhooks/order-created', async (req, res) => {
   if (newProjects.length === 0) return res.sendStatus(200);
 
   try {
-    // Hämta befintliga metafält
     const existing = await axios.get(`https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
       headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
     });
@@ -71,8 +90,7 @@ app.post('/webhooks/order-created', async (req, res) => {
     }
 
     if (currentMetafield) {
-      // Uppdatera
-      await axios.put(`https://${SHOP}/admin/api/2024-07/metafields/${currentMetafield.id}.json`, {
+      await axios.put(`https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json`, {
         metafield: {
           id: currentMetafield.id,
           type: 'json',
@@ -82,8 +100,7 @@ app.post('/webhooks/order-created', async (req, res) => {
         headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
       });
     } else {
-      // Skapa nytt
-      await axios.post(`https://${SHOP}/admin/api/2024-07/orders/${orderId}/metafields.json`, {
+      await axios.post(`https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
         metafield: {
           namespace: 'order-created',
           key: 'order-created',
@@ -108,3 +125,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
