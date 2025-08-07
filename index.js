@@ -49,7 +49,7 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   try {
     // Hämta befintliga metafält
-    const existing = await axios.get(`https://${SHOP}/admin/api/2024-07/orders/${orderId}/metafields.json`, {
+    const existing = await axios.get(`https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
       headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
     });
 
