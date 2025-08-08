@@ -276,8 +276,10 @@ app.post('/proof/approve', async (req, res) => {
 
 // Begär ändringar – uppdaterar status + instructions
 app.post('/proof/request-changes', async (req, res) => {
+  console.log('🏷️ /proof/request-changes called with:', req.body);
   const { orderId, lineItemId, instructions } = req.body;
   if (!orderId || !lineItemId || !instructions) {
+    console.warn('⚠️ Missing parameters in request-changes:', req.body);
     return res.status(400).json({ error: 'orderId, lineItemId och instructions krävs' });
   }
 
@@ -288,9 +290,13 @@ app.post('/proof/request-changes', async (req, res) => {
     const metafield = mfRes.data.metafields.find(mf =>
       mf.namespace === 'order-created' && mf.key === 'order-created'
     );
-    if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
+    if (!metafield) {
+      console.error('❌ Metafält hittades inte vid request-changes');
+      return res.status(404).json({ error: 'Metafält hittades inte' });
+    }
 
     let projects = JSON.parse(metafield.value || '[]');
+    console.log('⏳ Projects before update:', projects);
     let updated = false;
     projects = projects.map(p => {
       if (String(p.lineItemId) === String(lineItemId)) {
@@ -299,9 +305,14 @@ app.post('/proof/request-changes', async (req, res) => {
       }
       return p;
     });
-    if (!updated) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
 
-    await axios.put(`https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`, {
+    if (!updated) {
+      console.warn('⚠️ Line item hittades inte i metafält vid request-changes:', lineItemId);
+      return res.status(404).json({ error: 'Line item hittades inte i metafält' });
+    }
+
+    console.log('✨ Projects after update:', projects);
+    const putRes = await axios.put(`https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`, {
       metafield: {
         id: metafield.id,
         type: 'json',
@@ -310,8 +321,9 @@ app.post('/proof/request-changes', async (req, res) => {
     }, {
       headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
     });
+    console.log('✅ Shopify response for request-changes:', putRes.status);
 
-    res.sendStatus(200);
+    res.json({ success: true });
   } catch (err) {
     console.error('❌ Fel vid /proof/request-changes:', err?.response?.data || err.message);
     res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
@@ -323,5 +335,10 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Kör på port ${PORT}`);
+});
+
 
 
