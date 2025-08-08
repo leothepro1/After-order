@@ -179,7 +179,9 @@ app.get('/pages/korrektur', async (req, res) => {
       if (!proofMetafield) continue;
 
       const projects = JSON.parse(proofMetafield.value || '[]');
-      const awaiting = projects.filter(p => p.status === 'Väntar på godkännande');
+      // Lägg till orderId från order eftersom metadatavärdet kanske saknar det
+      const enriched = projects.map(p => ({ ...p, orderId: order.id }));
+      const awaiting = enriched.filter(p => p.status === 'Väntar på godkännande');
 
       results.push(...awaiting);
     }
@@ -337,6 +339,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
