@@ -64,16 +64,8 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   if (!verifyShopifyRequest(req)) {
     console.warn('❌ Ogiltig Shopify-signatur!');
-    console.log('📦 Header-hash:', req.get('X-Shopify-Hmac-Sha256'));
-    const testDigest = crypto
-      .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-      .update(req.rawBody, 'utf8')
-      .digest('base64');
-    console.log('🔐 Beräknad digest:', testDigest);
     return res.sendStatus(401);
   }
-
-  console.log('🔓 Signatur verifierad! Bearbetar order...');
 
   const order = req.body;
   const orderId = order.id;
@@ -279,6 +271,50 @@ app.post('/proof/approve', async (req, res) => {
   } catch (err) {
     console.error('❌ Fel vid /proof/approve:', err?.response?.data || err.message);
     res.status(500).json({ error: 'Kunde inte godkänna korrektur' });
+  }
+});
+
+// Begär ändringar – uppdaterar status + instructions
+app.post('/proof/request-changes', async (req, res) => {
+  const { orderId, lineItemId, instructions } = req.body;
+  if (!orderId || !lineItemId || !instructions) {
+    return res.status(400).json({ error: 'orderId, lineItemId och instructions krävs' });
+  }
+
+  try {
+    const mfRes = await axios.get(`https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+    const metafield = mfRes.data.metafields.find(mf =>
+      mf.namespace === 'order-created' && mf.key === 'order-created'
+    );
+    if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
+
+    let projects = JSON.parse(metafield.value || '[]');
+    let updated = false;
+    projects = projects.map(p => {
+      if (String(p.lineItemId) === String(lineItemId)) {
+        updated = true;
+        return { ...p, instructions, status: 'Väntar på korrektur', tag: 'Väntar på korrektur' };
+      }
+      return p;
+    });
+    if (!updated) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
+
+    await axios.put(`https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`, {
+      metafield: {
+        id: metafield.id,
+        type: 'json',
+        value: JSON.stringify(projects)
+      }
+    }, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('❌ Fel vid /proof/request-changes:', err?.response?.data || err.message);
+    res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
   }
 });
 
