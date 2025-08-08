@@ -9,9 +9,11 @@ const bodyParser = require('body-parser');
 const app = express(); // ✅ Skapa app INNAN du använder den
 
 // Aktivera CORS
+// Aktivera CORS - Tillåt Pressify-domän och eventuellt andra
 app.use(cors({
-  origin: 'https://pressify.se',
-  methods: ['GET', 'POST', 'PUT', 'PATCH'],
+  origin: [ 'https://pressify.se', 'https://www.pressify.se' ],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: false
 }));
 
