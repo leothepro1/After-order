@@ -151,6 +151,47 @@ app.post('/webhooks/order-created', async (req, res) => {
   }
 });
 
+// Hämta korrektur-status för kund
+app.get('/pages/korrektur', async (req, res) => {
+  const customerId = req.query.customerId;
+  if (!customerId) return res.status(400).json({ error: 'customerId krävs' });
+
+  try {
+    const ordersRes = await axios.get(`https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${customerId}`, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    const orders = ordersRes.data.orders || [];
+    const results = [];
+
+    for (const order of orders) {
+      const metafieldsRes = await axios.get(`https://${SHOP}/admin/api/2025-07/orders/${order.id}/metafields.json`, {
+        headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+      });
+
+      const proofMetafield = metafieldsRes.data.metafields.find(mf =>
+        mf.namespace === 'order-created' && mf.key === 'order-created'
+      );
+
+      if (!proofMetafield) continue;
+
+      const projects = JSON.parse(proofMetafield.value || '[]');
+      const awaiting = projects.filter(p => p.status === 'Väntar på korrektur');
+
+      results.push(...awaiting);
+    }
+
+    if (results.length === 0) {
+      return res.json({ message: 'Just nu har du ingenting att godkänna', projects: [] });
+    }
+
+    res.json({ message: 'Godkänn korrektur', projects: results });
+  } catch (err) {
+    console.error('❌ Fel vid hämtning av korrektur:', err?.response?.data || err.message);
+    res.status(500).json({ error: 'Internt serverfel' });
+  }
+});
+
 // Starta servern
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
