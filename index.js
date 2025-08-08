@@ -80,7 +80,7 @@ app.post('/webhooks/order-created', async (req, res) => {
     const key = `${item.product_id}-${item.title}-${fileName}`;
     const fallback = temporaryStorage[key] || temporaryStorage[item.id] || {};
 
-    return {
+    return { orderId: orderId,
       lineItemId: item.id,
       productId: item.product_id,
       productTitle: item.title,
