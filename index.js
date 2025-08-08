@@ -76,26 +76,30 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   // Mappa varje radpost till ett projekt
   const newProjects = lineItems.map(item => {
+    // Spara med alla line item properties
+    const props = item.properties || [];
+
     // Hämta projekt-id (originalt filnamn) från line item properties
-    const projectId = item.properties?.find(p => p.name === 'fileName')?.value;
+    const projectId = props.find(p => p.name === 'fileName')?.value;
     const fallback = projectId ? (temporaryStorage[projectId] || {}) : {};
 
     return {
       orderId,
-      lineItemId: item.id,
-      productId: item.product_id,
-      productTitle: item.title,
-      variantId: item.variant_id,
-      variantTitle: item.variant_title,
-      quantity: item.quantity,
-      preview_img: fallback.previewUrl || null,         // Cloudinary-preview sparad mot projectId
+      lineItemId:      item.id,
+      productId:       item.product_id,
+      productTitle:    item.title,
+      variantId:       item.variant_id,
+      variantTitle:    item.variant_title,
+      quantity:        item.quantity,
+      properties:      props,
+      preview_img:     fallback.previewUrl || null,     
       cloudinaryPublicId: fallback.cloudinaryPublicId || null,
-      instructions: fallback.instructions || null,
+      instructions:    fallback.instructions || null,
       customerId,
       orderNumber,
-      status: 'Väntar på korrektur',
-      tag: 'Väntar på korrektur',
-      date: new Date().toISOString()
+      status:          'Väntar på korrektur',
+      tag:             'Väntar på korrektur',
+      date:            new Date().toISOString()
     };
   });
 
