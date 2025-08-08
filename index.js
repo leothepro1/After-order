@@ -1,10 +1,19 @@
 // FIL: index.js
 
 const express = require('express');
+const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const bodyParser = require('body-parser');
-const app = express();
+
+const app = express(); // ✅ Skapa app INNAN du använder den
+
+// Aktivera CORS
+app.use(cors({
+  origin: 'https://pressify.se',
+  methods: ['GET', 'POST', 'PUT', 'PATCH'],
+  credentials: false
+}));
 
 // Shopify-info från miljövariabler
 const SHOP = process.env.SHOP;
