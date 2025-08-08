@@ -76,30 +76,36 @@ app.post('/webhooks/order-created', async (req, res) => {
 
   // Mappa varje radpost till ett projekt
   const newProjects = lineItems.map(item => {
-    // Spara med alla line item properties
+    // Ta med alla line item properties
     const props = item.properties || [];
 
     // Hämta projekt-id (originalt filnamn) från line item properties
     const projectId = props.find(p => p.name === 'Tryckfil')?.value;
     const fallback = projectId ? (temporaryStorage[projectId] || {}) : {};
 
+    // Hämta instruktioner direkt från properties om de finns, annars från fallback
+    const instructionProp = props.find(p => p.name === 'instructions')?.value;
+    const instructions = instructionProp != null
+      ? instructionProp
+      : (fallback.instructions || null);
+
     return {
       orderId,
-      lineItemId:      item.id,
-      productId:       item.product_id,
-      productTitle:    item.title,
-      variantId:       item.variant_id,
-      variantTitle:    item.variant_title,
-      quantity:        item.quantity,
-      properties:      props,
-      preview_img:     fallback.previewUrl || null,     
+      lineItemId:        item.id,
+      productId:         item.product_id,
+      productTitle:      item.title,
+      variantId:         item.variant_id,
+      variantTitle:      item.variant_title,
+      quantity:          item.quantity,
+      properties:        props,
+      preview_img:       fallback.previewUrl || null,
       cloudinaryPublicId: fallback.cloudinaryPublicId || null,
-      instructions:    fallback.instructions || null,
+      instructions,     // <-- nu inkluderar vi både property- eller fallback-instruktioner
       customerId,
       orderNumber,
-      status:          'Väntar på korrektur',
-      tag:             'Väntar på korrektur',
-      date:            new Date().toISOString()
+      status:            'Väntar på korrektur',
+      tag:               'Väntar på korrektur',
+      date:              new Date().toISOString()
     };
   });
 
