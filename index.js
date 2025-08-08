@@ -185,7 +185,7 @@ app.get('/pages/korrektur', async (req, res) => {
       if (!proofMetafield) continue;
 
       const projects = JSON.parse(proofMetafield.value || '[]');
-      const awaiting = projects.filter(p => p.status === 'Väntar på korrektur');
+      const awaiting = projects.filter(p => p.status === 'Väntar på godkännande');
 
       results.push(...awaiting);
     }
@@ -201,9 +201,91 @@ app.get('/pages/korrektur', async (req, res) => {
   }
 });
 
+// Uppdatera korrektur-status (när du laddar upp korrekturbild)
+app.post('/proof/upload', async (req, res) => {
+  const { orderId, lineItemId, previewUrl } = req.body;
+  if (!orderId || !lineItemId || !previewUrl) return res.status(400).json({ error: 'orderId, lineItemId och previewUrl krävs' });
+
+  try {
+    const { data } = await axios.get(`https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    const metafield = data.metafields.find(mf => mf.namespace === 'order-created' && mf.key === 'order-created');
+    if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
+
+    let projects = JSON.parse(metafield.value || '[]');
+    let updated = false;
+
+    projects = projects.map(p => {
+      if (p.lineItemId == lineItemId) {
+        updated = true;
+        return { ...p, previewUrl, status: 'Väntar på godkännande' };
+      }
+      return p;
+    });
+
+    if (!updated) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
+
+    await axios.put(`https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`, {
+      metafield: {
+        id: metafield.id,
+        type: 'json',
+        value: JSON.stringify(projects)
+      }
+    }, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('❌ Fel vid /proof/upload:', err?.response?.data || err.message);
+    res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
+  }
+});
+
+// Godkänn korrektur
+app.post('/proof/approve', async (req, res) => {
+  const { orderId, lineItemId } = req.body;
+  if (!orderId || !lineItemId) return res.status(400).json({ error: 'orderId och lineItemId krävs' });
+
+  try {
+    const { data } = await axios.get(`https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    const metafield = data.metafields.find(mf => mf.namespace === 'order-created' && mf.key === 'order-created');
+    if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
+
+    let projects = JSON.parse(metafield.value || '[]');
+    projects = projects.map(p => {
+      if (p.lineItemId == lineItemId) {
+        return { ...p, status: 'Godkänd' };
+      }
+      return p;
+    });
+
+    await axios.put(`https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`, {
+      metafield: {
+        id: metafield.id,
+        type: 'json',
+        value: JSON.stringify(projects)
+      }
+    }, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('❌ Fel vid /proof/approve:', err?.response?.data || err.message);
+    res.status(500).json({ error: 'Kunde inte godkänna korrektur' });
+  }
+});
+
 // Starta servern
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
