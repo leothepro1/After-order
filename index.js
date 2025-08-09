@@ -29,6 +29,42 @@ const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 
+// 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
+const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
+let __lastAdminCallAt = 0;
+
+axios.interceptors.request.use(async (config) => {
+  try {
+    const url = (config.baseURL || '') + (config.url || '');
+    if (url.includes(SHOP_ADMIN_PATTERN)) {
+      const now = Date.now();
+      const wait = Math.max(0, 550 - (now - __lastAdminCallAt)); // ~2 calls/sek
+      if (wait) {
+        await new Promise(r => setTimeout(r, wait));
+      }
+      __lastAdminCallAt = Date.now();
+    }
+  } catch {}
+  return config;
+});
+
+axios.interceptors.response.use(
+  (res) => res,
+  async (error) => {
+    const { response, config } = error || {};
+    const url = ((config && (config.baseURL || '')) + (config && config.url || '')) || '';
+    if (response && response.status === 429 && url.includes(SHOP_ADMIN_PATTERN)) {
+      config.__retryCount = (config.__retryCount || 0) + 1;
+      if (config.__retryCount <= 3) {
+        const ra = parseFloat(response.headers?.['retry-after']) || 1;
+        await new Promise(r => setTimeout(r, ra * 1000));
+        return axios(config); // prova igen
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 // Enkel in-memory store för OAuth state & (ev.) tokens per shop
 const oauthStateStore = {};   // { state: shop }
 const shopTokenStore = {};    // { shop: token }  // OBS: din kod använder fortfarande ACCESS_TOKEN – detta är för framtida bruk
@@ -430,6 +466,34 @@ function verifyAppProxySignature(search) {
     return false;
   }
 }
+
+// 🔰 NYTT: 20s micro-cache för /proxy/orders-meta (ingen ändring av själva route-handlern)
+const ordersMetaCache = new Map(); // key -> { at, data }
+
+app.use('/proxy/orders-meta', (req, res, next) => {
+  try {
+    const cid = req.query.logged_in_customer_id || 'anon';
+    const first = req.query.first || '25';
+    const key = `${cid}:${first}`;
+
+    const hit = ordersMetaCache.get(key);
+    if (hit && (Date.now() - hit.at) < 20000) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(hit.data);
+    }
+
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+      if (res.statusCode === 200 && body && typeof body === 'object' && Array.isArray(body.orders)) {
+        ordersMetaCache.set(key, { at: Date.now(), data: body });
+      }
+      return originalJson(body);
+    };
+  } catch {
+    // om cachen felar, släpp igenom normalt
+  }
+  next();
+});
 
 app.get('/proxy/orders-meta', async (req, res) => {
   try {
