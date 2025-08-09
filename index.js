@@ -48,23 +48,24 @@ function verifyAppProxySignature(query) {
   const { signature, ...rest } = query || {};
   if (!signature) return false;
 
-  // Shopify: sorterade "key=value" utan separator; arrayvärden joinas med komma
   const pairs = Object.keys(rest).map(k => {
     const v = Array.isArray(rest[k]) ? rest[k].join(',') : String(rest[k] ?? '');
     return `${k}=${v}`;
   });
 
-  const digest = crypto
-    .createHmac('sha256', SHOPIFY_API_SECRET)
-    .update(pairs.sort().join(''))
-    .digest('hex');
-
   try {
+    const digest = crypto
+      .createHmac('sha256', process.env.SHOPIFY_API_SECRET || '')
+      .update(pairs.sort().join(''))
+      .digest('hex');
+
     return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(String(signature), 'utf8'));
-  } catch {
-    return false;
+  } catch (e) {
+    console.error('App Proxy HMAC fel (saknas SHOPIFY_API_SECRET eller ogiltig?):', e.message);
+    return false; // gör att route svarar 401 med JSON, inte tom body
   }
 }
+
 
 // Tar emot förhandsdata innan order läggs
 app.post('/precheckout-store', (req, res) => {
