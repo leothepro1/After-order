@@ -1,4 +1,5 @@
 // FIL: index.js
+// FIL: index.js
 
 const express = require('express');
 const cors = require('cors');
@@ -55,7 +56,7 @@ app.post('/precheckout-store', (req, res) => {
     date: new Date().toISOString()
   };
 
-  console.log(💾 Sparade temporärt projekt för ${projectId});
+  console.log(`💾 Sparade temporärt projekt för ${projectId}`);
   res.sendStatus(200);
 });
 
@@ -114,7 +115,7 @@ app.post('/webhooks/order-created', async (req, res) => {
   try {
     // Hämta befintliga metafält
     const existing = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json, {
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
         headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
       }
     );
@@ -139,13 +140,13 @@ app.post('/webhooks/order-created', async (req, res) => {
     // Uppdatera eller skapa metafältet
     if (currentMetafield) {
       await axios.put(
-        https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json,
+        `https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json`,
         { metafield: { id: currentMetafield.id, type: 'json', value: JSON.stringify(combined) } },
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
     } else {
       await axios.post(
-        https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
         { metafield: { namespace: 'order-created', key: 'order-created', type: 'json', value: JSON.stringify(combined) } },
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
@@ -166,7 +167,7 @@ app.get('/pages/korrektur', async (req, res) => {
 
   try {
     const ordersRes = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${customerId},
+      `https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${customerId}`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
@@ -175,7 +176,7 @@ app.get('/pages/korrektur', async (req, res) => {
 
     for (const order of orders) {
       const metafieldsRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/orders/${order.id}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/orders/${order.id}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
 
@@ -209,7 +210,7 @@ app.post('/proof/upload', async (req, res) => {
 
   try {
     const { data } = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
@@ -230,7 +231,7 @@ app.post('/proof/upload', async (req, res) => {
     if (!updated) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
 
     await axios.put(
-      https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json,
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
@@ -249,7 +250,7 @@ app.post('/proof/approve', async (req, res) => {
 
   try {
     const { data } = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
@@ -265,7 +266,7 @@ app.post('/proof/approve', async (req, res) => {
     });
 
     await axios.put(
-      https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json,
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
@@ -288,7 +289,7 @@ app.post('/proof/request-changes', async (req, res) => {
 
   try {
     const mfRes = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
     const metafield = mfRes.data.metafields.find(mf =>
@@ -317,7 +318,7 @@ app.post('/proof/request-changes', async (req, res) => {
 
     console.log('✨ Projects after update:', projects);
     const putRes = await axios.put(
-      https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json,
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
@@ -333,6 +334,7 @@ app.post('/proof/request-changes', async (req, res) => {
 // Starta servern
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(🚀 Kör på port ${PORT});
+  console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
