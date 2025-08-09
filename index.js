@@ -20,6 +20,10 @@ app.use(cors({
 const SHOP = process.env.SHOP;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+// 🔽 Nya variabler för App Proxy
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
+const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
+const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 
 // Temporär lagring för förhandsdata från frontend
 const temporaryStorage = {}; // { [projectId]: { previewUrl, cloudinaryPublicId, instructions, date } }
@@ -29,7 +33,7 @@ app.use(bodyParser.json({ verify: (req, res, buf) => {
   req.rawBody = buf;
 }}));
 
-// Verifiera Shopify-signatur
+// Verifiera Shopify-signatur (webhooks)
 function verifyShopifyRequest(req) {
   const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
   const digest = crypto
@@ -330,11 +334,87 @@ app.post('/proof/request-changes', async (req, res) => {
   }
 });
 
+// ===== APP PROXY: /apps/orders-meta =====
+// Verifiering av App Proxy-signatur (använder partner-appens "Klienthemlighet")
+function verifyAppProxySignature(search) {
+  const params = new URLSearchParams(search || "");
+  const signature = params.get("signature");
+  if (!signature) return false;
+  params.delete("signature");
+
+  const parts = [];
+  Array.from(params.keys())
+    .sort()
+    .forEach((k) => {
+      parts.push(`${k}=${params.getAll(k).join(",")}`);
+    });
+
+  const message = parts.join("");
+  const digest = crypto
+    .createHmac("sha256", SHOPIFY_API_SECRET)
+    .update(message)
+    .digest("hex");
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+  } catch {
+    return false;
+  }
+}
+
+app.get('/proxy/orders-meta', async (req, res) => {
+  try {
+    // 1) Säkerställ att anropet kommer från Shopify App Proxy
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'Invalid signature' });
+    }
+
+    const loggedInCustomerId = req.query.logged_in_customer_id; // sätts av Shopify
+    if (!loggedInCustomerId) return res.status(204).end(); // ej inloggad kund
+
+    // 2) Hämta kundens ordrar
+    const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
+    const ordersRes = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+
+    const orders = ordersRes.data.orders || [];
+
+    // 3) Läs ut metafält per order (namespace/key från ENV)
+    const out = [];
+    for (const o of orders) {
+      const mfRes = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const mf = (mfRes.data.metafields || []).find(
+        m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+      );
+
+      out.push({
+        id: o.id,
+        name: o.name,
+        processedAt: o.processed_at || o.created_at,
+        metafield: mf ? mf.value : null
+      });
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ orders: out });
+  } catch (e) {
+    console.error('proxy/orders-meta error:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+// ===== END APP PROXY =====
+
 // Starta servern
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
