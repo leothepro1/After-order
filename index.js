@@ -20,10 +20,18 @@ app.use(cors({
 const SHOP = process.env.SHOP;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-// 🔽 Nya variabler för App Proxy
-const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
+
+// 🔽 Nya env för Partner-app & Proxy
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET; // används för App Proxy + OAuth-verifiering
+const SCOPES = process.env.SCOPES || 'read_orders,read_customers,read_metafields,write_app_proxy';
+const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(/\/$/, '');
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
+
+// Enkel in-memory store för OAuth state & (ev.) tokens per shop
+const oauthStateStore = {};   // { state: shop }
+const shopTokenStore = {};    // { shop: token }  // OBS: din kod använder fortfarande ACCESS_TOKEN – detta är för framtida bruk
 
 // Temporär lagring för förhandsdata från frontend
 const temporaryStorage = {}; // { [projectId]: { previewUrl, cloudinaryPublicId, instructions, date } }
@@ -33,7 +41,68 @@ app.use(bodyParser.json({ verify: (req, res, buf) => {
   req.rawBody = buf;
 }}));
 
-// Verifiera Shopify-signatur (webhooks)
+// Liten hälsosida så "Cannot GET /" försvinner
+app.get('/', (req, res) => res.type('text').send('OK'));
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+// ===== OAuth (Partner-app) =====
+// Starta installationen: /auth?shop=xxxx.myshopify.com
+app.get('/auth', (req, res) => {
+  const shop = req.query.shop;
+  if (!shop) return res.status(400).send('Missing ?shop');
+
+  const state = crypto.randomBytes(16).toString('hex');
+  oauthStateStore[state] = shop;
+
+  const redirectUri = `${HOST}/auth/callback`;
+  const installUrl =
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${encodeURIComponent(SHOPIFY_API_KEY)}` +
+    `&scope=${encodeURIComponent(SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${encodeURIComponent(state)}`;
+
+  return res.redirect(installUrl);
+});
+
+// Verifiera HMAC på OAuth-queryn (använder hmac-param)
+function verifyOAuthHmac(query) {
+  const { hmac, signature, ...rest } = query;
+  const ordered = Object.keys(rest).sort().map(k => `${k}=${Array.isArray(rest[k]) ? rest[k].join(',') : rest[k]}`).join('&');
+  const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(ordered).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(String(hmac || ''), 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+// Callback efter godkännande
+app.get('/auth/callback', async (req, res) => {
+  const { shop, hmac, code, state } = req.query;
+  if (!shop || !hmac || !code || !state) return res.status(400).send('Missing params');
+  if (oauthStateStore[state] !== shop) return res.status(400).send('Invalid state');
+  if (!verifyOAuthHmac(req.query)) return res.status(400).send('Invalid HMAC');
+
+  try {
+    const tokenRes = await axios.post(`https://${shop}/admin/oauth/access_token`, {
+      client_id: SHOPIFY_API_KEY,
+      client_secret: SHOPIFY_API_SECRET,
+      code
+    });
+    const accessToken = tokenRes.data.access_token;
+    shopTokenStore[shop] = accessToken; // (valfritt) – din nuvarande kod använder ACCESS_TOKEN, inte denna
+
+    // Snyggt avslut på installationen
+    return res.type('html').send('<html><body style="font-family:sans-serif">App installed ✔️<br/>You can close this tab.</body></html>');
+  } catch (e) {
+    console.error('OAuth exchange failed:', e?.response?.data || e.message);
+    return res.status(500).send('OAuth failed');
+  }
+});
+// ===== END OAuth =====
+
+// Verifiera Shopify-signatur (webhooks – behåll som du hade, eftersom dina webhooks tillhör gamla appen)
 function verifyShopifyRequest(req) {
   const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
   const digest = crypto
@@ -116,7 +185,7 @@ app.post('/webhooks/order-created', async (req, res) => {
   if (newProjects.length === 0) return res.sendStatus(200);
 
   try {
-    // Hämta befintliga metafält
+    // Hämta befintliga metafält (🔧 fixad URL)
     const existing = await axios.get(
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
         headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
@@ -414,6 +483,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
