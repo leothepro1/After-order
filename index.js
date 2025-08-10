@@ -467,6 +467,92 @@ function verifyAppProxySignature(search) {
   }
 }
 
+// ===== APP PROXY: /proxy/avatar (mappar från /apps/pressify/avatar) =====
+app.all('/proxy/avatar', async (req, res) => {
+  try {
+    // 1) Verifiera att anropet kommer via Shopify App Proxy
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'Invalid signature' });
+    }
+
+    // 2) Kräver inloggad kund (Shopify bifogar logged_in_customer_id)
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'Not logged in' });
+
+    if (req.method === 'GET') {
+      // Hämta nuvarande metafält
+      const mfRes = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+      return res.json({ metafield: mf ? mf.value : null });
+    }
+
+    if (req.method === 'POST') {
+      const { action, meta } = req.body || {};
+
+      // Hämta ev. befintligt metafält
+      const existingRes = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const existing = (existingRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+
+      if (action === 'delete') {
+        if (existing) {
+          await axios.delete(
+            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+        }
+        return res.json({ ok: true, deleted: true });
+      }
+
+      if (action === 'save') {
+        if (!meta || (!meta.public_id && !meta.secure_url)) {
+          return res.status(400).json({ error: 'Invalid meta payload' });
+        }
+
+        const payload = {
+          namespace: 'Profilbild',
+          key: 'Profilbild',
+          type: 'json',
+          value: JSON.stringify({
+            public_id:  String(meta.public_id || ''),
+            version:    meta.version || null,
+            secure_url: String(meta.secure_url || ''),
+            updatedAt:  new Date().toISOString()
+          })
+        };
+
+        if (existing) {
+          await axios.put(
+            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+            { metafield: { id: existing.id, ...payload } },
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+        } else {
+          await axios.post(
+            `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
+            { metafield: payload },
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+        }
+
+        return res.json({ ok: true });
+      }
+
+      return res.status(400).json({ error: 'Unknown action' });
+    }
+
+    return res.status(405).json({ error: 'Method not allowed' });
+  } catch (err) {
+    console.error('/proxy/avatar error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 // 🔰 NYTT: 20s micro-cache för /proxy/orders-meta (ingen ändring av själva route-handlern)
 const ordersMetaCache = new Map(); // key -> { at, data }
 
@@ -600,6 +686,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
