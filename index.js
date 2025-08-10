@@ -781,49 +781,34 @@ app.post('/proxy/profile/update', async (req, res) => {
     const lastName  = (req.body.last_name  || '').trim();
     const email     = (req.body.email      || '').trim();
 
-    const mutation = `
-      mutation customerUpdate($id: ID!, $input: CustomerInput!) {
-        customerUpdate(id: $id, input: $input) {
-          customer { id firstName lastName email }
-          userErrors { field message }
-        }
-      }
-    `;
-// Gör ID robust: acceptera både siffra och redan-formaterad GID
-const cid = String(loggedInCustomerId || '').trim();
-const customerGid = cid.startsWith('gid://') ? cid : `gid://shopify/Customer/${cid}`;
+    // --- REST istället för GraphQL ---
+const cidRaw = String(loggedInCustomerId || '').trim();
+// REST vill ha numeriskt id (inte GID)
+const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
 
-// (valfritt men mycket hjälpsamt i Render-loggen)
-console.log('profile/update customer id:', cid, '→', customerGid);
-
-const variables = {
-  id: customerGid,
-  input: {
-    ...(firstName ? { firstName } : {}),
-    ...(lastName  ? { lastName  } : {}),
-    ...(email     ? { email     } : {})
+// Bygg endast de fält som användaren skickat in
+const payload = {
+  customer: {
+    id: cidNum,
+    ...(firstName ? { first_name: firstName } : {}),
+    ...(lastName  ? { last_name:  lastName  } : {}),
+    ...(email     ? { email } : {})
   }
 };
 
-const data = await shopifyGraphQL(mutation, variables);
-// Logga EXAKTA GraphQL-fel om de finns (så du slipper “Okänt fel”)
-if (data && data.errors) {
-  console.error('customerUpdate top-level errors:', JSON.stringify(data.errors));
+// Kör uppdateringen via Admin REST
+const upRes = await axios.put(
+  `https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json`,
+  payload,
+  { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+);
+
+// Svara som tidigare (JSON om Accept: application/json, annars redirect)
+if (req.get('accept')?.includes('application/json')) {
+  return res.json({ ok: true, customer: upRes.data.customer });
 }
-    const result = data?.data?.customerUpdate;
+return res.redirect(302, '/account');
 
-    if (!result || (result.userErrors && result.userErrors.length)) {
-      if (req.get('accept')?.includes('application/json')) {
-        return res.status(400).json({ errors: result?.userErrors || [{ message: 'Okänt fel' }] });
-      }
-      const msg = encodeURIComponent(result?.userErrors?.[0]?.message || 'Kunde inte uppdatera profil');
-      return res.redirect(302, `/account?profile_error=${msg}`);
-    }
-
-    if (req.get('accept')?.includes('application/json')) {
-      return res.json({ ok: true, customer: result.customer });
-    }
-    return res.redirect(302, '/account');
   } catch (err) {
     console.error('profile/update error:', err?.response?.data || err.message);
     if (req.get('accept')?.includes('application/json')) {
@@ -832,8 +817,7 @@ if (data && data.errors) {
     return res.redirect(302, '/account?profile_error=Internal%20error');
   }
 });
-
-// Duplicerad route för proxybas under /proxy/orders-meta (i linje med dina avatar-routes)
+// Duplicerad route för App Proxy-sökvägen /apps/orders-meta/profile/update
 app.post('/proxy/orders-meta/profile/update', async (req, res) => {
   try {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -847,52 +831,31 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
     const lastName  = (req.body.last_name  || '').trim();
     const email     = (req.body.email      || '').trim();
 
-    const mutation = `
-      mutation customerUpdate($id: ID!, $input: CustomerInput!) {
-        customerUpdate(id: $id, input: $input) {
-          customer { id firstName lastName email }
-          userErrors { field message }
-        }
+    // --- REST istället för GraphQL ---
+    const cidRaw = String(loggedInCustomerId || '').trim();
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+
+    const payload = {
+      customer: {
+        id: cidNum,
+        ...(firstName ? { first_name: firstName } : {}),
+        ...(lastName  ? { last_name:  lastName  } : {}),
+        ...(email     ? { email } : {})
       }
-    `;
-    // Gör ID robust: acceptera både siffra och redan-formaterad GID
-const cid = String(loggedInCustomerId || '').trim();
-const customerGid = cid.startsWith('gid://') ? cid : `gid://shopify/Customer/${cid}`;
+    };
 
-// (valfritt men mycket hjälpsamt i Render-loggen)
-console.log('profile/update customer id:', cid, '→', customerGid);
-
-const variables = {
-  id: customerGid,
-  input: {
-    ...(firstName ? { firstName } : {}),
-    ...(lastName  ? { lastName  } : {}),
-    ...(email     ? { email     } : {})
-  }
-};
-
-const data = await shopifyGraphQL(mutation, variables);
-// Logga EXAKTA GraphQL-fel om de finns (så du slipper “Okänt fel”)
-if (data && data.errors) {
-  console.error('customerUpdate top-level errors:', JSON.stringify(data.errors));
-}
-
-    const result = data?.data?.customerUpdate;
-
-    if (!result || (result.userErrors && result.userErrors.length)) {
-      if (req.get('accept')?.includes('application/json')) {
-        return res.status(400).json({ errors: result?.userErrors || [{ message: 'Okänt fel' }] });
-      }
-      const msg = encodeURIComponent(result?.userErrors?.[0]?.message || 'Kunde inte uppdatera profil');
-      return res.redirect(302, `/account?profile_error=${msg}`);
-    }
+    const upRes = await axios.put(
+      `https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json`,
+      payload,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+    );
 
     if (req.get('accept')?.includes('application/json')) {
-      return res.json({ ok: true, customer: result.customer });
+      return res.json({ ok: true, customer: upRes.data.customer });
     }
     return res.redirect(302, '/account');
   } catch (err) {
-    console.error('profile/update error:', err?.response?.data || err.message);
+    console.error('profile/update (orders-meta) error:', err?.response?.data || err.message);
     if (req.get('accept')?.includes('application/json')) {
       return res.status(500).json({ error: 'Internal error' });
     }
