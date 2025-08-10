@@ -789,16 +789,27 @@ app.post('/proxy/profile/update', async (req, res) => {
         }
       }
     `;
-    const variables = {
-      id: `gid://shopify/Customer/${loggedInCustomerId}`,
-      input: {
-        ...(firstName ? { firstName } : {}),
-        ...(lastName  ? { lastName  } : {}),
-        ...(email     ? { email     } : {})
-      }
-    };
+// Gör ID robust: acceptera både siffra och redan-formaterad GID
+const cid = String(loggedInCustomerId || '').trim();
+const customerGid = cid.startsWith('gid://') ? cid : `gid://shopify/Customer/${cid}`;
 
-    const data = await shopifyGraphQL(mutation, variables);
+// (valfritt men mycket hjälpsamt i Render-loggen)
+console.log('profile/update customer id:', cid, '→', customerGid);
+
+const variables = {
+  id: customerGid,
+  input: {
+    ...(firstName ? { firstName } : {}),
+    ...(lastName  ? { lastName  } : {}),
+    ...(email     ? { email     } : {})
+  }
+};
+
+const data = await shopifyGraphQL(mutation, variables);
+// Logga EXAKTA GraphQL-fel om de finns (så du slipper “Okänt fel”)
+if (data && data.errors) {
+  console.error('customerUpdate top-level errors:', JSON.stringify(data.errors));
+}
     const result = data?.data?.customerUpdate;
 
     if (!result || (result.userErrors && result.userErrors.length)) {
@@ -844,16 +855,28 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
         }
       }
     `;
-    const variables = {
-      id: `gid://shopify/Customer/${loggedInCustomerId}`,
-      input: {
-        ...(firstName ? { firstName } : {}),
-        ...(lastName  ? { lastName  } : {}),
-        ...(email     ? { email     } : {})
-      }
-    };
+    // Gör ID robust: acceptera både siffra och redan-formaterad GID
+const cid = String(loggedInCustomerId || '').trim();
+const customerGid = cid.startsWith('gid://') ? cid : `gid://shopify/Customer/${cid}`;
 
-    const data = await shopifyGraphQL(mutation, variables);
+// (valfritt men mycket hjälpsamt i Render-loggen)
+console.log('profile/update customer id:', cid, '→', customerGid);
+
+const variables = {
+  id: customerGid,
+  input: {
+    ...(firstName ? { firstName } : {}),
+    ...(lastName  ? { lastName  } : {}),
+    ...(email     ? { email     } : {})
+  }
+};
+
+const data = await shopifyGraphQL(mutation, variables);
+// Logga EXAKTA GraphQL-fel om de finns (så du slipper “Okänt fel”)
+if (data && data.errors) {
+  console.error('customerUpdate top-level errors:', JSON.stringify(data.errors));
+}
+
     const result = data?.data?.customerUpdate;
 
     if (!result || (result.userErrors && result.userErrors.length)) {
