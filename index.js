@@ -441,7 +441,7 @@ app.post('/proof/request-changes', async (req, res) => {
 
 // ===== APP PROXY: /apps/orders-meta =====
 // Verifiering av App Proxy-signatur (använder partner-appens "Klienthemlighet")
-function verifyAppProxySignature(search) {
+function xySignature(search) {
   const params = new URLSearchParams(search || "");
   const signature = params.get("signature");
   if (!signature) return false;
@@ -466,6 +466,9 @@ function verifyAppProxySignature(search) {
     return false;
   }
 }
+
+// alias: behåll all befintlig logik som anropar verifyAppProxySignature
+const verifyAppProxySignature = xySignature;
 
 // ===== APP PROXY: /proxy/avatar (mappar från /apps/pressify/avatar) =====
 app.all('/proxy/avatar', async (req, res) => {
@@ -686,9 +689,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
-
-
-
 
 
 
