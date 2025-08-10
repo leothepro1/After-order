@@ -515,39 +515,51 @@ app.all('/proxy/avatar', async (req, res) => {
       }
 
       if (action === 'save') {
-        if (!meta || (!meta.public_id && !meta.secure_url)) {
-          return res.status(400).json({ error: 'Invalid meta payload' });
-        }
+  // Tillåt spara enbart selection, eller bild, eller båda
+  if (!meta || (!meta.public_id && !meta.secure_url && typeof meta.selection === 'undefined')) {
+    return res.status(400).json({ error: 'Invalid meta payload' });
+  }
 
-        const payload = {
-          namespace: 'Profilbild',
-          key: 'Profilbild',
-          type: 'json',
-          value: JSON.stringify({
-            public_id:  String(meta.public_id || ''),
-            version:    meta.version || null,
-            secure_url: String(meta.secure_url || ''),
-            updatedAt:  new Date().toISOString(),
-            selection:  String(meta.selection || '')
-          })
-        };
+  // Hämta ev. befintligt värde så vi bevarar tidigare data
+  const mfRes2 = await axios.get(
+    `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+  const existing2 = (mfRes2.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
 
-        if (existing) {
-          await axios.put(
-            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-            { metafield: { id: existing.id, ...payload } },
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-        } else {
-          await axios.post(
-            `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
-            { metafield: payload },
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-        }
+  let existingValue = {};
+  try { existingValue = existing2?.value ? JSON.parse(existing2.value) : {}; } catch {}
 
-        return res.json({ ok: true });
-      }
+  const payload = {
+    namespace: 'Profilbild',
+    key: 'Profilbild',
+    type: 'json',
+    value: JSON.stringify({
+      public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
+      version:    meta.version ?? existingValue.version ?? null,
+      secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
+      updatedAt:  new Date().toISOString(),
+      selection:  String(meta.selection ?? existingValue.selection ?? '')
+    })
+  };
+
+  if (existing2) {
+    await axios.put(
+      `https://${SHOP}/admin/api/2025-07/metafields/${existing2.id}.json`,
+      { metafield: { id: existing2.id, ...payload } },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  } else {
+    await axios.post(
+      `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
+      { metafield: payload },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  }
+
+  return res.json({ ok: true });
+}
+
 
       return res.status(400).json({ error: 'Unknown action' });
     }
