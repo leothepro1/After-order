@@ -527,7 +527,8 @@ app.all('/proxy/avatar', async (req, res) => {
             public_id:  String(meta.public_id || ''),
             version:    meta.version || null,
             secure_url: String(meta.secure_url || ''),
-            updatedAt:  new Date().toISOString()
+            updatedAt:  new Date().toISOString(),
+            selection:  String(meta.selection || '')
           })
         };
 
