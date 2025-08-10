@@ -24,7 +24,7 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 // 🔽 Nya env för Partner-app & Proxy
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET; // används för App Proxy + OAuth-verifiering
-const SCOPES = process.env.SCOPES || 'read_orders,read_customers,read_metafields,write_app_proxy';
+const SCOPES = process.env.SCOPES || 'read_orders,read_customers,write_customers,read_metafields,write_app_proxy';
 const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(/\/$/, '');
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
@@ -76,6 +76,8 @@ const temporaryStorage = {}; // { [projectId]: { previewUrl, cloudinaryPublicId,
 app.use(bodyParser.json({ verify: (req, res, buf) => {
   req.rawBody = buf;
 }}));
+// ⬇️ NYTT: för att hantera application/x-www-form-urlencoded från HTML-formulär
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // Liten hälsosida så "Cannot GET /" försvinner
 app.get('/', (req, res) => res.type('text').send('OK'));
@@ -764,6 +766,116 @@ app.get('/proxy/orders-meta', async (req, res) => {
     }
   }
 });
+
+// ===== NYA APP PROXY-ROUTER FÖR PROFILUPPDATERING =====
+app.post('/proxy/profile/update', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'Invalid signature' });
+    }
+
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'Not logged in' });
+
+    const firstName = (req.body.first_name || '').trim();
+    const lastName  = (req.body.last_name  || '').trim();
+    const email     = (req.body.email      || '').trim();
+
+    const mutation = `
+      mutation customerUpdate($id: ID!, $input: CustomerInput!) {
+        customerUpdate(id: $id, input: $input) {
+          customer { id firstName lastName email }
+          userErrors { field message }
+        }
+      }
+    `;
+    const variables = {
+      id: `gid://shopify/Customer/${loggedInCustomerId}`,
+      input: {
+        ...(firstName ? { firstName } : {}),
+        ...(lastName  ? { lastName  } : {}),
+        ...(email     ? { email     } : {})
+      }
+    };
+
+    const data = await shopifyGraphQL(mutation, variables);
+    const result = data?.data?.customerUpdate;
+
+    if (!result || (result.userErrors && result.userErrors.length)) {
+      if (req.get('accept')?.includes('application/json')) {
+        return res.status(400).json({ errors: result?.userErrors || [{ message: 'Okänt fel' }] });
+      }
+      const msg = encodeURIComponent(result?.userErrors?.[0]?.message || 'Kunde inte uppdatera profil');
+      return res.redirect(302, `/account?profile_error=${msg}`);
+    }
+
+    if (req.get('accept')?.includes('application/json')) {
+      return res.json({ ok: true, customer: result.customer });
+    }
+    return res.redirect(302, '/account');
+  } catch (err) {
+    console.error('profile/update error:', err?.response?.data || err.message);
+    if (req.get('accept')?.includes('application/json')) {
+      return res.status(500).json({ error: 'Internal error' });
+    }
+    return res.redirect(302, '/account?profile_error=Internal%20error');
+  }
+});
+
+// Duplicerad route för proxybas under /proxy/orders-meta (i linje med dina avatar-routes)
+app.post('/proxy/orders-meta/profile/update', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'Invalid signature' });
+    }
+
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'Not logged in' });
+
+    const firstName = (req.body.first_name || '').trim();
+    const lastName  = (req.body.last_name  || '').trim();
+    const email     = (req.body.email      || '').trim();
+
+    const mutation = `
+      mutation customerUpdate($id: ID!, $input: CustomerInput!) {
+        customerUpdate(id: $id, input: $input) {
+          customer { id firstName lastName email }
+          userErrors { field message }
+        }
+      }
+    `;
+    const variables = {
+      id: `gid://shopify/Customer/${loggedInCustomerId}`,
+      input: {
+        ...(firstName ? { firstName } : {}),
+        ...(lastName  ? { lastName  } : {}),
+        ...(email     ? { email     } : {})
+      }
+    };
+
+    const data = await shopifyGraphQL(mutation, variables);
+    const result = data?.data?.customerUpdate;
+
+    if (!result || (result.userErrors && result.userErrors.length)) {
+      if (req.get('accept')?.includes('application/json')) {
+        return res.status(400).json({ errors: result?.userErrors || [{ message: 'Okänt fel' }] });
+      }
+      const msg = encodeURIComponent(result?.userErrors?.[0]?.message || 'Kunde inte uppdatera profil');
+      return res.redirect(302, `/account?profile_error=${msg}`);
+    }
+
+    if (req.get('accept')?.includes('application/json')) {
+      return res.json({ ok: true, customer: result.customer });
+    }
+    return res.redirect(302, '/account');
+  } catch (err) {
+    console.error('profile/update error:', err?.response?.data || err.message);
+    if (req.get('accept')?.includes('application/json')) {
+      return res.status(500).json({ error: 'Internal error' });
+    }
+    return res.redirect(302, '/account?profile_error=Internal%20error');
+  }
+});
 // ===== END APP PROXY =====
 
 // Starta servern
@@ -771,8 +883,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
-
-
 
 
 
