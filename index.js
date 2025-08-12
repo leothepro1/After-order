@@ -30,7 +30,7 @@ const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created'
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 
 // 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
-const SHOP_ADMIN_PATTERN = SHOP ? ${SHOP}/admin/api/ : '/admin/api/';
+const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
 let __lastAdminCallAt = 0;
 
 axios.interceptors.request.use(async (config) => {
@@ -92,13 +92,13 @@ app.get('/auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   oauthStateStore[state] = shop;
 
-  const redirectUri = ${HOST}/auth/callback;
+  const redirectUri = `${HOST}/auth/callback`;
   const installUrl =
-    https://${shop}/admin/oauth/authorize +
-    ?client_id=${encodeURIComponent(SHOPIFY_API_KEY)} +
-    &scope=${encodeURIComponent(SCOPES)} +
-    &redirect_uri=${encodeURIComponent(redirectUri)} +
-    &state=${encodeURIComponent(state)};
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${encodeURIComponent(SHOPIFY_API_KEY)}` +
+    `&scope=${encodeURIComponent(SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${encodeURIComponent(state)}`;
 
   return res.redirect(installUrl);
 });
@@ -106,7 +106,7 @@ app.get('/auth', (req, res) => {
 // Verifiera HMAC på OAuth-queryn (använder hmac-param)
 function verifyOAuthHmac(query) {
   const { hmac, signature, ...rest } = query;
-  const ordered = Object.keys(rest).sort().map(k => ${k}=${Array.isArray(rest[k]) ? rest[k].join(',') : rest[k]}).join('&');
+  const ordered = Object.keys(rest).sort().map(k => `${k}=${Array.isArray(rest[k]) ? rest[k].join(',') : rest[k]}`).join('&');
   const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(ordered).digest('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(String(hmac || ''), 'utf8'));
@@ -123,7 +123,7 @@ app.get('/auth/callback', async (req, res) => {
   if (!verifyOAuthHmac(req.query)) return res.status(400).send('Invalid HMAC');
 
   try {
-    const tokenRes = await axios.post(https://${shop}/admin/oauth/access_token, {
+    const tokenRes = await axios.post(`https://${shop}/admin/oauth/access_token`, {
       client_id: SHOPIFY_API_KEY,
       client_secret: SHOPIFY_API_SECRET,
       code
@@ -166,7 +166,7 @@ app.post('/precheckout-store', (req, res) => {
     date: new Date().toISOString()
   };
 
-  console.log(💾 Sparade temporärt projekt för ${projectId});
+  console.log(`💾 Sparade temporärt projekt för ${projectId}`);
   res.sendStatus(200);
 });
 
@@ -225,7 +225,7 @@ app.post('/webhooks/order-created', async (req, res) => {
   try {
     // Hämta befintliga metafält (🔧 fixad URL)
     const existing = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json, {
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
         headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
       }
     );
@@ -250,13 +250,13 @@ app.post('/webhooks/order-created', async (req, res) => {
     // Uppdatera eller skapa metafältet
     if (currentMetafield) {
       await axios.put(
-        https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json,
+        `https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json`,
         { metafield: { id: currentMetafield.id, type: 'json', value: JSON.stringify(combined) } },
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
     } else {
       await axios.post(
-        https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
         { metafield: { namespace: 'order-created', key: 'order-created', type: 'json', value: JSON.stringify(combined) } },
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
@@ -277,7 +277,7 @@ app.get('/pages/korrektur', async (req, res) => {
 
   try {
     const ordersRes = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${customerId},
+      `https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${customerId}`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
@@ -286,7 +286,7 @@ app.get('/pages/korrektur', async (req, res) => {
 
     for (const order of orders) {
       const metafieldsRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/orders/${order.id}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/orders/${order.id}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
 
@@ -321,7 +321,7 @@ app.post('/proof/upload', async (req, res) => {
 
   try {
     const { data } = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
@@ -348,7 +348,7 @@ app.post('/proof/upload', async (req, res) => {
     if (!updated) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
 
     await axios.put(
-      https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json,
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
@@ -368,7 +368,7 @@ app.post('/proof/approve', async (req, res) => {
 
   try {
     const { data } = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
@@ -384,7 +384,7 @@ app.post('/proof/approve', async (req, res) => {
     });
 
     await axios.put(
-      https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json,
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
@@ -407,7 +407,7 @@ app.post('/proof/request-changes', async (req, res) => {
 
   try {
     const mfRes = await axios.get(
-      https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
     const metafield = mfRes.data.metafields.find(mf =>
@@ -436,7 +436,7 @@ app.post('/proof/request-changes', async (req, res) => {
 
     console.log('✨ Projects after update:', projects);
     const putRes = await axios.put(
-      https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json,
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
@@ -461,7 +461,7 @@ function xySignature(search) {
   Array.from(params.keys())
     .sort()
     .forEach((k) => {
-      parts.push(${k}=${params.getAll(k).join(",")});
+      parts.push(`${k}=${params.getAll(k).join(",")}`);
     });
 
   const message = parts.join("");
@@ -495,7 +495,7 @@ app.all('/proxy/avatar', async (req, res) => {
     if (req.method === 'GET') {
       // Hämta nuvarande metafält
       const mfRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
       const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
@@ -507,7 +507,7 @@ app.all('/proxy/avatar', async (req, res) => {
 
       // Hämta ev. befintligt metafält
       const existingRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
       const existing = (existingRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
@@ -515,7 +515,7 @@ app.all('/proxy/avatar', async (req, res) => {
       if (action === 'delete') {
         if (existing) {
           await axios.delete(
-            https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json,
+            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
             { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
           );
         }
@@ -573,13 +573,13 @@ app.all('/proxy/avatar', async (req, res) => {
 
         if (existing) {
           await axios.put(
-            https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json,
+            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
             { metafield: { id: existing.id, ...payload } },
             { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
           );
         } else {
           await axios.post(
-            https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+            `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
             { metafield: payload },
             { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
           );
@@ -610,7 +610,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
 
     if (req.method === 'GET') {
       const mfRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
       const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
@@ -621,7 +621,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
       const { action, meta } = req.body || {};
 
       const existingRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
       const existing = (existingRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
@@ -629,7 +629,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
       if (action === 'delete') {
         if (existing) {
           await axios.delete(
-            https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json,
+            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
             { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
           );
         }
@@ -653,7 +653,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
 
         // Hämta ev. befintligt metafält (för att bevara gamla värden)
         const mfRes2 = await axios.get(
-          https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+          `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
         const existing2 = (mfRes2.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
@@ -689,13 +689,13 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
 
         if (existing2) {
           await axios.put(
-            https://${SHOP}/admin/api/2025-07/metafields/${existing2.id}.json,
+            `https://${SHOP}/admin/api/2025-07/metafields/${existing2.id}.json`,
             { metafield: { id: existing2.id, ...payload } },
             { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
           );
         } else {
           await axios.post(
-            https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json,
+            `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
             { metafield: payload },
             { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
           );
@@ -721,7 +721,8 @@ app.use('/proxy/orders-meta', (req, res, next) => {
   try {
     const cid = req.query.logged_in_customer_id || 'anon';
     const first = req.query.first || '25';
-    const key = ${cid}:${first};
+    const scope = req.query.scope || 'customer';
+    const key = `${cid}:${first}:${scope}`;
 
     const hit = ordersMetaCache.get(key);
     if (hit && (Date.now() - hit.at) < 20000) {
@@ -744,7 +745,7 @@ app.use('/proxy/orders-meta', (req, res, next) => {
 
 // 🔹 Hjälp: GraphQL-anrop + GID -> numeric ID
 async function shopifyGraphQL(query, variables) {
-  const url = https://${SHOP}/admin/api/2025-07/graphql.json;
+  const url = `https://${SHOP}/admin/api/2025-07/graphql.json`;
   const res = await axios.post(url, { query, variables }, {
     headers: {
       'X-Shopify-Access-Token': ACCESS_TOKEN,
@@ -757,6 +758,42 @@ function gidToId(gid) {
   try { return gid.split('/').pop(); } catch { return gid; }
 }
 
+// 🔹 NYTT: Admin-kontroll via kundtaggar
+async function isAdminCustomer(customerId) {
+  try {
+    const resp = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/customers/${customerId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const tagsStr = String(resp.data?.customer?.tags || '');
+    const tags = tagsStr.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    return tags.includes('admin');
+  } catch (e) {
+    console.warn('isAdminCustomer(): kunde inte läsa kund', e?.response?.data || e.message);
+    return false;
+  }
+}
+
+// 🔹 Hjälp: bestäm om order ska räknas som levererad
+function isDeliveredOrderShape(o) {
+  const disp = String(o.displayFulfillmentStatus || o.display_delivery_status || '').toUpperCase();
+  const fs = String(o.fulfillmentStatus || '').toUpperCase();
+  if (disp === 'DELIVERED' || fs === 'FULFILLED') return true;
+
+  // Fallback: om metafältets projekt alla säger "Levererad"
+  try {
+    const arr = o.metafield ? JSON.parse(o.metafield) : [];
+    if (Array.isArray(arr) && arr.length) {
+      const allDelivered = arr.every(p => {
+        const s = String(p?.status || p?.tag || '').toLowerCase();
+        return s.includes('levererad');
+      });
+      if (allDelivered) return true;
+    }
+  } catch {}
+  return false;
+}
+
 app.get('/proxy/orders-meta', async (req, res) => {
   try {
     // 1) Säkerställ att anropet kommer från Shopify App Proxy
@@ -767,9 +804,53 @@ app.get('/proxy/orders-meta', async (req, res) => {
     const loggedInCustomerId = req.query.logged_in_customer_id; // sätts av Shopify
     if (!loggedInCustomerId) return res.status(204).end(); // ej inloggad kund
 
-    // 2) Hämta kundens ordrar + metafält i ETT GraphQL-anrop
     const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
-    const query = 
+    const scope = String(req.query.scope || '').toLowerCase();
+
+    // ===== NYTT: ADMIN-LÄGE (scope=all) – hämta ALLA ordrar och filtrera bort levererade =====
+    if (scope === 'all') {
+      const ok = await isAdminCustomer(loggedInCustomerId);
+      if (!ok) return res.status(403).json({ error: 'Forbidden' });
+
+      // GraphQL: hämta alla ordrar (status:any) + metafält
+      const query = `
+        query AllOrdersWithMetafield($first: Int!, $ns: String!, $key: String!) {
+          orders(first: $first, query: "status:any", sortKey: CREATED_AT, reverse: true) {
+            edges {
+              node {
+                id
+                name
+                processedAt
+                fulfillmentStatus
+                displayFulfillmentStatus
+                metafield(namespace: $ns, key: $key) { value }
+              }
+            }
+          }
+        }
+      `;
+      const data = await shopifyGraphQL(query, { first: limit, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+      if (data.errors) throw new Error('GraphQL error');
+
+      const edges = data?.data?.orders?.edges || [];
+      let out = edges.map(e => ({
+        id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
+        name: e.node.name,
+        processedAt: e.node.processedAt,
+        metafield: e.node.metafield ? e.node.metafield.value : null,
+        fulfillmentStatus: e.node.fulfillmentStatus || null,
+        displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
+      }));
+
+      // Filtrera bort levererade
+      out = out.filter(o => !isDeliveredOrderShape(o));
+
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ orders: out, admin: true });
+    }
+
+    // ===== BEFINTLIGT: Kundbundna ordrar (oförändrat beteende) =====
+    const query = `
       query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
         orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
           edges {
@@ -782,9 +863,9 @@ app.get('/proxy/orders-meta', async (req, res) => {
           }
         }
       }
-    ;
+    `;
     // Inkludera status:any så det matchar REST-listan (öppna/stängda)
-    const q = customer_id:${loggedInCustomerId} status:any;
+    const q = `customer_id:${loggedInCustomerId} status:any`;
     let data = await shopifyGraphQL(query, { first: limit, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
 
     if (data.errors) {
@@ -810,7 +891,7 @@ app.get('/proxy/orders-meta', async (req, res) => {
 
       const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
       const ordersRes = await axios.get(
-        https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc,
+        `https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
       const orders = ordersRes.data.orders || [];
@@ -818,7 +899,7 @@ app.get('/proxy/orders-meta', async (req, res) => {
       const out = [];
       for (const o of orders) {
         const mfRes = await axios.get(
-          https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json,
+          `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
         const mf = (mfRes.data.metafields || []).find(
@@ -872,7 +953,7 @@ app.post('/proxy/profile/update', async (req, res) => {
 
     // Kör uppdateringen via Admin REST
     const upRes = await axios.put(
-      https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json,
+      `https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json`,
       payload,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
     );
@@ -919,7 +1000,7 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
     };
 
     const upRes = await axios.put(
-      https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json,
+      `https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json`,
       payload,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
     );
@@ -941,8 +1022,9 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
 // Starta servern
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(🚀 Kör på port ${PORT});
+  console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
