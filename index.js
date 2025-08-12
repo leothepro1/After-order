@@ -714,7 +714,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
   }
 });
 
-// 🔰 NYTT: 20s micro-cache för /proxy/orders-meta (ingen ändring av själva route-handlern)
+// 🔰 NYTT: 20s micro-cache för /proxy/orders-meta (utökad med scope i nyckeln)
 const ordersMetaCache = new Map(); // key -> { at, data }
 
 app.use('/proxy/orders-meta', (req, res, next) => {
@@ -812,41 +812,79 @@ app.get('/proxy/orders-meta', async (req, res) => {
       const ok = await isAdminCustomer(loggedInCustomerId);
       if (!ok) return res.status(403).json({ error: 'Forbidden' });
 
-      // GraphQL: hämta alla ordrar (status:any) + metafält
-      const query = `
-        query AllOrdersWithMetafield($first: Int!, $ns: String!, $key: String!) {
-          orders(first: $first, query: "status:any", sortKey: CREATED_AT, reverse: true) {
-            edges {
-              node {
-                id
-                name
-                processedAt
-                fulfillmentStatus
-                displayFulfillmentStatus
-                metafield(namespace: $ns, key: $key) { value }
+      // Först: GraphQL
+      try {
+        const query = `
+          query AllOrdersWithMetafield($first: Int!, $ns: String!, $key: String!) {
+            orders(first: $first, query: "status:any", sortKey: CREATED_AT, reverse: true) {
+              edges {
+                node {
+                  id
+                  name
+                  processedAt
+                  fulfillmentStatus
+                  displayFulfillmentStatus
+                  metafield(namespace: $ns, key: $key) { value }
+                }
               }
             }
           }
+        `;
+        const data = await shopifyGraphQL(query, { first: limit, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+        if (data.errors) throw new Error('GraphQL error');
+
+        const edges = data?.data?.orders?.edges || [];
+        let out = edges.map(e => ({
+          id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
+          name: e.node.name,
+          processedAt: e.node.processedAt,
+          metafield: e.node.metafield ? e.node.metafield.value : null,
+          fulfillmentStatus: e.node.fulfillmentStatus || null,
+          displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
+        }));
+
+        out = out.filter(o => !isDeliveredOrderShape(o));
+
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({ orders: out, admin: true });
+      } catch (gqlErr) {
+        // REST-FALLBACK: hämta ALLA ordrar utan customer_id
+        try {
+          const ordersRes = await axios.get(
+            `https://${SHOP}/admin/api/2025-07/orders.json?status=any&limit=${limit}&order=created_at+desc`,
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+          const orders = ordersRes.data.orders || [];
+
+          const out = [];
+          for (const o of orders) {
+            const mfRes = await axios.get(
+              `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
+              { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+            );
+            const mf = (mfRes.data.metafields || []).find(
+              m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+            );
+            out.push({
+              id: o.id,
+              name: o.name,
+              processedAt: o.processed_at || o.created_at,
+              metafield: mf ? mf.value : null,
+              // håll fältnamnen kompatibla med frontend-filtret
+              fulfillmentStatus: o.fulfillment_status || null,
+              displayFulfillmentStatus: null
+            });
+          }
+
+          const filtered = out.filter(o => !isDeliveredOrderShape(o));
+
+          res.setHeader('Cache-Control', 'no-store');
+          return res.json({ orders: filtered, admin: true });
+        } catch (restErr) {
+          console.error('Admin REST fallback error:', restErr?.response?.data || restErr.message);
+          return res.status(500).json({ error: 'Internal error' });
         }
-      `;
-      const data = await shopifyGraphQL(query, { first: limit, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
-      if (data.errors) throw new Error('GraphQL error');
-
-      const edges = data?.data?.orders?.edges || [];
-      let out = edges.map(e => ({
-        id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
-        name: e.node.name,
-        processedAt: e.node.processedAt,
-        metafield: e.node.metafield ? e.node.metafield.value : null,
-        fulfillmentStatus: e.node.fulfillmentStatus || null,
-        displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
-      }));
-
-      // Filtrera bort levererade
-      out = out.filter(o => !isDeliveredOrderShape(o));
-
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ orders: out, admin: true });
+      }
     }
 
     // ===== BEFINTLIGT: Kundbundna ordrar (oförändrat beteende) =====
@@ -1024,6 +1062,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
