@@ -214,8 +214,8 @@ app.post('/webhooks/order-created', async (req, res) => {
       instructions,     // <-- nu inkluderar vi både property- eller fallback-instruktioner
       customerId,
       orderNumber,
-      status:            'Väntar på korrektur',
-      tag:               'Väntar på korrektur',
+      status:            'Tar fram korrektur',
+      tag:               'Tar fram korrektur',
       date:              new Date().toISOString()
     };
   });
@@ -297,7 +297,7 @@ app.get('/pages/korrektur', async (req, res) => {
 
       const projects = JSON.parse(proofMetafield.value || '[]');
       const enriched = projects.map(p => ({ ...p, orderId: order.id }));
-      const awaiting = enriched.filter(p => p.status === 'Väntar på godkännande');
+      const awaiting = enriched.filter(p => p.status === 'Korrektur redo');
 
       results.push(...awaiting);
     }
@@ -333,7 +333,7 @@ app.post('/proof/upload', async (req, res) => {
     projects = projects.map(p => {
       if (p.lineItemId == lineItemId) {
         updated = true;
-        return { ...p, previewUrl, status: 'Väntar på godkännande' };
+        return { ...p, previewUrl, status: 'Korrektur redo' };
       }
       return p;
     });
@@ -370,7 +370,7 @@ app.post('/proof/approve', async (req, res) => {
     let projects = JSON.parse(metafield.value || '[]');
     projects = projects.map(p => {
       if (p.lineItemId == lineItemId) {
-        return { ...p, status: 'Godkänd' };
+        return { ...p, status: 'Redo för tryck' };
       }
       return p;
     });
@@ -416,7 +416,7 @@ app.post('/proof/request-changes', async (req, res) => {
     projects = projects.map(p => {
       if (String(p.lineItemId) === String(lineItemId)) {
         updated = true;
-        return { ...p, instructions, status: 'Väntar på korrektur', tag: 'Väntar på korrektur' };
+        return { ...p, instructions, status: 'Tar fram korrektur', tag: 'Tar fram korrektur' };
       }
       return p;
     });
