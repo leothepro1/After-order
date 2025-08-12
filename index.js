@@ -79,6 +79,21 @@ app.use(bodyParser.json({ verify: (req, res, buf) => {
 // ⬇️ NYTT: för att hantera application/x-www-form-urlencoded från HTML-formulär
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// ✅ NYTT (icke-brytande): enkel aktivitetslogg per projekt
+const ACTIVITY_PER_PROJECT_MAX = parseInt(process.env.ACTIVITY_PER_PROJECT_MAX || '50', 10);
+function appendActivity(project, entry) {
+  try {
+    const existing = Array.isArray(project.activity) ? project.activity : [];
+    const kept = existing.length >= ACTIVITY_PER_PROJECT_MAX
+      ? existing.slice(existing.length - (ACTIVITY_PER_PROJECT_MAX - 1))
+      : existing.slice(0);
+    kept.push({ ts: new Date().toISOString(), ...entry });
+    return { ...project, activity: kept };
+  } catch {
+    return { ...project, activity: [{ ts: new Date().toISOString(), ...entry }] };
+  }
+}
+
 // Liten hälsosida så "Cannot GET /" försvinner
 app.get('/', (req, res) => res.type('text').send('OK'));
 app.get('/healthz', (req, res) => res.json({ ok: true }));
@@ -334,13 +349,18 @@ app.post('/proof/upload', async (req, res) => {
     projects = projects.map(p => {
       if (p.lineItemId == lineItemId) {
         updated = true;
-        return {
+        return appendActivity({
           ...p,
           previewUrl,
           // ⬇️ NYTT: spara texten om den skickas (i övrigt oförändrat)
           ...(typeof proofNote === 'string' && proofNote.trim() ? { proofNote: proofNote.trim() } : {}),
           status: 'Korrektur redo'
-        };
+        }, {
+          actor: 'Pressify',
+          type:  'proof.uploaded',
+          previewUrl,
+          proofNote: (typeof proofNote === 'string' && proofNote.trim()) ? proofNote.trim() : null
+        });
       }
       return p;
     });
@@ -378,7 +398,10 @@ app.post('/proof/approve', async (req, res) => {
     let projects = JSON.parse(metafield.value || '[]');
     projects = projects.map(p => {
       if (p.lineItemId == lineItemId) {
-        return { ...p, status: 'Redo för tryck' };
+        return appendActivity({ ...p, status: 'Redo för tryck' }, {
+          actor: 'Customer',
+          type:  'proof.approved'
+        });
       }
       return p;
     });
@@ -424,7 +447,11 @@ app.post('/proof/request-changes', async (req, res) => {
     projects = projects.map(p => {
       if (String(p.lineItemId) === String(lineItemId)) {
         updated = true;
-        return { ...p, instructions, status: 'Tar fram korrektur', tag: 'Tar fram korrektur' };
+        return appendActivity({ ...p, instructions, status: 'Tar fram korrektur', tag: 'Tar fram korrektur' }, {
+          actor: 'Customer',
+          type:  'proof.changes_requested',
+          instructions
+        });
       }
       return p;
     });
@@ -943,6 +970,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
 
 
