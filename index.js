@@ -315,7 +315,8 @@ app.get('/pages/korrektur', async (req, res) => {
 
 // Uppdatera korrektur-status (när du laddar upp korrekturbild)
 app.post('/proof/upload', async (req, res) => {
-  const { orderId, lineItemId, previewUrl } = req.body;
+  // ⬇️ NYTT: valfritt fält proofNote (bakåtkompatibelt)
+  const { orderId, lineItemId, previewUrl, proofNote } = req.body;
   if (!orderId || !lineItemId || !previewUrl) return res.status(400).json({ error: 'orderId, lineItemId och previewUrl krävs' });
 
   try {
@@ -333,7 +334,13 @@ app.post('/proof/upload', async (req, res) => {
     projects = projects.map(p => {
       if (p.lineItemId == lineItemId) {
         updated = true;
-        return { ...p, previewUrl, status: 'Korrektur redo' };
+        return {
+          ...p,
+          previewUrl,
+          // ⬇️ NYTT: spara texten om den skickas (i övrigt oförändrat)
+          ...(typeof proofNote === 'string' && proofNote.trim() ? { proofNote: proofNote.trim() } : {}),
+          status: 'Korrektur redo'
+        };
       }
       return p;
     });
@@ -352,6 +359,7 @@ app.post('/proof/upload', async (req, res) => {
     res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
   }
 });
+
 
 // Godkänn korrektur
 app.post('/proof/approve', async (req, res) => {
