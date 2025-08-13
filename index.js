@@ -244,9 +244,36 @@ async function getCustomerNameByOrder(orderId) {
 }
 /* ========================== END ACTIVITY LOG =========================== */
 
+// === ACTIVITY: Läs-endpoint (påverkar inte övrig logik)
+app.get('/activity', async (req, res) => {
+  try {
+    const orderId = req.query.orderId;
+    if (!orderId) return res.status(400).json({ error: 'orderId krävs' });
+
+    const { log } = await getActivityLog(orderId);
+
+    // Valfri filtrering per line item: ?lineItemId=...
+    const lineItemId = req.query.lineItemId;
+    let out = Array.isArray(log) ? log.slice() : [];
+    if (lineItemId != null) {
+      out = out.filter(e => String(e?.line_item_id) === String(lineItemId));
+    }
+
+    // sortera äldst → nyast
+    out.sort((a,b) => new Date(a?.ts || 0) - new Date(b?.ts || 0));
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ log: out });
+  } catch (e) {
+    console.error('GET /activity error:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 // Tar emot förhandsdata innan order läggs
 app.post('/precheckout-store', (req, res) => {
   const { projectId, previewUrl, cloudinaryPublicId, instructions } = req.body;
+
 
   if (!projectId || !previewUrl) {
     return res.status(400).json({ error: 'projectId och previewUrl krävs' });
