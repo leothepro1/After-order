@@ -151,6 +151,99 @@ function verifyShopifyRequest(req) {
   return digest === hmacHeader;
 }
 
+/* ============================================================
+   ==== ACTIVITY LOG: Helper-funktioner (namespace=activity) ===
+   - LÄSER/SKRIVER order.metafields.activity.activity (type=json)
+   - Påverkar INTE befintlig order-created-logik
+   ============================================================ */
+const ACTIVITY_NS = 'activity';
+const ACTIVITY_KEY = 'activity';
+
+// Hämta/parse:a aktivitetslogg (array) för en order
+async function getActivityLog(orderId) {
+  try {
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const mf = (data.metafields || []).find(m => m.namespace === ACTIVITY_NS && m.key === ACTIVITY_KEY);
+    if (!mf) return { metafieldId: null, log: [] };
+    try {
+      const arr = JSON.parse(mf.value || '[]');
+      return { metafieldId: mf.id, log: Array.isArray(arr) ? arr : [] };
+    } catch {
+      return { metafieldId: mf.id, log: [] };
+    }
+  } catch (e) {
+    console.warn('getActivityLog():', e?.response?.data || e.message);
+    return { metafieldId: null, log: [] };
+  }
+}
+
+// Skriv (PUT/POST) aktivitetslogg (array) till order
+async function writeActivityLog(orderId, metafieldId, logArray) {
+  const payload = { metafield: { type: 'json', value: JSON.stringify(logArray) } };
+  try {
+    if (metafieldId) {
+      // PUT
+      await axios.put(
+        `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
+        { metafield: { id: metafieldId, ...payload.metafield, namespace: ACTIVITY_NS, key: ACTIVITY_KEY } },
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+    } else {
+      // POST
+      await axios.post(
+        `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+        { metafield: { namespace: ACTIVITY_NS, key: ACTIVITY_KEY, ...payload.metafield } },
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+    }
+  } catch (e) {
+    console.warn('writeActivityLog():', e?.response?.data || e.message);
+  }
+}
+
+// Lägg till entries i aktivitetslogg med enkel idempotens på correlation_id
+async function appendActivity(orderId, entries) {
+  try {
+    if (!orderId || !Array.isArray(entries) || !entries.length) return;
+    const { metafieldId, log } = await getActivityLog(orderId);
+
+    // Idempotens: om entry har correlation_id och den redan finns, hoppa över
+    const have = new Set(log.map(e => e && e.correlation_id).filter(Boolean));
+    const toAdd = entries.filter(e => {
+      if (!e || typeof e !== 'object') return false;
+      if (e.correlation_id && have.has(e.correlation_id)) return false;
+      return true;
+    });
+    if (!toAdd.length) return;
+
+    const next = log.concat(toAdd);
+    await writeActivityLog(orderId, metafieldId, next);
+  } catch (e) {
+    console.warn('appendActivity():', e?.response?.data || e.message);
+  }
+}
+
+// Hjälp: hämta kundnamn (för request-changes/approve)
+async function getCustomerNameByOrder(orderId) {
+  try {
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const c = data?.order?.customer || {};
+    const first = (c.first_name || '').trim();
+    const last = (c.last_name || '').trim();
+    const full = [first, last].filter(Boolean).join(' ').trim();
+    return { name: full || 'Kund', id: c.id ? `customer:${c.id}` : undefined };
+  } catch {
+    return { name: 'Kund' };
+  }
+}
+/* ========================== END ACTIVITY LOG =========================== */
+
 // Tar emot förhandsdata innan order läggs
 app.post('/precheckout-store', (req, res) => {
   const { projectId, previewUrl, cloudinaryPublicId, instructions } = req.body;
@@ -263,6 +356,43 @@ app.post('/webhooks/order-created', async (req, res) => {
     }
 
     console.log('✅ Metafält sparat!');
+
+    /* ==== ACTIVITY LOG: Första loggen per line item (file.uploaded) ==== */
+    try {
+      const customerName = ((order.customer?.first_name || '') + ' ' + (order.customer?.last_name || '')).trim() || 'Kund';
+      const customerActor = { type: 'customer', name: customerName, id: customerId ? `customer:${customerId}` : undefined };
+      const ts = order.processed_at || order.created_at || new Date().toISOString();
+
+      const firstEntries = combined.map(p => {
+        // Hitta filnamn från property "Tryckfil"
+        let fileName = '';
+        try {
+          fileName = (p.properties || []).find(x => x && x.name === 'Tryckfil')?.value || '';
+        } catch {}
+        const entry = {
+          ts,
+          actor: customerActor,
+          action: 'file.uploaded',
+          order_id: orderId,
+          line_item_id: p.lineItemId,
+          product_title: p.productTitle,
+          project_id: fileName || undefined,
+          data: Object.assign(
+            {},
+            fileName ? { fileName } : {},
+            p.instructions ? { instructions: String(p.instructions) } : {}
+          ),
+          correlation_id: `order.created:${orderId}:${p.lineItemId}`
+        };
+        return entry;
+      });
+
+      await appendActivity(orderId, firstEntries);
+    } catch (e) {
+      console.warn('order-created → appendActivity misslyckades:', e?.response?.data || e.message);
+    }
+    /* ======================= END ACTIVITY LOG ======================= */
+
     res.sendStatus(200);
   } catch (err) {
     console.error('❌ Fel vid webhook/order-created:', err?.response?.data || err.message);
@@ -353,6 +483,29 @@ app.post('/proof/upload', async (req, res) => {
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
+    /* ==== ACTIVITY LOG: Pressify laddade upp korrektur ==== */
+    try {
+      const proj = projects.find(p => String(p.lineItemId) === String(lineItemId)) || {};
+      const fileName = (() => {
+        try { return (proj.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch { return ''; }
+      })();
+
+      await appendActivity(orderId, [{
+        ts: new Date().toISOString(),
+        actor: { type: 'admin', name: 'Pressify' },
+        action: 'proof.uploaded',
+        order_id: Number(orderId),
+        line_item_id: Number(lineItemId),
+        product_title: proj.productTitle || '',
+        project_id: fileName || undefined,
+        data: Object.assign({ previewUrl }, (proofNote && proofNote.trim() ? { note: proofNote.trim() } : {})),
+        correlation_id: `proof.uploaded:${orderId}:${lineItemId}:${previewUrl}`
+      }]);
+    } catch (e) {
+      console.warn('/proof/upload → appendActivity misslyckades:', e?.response?.data || e.message);
+    }
+    /* ======================= END ACTIVITY LOG ======================= */
+
     res.sendStatus(200);
   } catch (err) {
     console.error('❌ Fel vid /proof/upload:', err?.response?.data || err.message);
@@ -388,6 +541,30 @@ app.post('/proof/approve', async (req, res) => {
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
+
+    /* ==== ACTIVITY LOG: Kund godkände korrektur ==== */
+    try {
+      const proj = projects.find(p => String(p.lineItemId) === String(lineItemId)) || {};
+      const fileName = (() => {
+        try { return (proj.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch { return ''; }
+      })();
+      const cust = await getCustomerNameByOrder(orderId);
+
+      await appendActivity(orderId, [{
+        ts: new Date().toISOString(),
+        actor: { type: 'customer', name: cust.name, id: cust.id },
+        action: 'proof.approved',
+        order_id: Number(orderId),
+        line_item_id: Number(lineItemId),
+        product_title: proj.productTitle || '',
+        project_id: fileName || undefined,
+        data: {},
+        correlation_id: `proof.approved:${orderId}:${lineItemId}`
+      }]);
+    } catch (e) {
+      console.warn('/proof/approve → appendActivity misslyckades:', e?.response?.data || e.message);
+    }
+    /* ======================= END ACTIVITY LOG ======================= */
 
     res.sendStatus(200);
   } catch (err) {
@@ -441,6 +618,30 @@ app.post('/proof/request-changes', async (req, res) => {
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
     console.log('✅ Shopify response for request-changes:', putRes.status);
+
+    /* ==== ACTIVITY LOG: Kund begärde ändringar ==== */
+    try {
+      const proj = projects.find(p => String(p.lineItemId) === String(lineItemId)) || {};
+      const fileName = (() => {
+        try { return (proj.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch { return ''; }
+      })();
+      const cust = await getCustomerNameByOrder(orderId);
+
+      await appendActivity(orderId, [{
+        ts: new Date().toISOString(),
+        actor: { type: 'customer', name: cust.name, id: cust.id },
+        action: 'changes.requested',
+        order_id: Number(orderId),
+        line_item_id: Number(lineItemId),
+        product_title: proj.productTitle || '',
+        project_id: fileName || undefined,
+        data: { instructions: String(instructions || '').trim() },
+        correlation_id: `changes.requested:${orderId}:${lineItemId}:${crypto.createHash('sha256').update(String(instructions || '')).digest('hex')}`
+      }]);
+    } catch (e) {
+      console.warn('/proof/request-changes → appendActivity misslyckades:', e?.response?.data || e.message);
+    }
+    /* ======================= END ACTIVITY LOG ======================= */
 
     res.json({ success: true });
   } catch (err) {
