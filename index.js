@@ -558,7 +558,7 @@ app.post('/proof/approve', async (req, res) => {
     let projects = JSON.parse(metafield.value || '[]');
     projects = projects.map(p => {
       if (p.lineItemId == lineItemId) {
-        return { ...p, status: 'Redo för tryck' };
+        return { ...p, status: 'I produktion' };
       }
       return p;
     });
