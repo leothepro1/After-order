@@ -555,13 +555,19 @@ app.post('/proof/approve', async (req, res) => {
     const metafield = data.metafields.find(mf => mf.namespace === 'order-created' && mf.key === 'order-created');
     if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
 
-    let projects = JSON.parse(metafield.value || '[]');
-    projects = projects.map(p => {
-      if (p.lineItemId == lineItemId) {
-        return { ...p, status: 'I produktion' };
-      }
-      return p;
-    });
+let projects = JSON.parse(metafield.value || '[]');
+projects = projects.map(p => {
+  if (p.lineItemId == lineItemId) {
+    return {
+      ...p,
+      status: 'I produktion',
+      // 👇 Promote approved proof → becomes the image shown på ordersidan
+      preview_img: p.previewUrl || p.preview_img || null
+    };
+  }
+  return p;
+});
+
 
     await axios.put(
       `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
