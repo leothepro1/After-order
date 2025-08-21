@@ -1433,7 +1433,6 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
 });
 // ===== END APP PROXY =====
 
-// Publik vy via token – returnerar snapshot + safe fields för rätt lineItem
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -1452,21 +1451,47 @@ app.get('/proof/share/:token', async (req, res) => {
     );
     if (!share) return res.status(410).json({ error: 'Superseded or revoked' });
 
+    // Hämta ordersammanfattning (frivilligt)
+    let summary = null;
+    try {
+      const { data: oRes } = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const o = oRes?.order || {};
+      const ship =
+        (o.total_shipping_price_set?.presentment_money?.amount) ??
+        (o.total_shipping_price_set?.shop_money?.amount) ??
+        (Array.isArray(o.shipping_lines) ? o.shipping_lines.reduce((s,ln)=> s + parseFloat(ln.price||0), 0) : 0);
+
+      summary = {
+        name: o.name || null,
+        currency: o.currency || 'SEK',
+        subtotal_price: o.subtotal_price || null,
+        shipping_price: ship != null ? String(ship) : null,
+        total_price: o.total_price || null
+      };
+    } catch(e) {
+      console.warn('share summary fetch failed:', e?.response?.data || e.message);
+    }
+
     res.setHeader('Cache-Control', 'no-store');
     return res.json({
       project: {
         orderId,
         lineItemId,
+        ...(proj.orderNumber ? { orderNumber: proj.orderNumber } : {}),
         ...safeProjectFields(proj)
       },
-      snapshot: share.snapshot || {}
+      snapshot: share.snapshot || {},
+      ...(summary ? { summary } : {})
     });
+
   } catch (e) {
     console.error('GET /proof/share/:token error:', e?.response?.data || e.message);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
-
 
 
 // Starta servern
