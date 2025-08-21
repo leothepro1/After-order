@@ -28,6 +28,11 @@ const SCOPES = process.env.SCOPES || 'read_orders,read_customers,write_customers
 const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(/\/$/, '');
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
+// överst bland konfig:
+// Publik butik (för delningslänkar till Shopify-sidan)
+const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
+const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
+
 
 /* ===== PROOF TOKEN CONFIG & HELPERS (NYTT) ===== */
 const PROOF_TOKEN_SECRET = process.env.PROOF_TOKEN_SECRET || 'CHANGE_ME_LONG_RANDOM';
@@ -617,9 +622,15 @@ app.post('/proof/upload', async (req, res) => {
       console.warn('/proof/upload → appendActivity misslyckades:', e?.response?.data || e.message);
     }
 
-    // 7) Svara med token + url
-    const url = `${HOST}/pages/proof/${encodeURIComponent(token)}`;
-    return res.json({ ok: true, token, url });
+// 7) Svara med token + URL till butikens publika sida (Shopify pages kan inte ha dynamiska segments)
+// Använd query-param: /pages/proof?token=...
+const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
+
+// (valfritt) skicka även backend-länken om du vill felsöka
+const backendShare = `${HOST}/proof/share/${encodeURIComponent(token)}`;
+
+return res.json({ ok: true, token, url, backendShare });
+
   } catch (err) {
     console.error('❌ Fel vid /proof/upload:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
