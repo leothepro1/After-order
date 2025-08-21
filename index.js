@@ -29,6 +29,77 @@ const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 
+/* ===== PROOF TOKEN CONFIG & HELPERS (NYTT) ===== */
+const PROOF_TOKEN_SECRET = process.env.PROOF_TOKEN_SECRET || 'CHANGE_ME_LONG_RANDOM';
+const PROOF_SNAPSHOT_ACTIVITY_LIMIT = parseInt(process.env.PROOF_SNAPSHOT_ACTIVITY_LIMIT || '20', 10);
+
+// b64url helpers
+function b64url(input) {
+  return Buffer.from(input).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function fromB64url(input) {
+  input = String(input || '').replace(/-/g,'+').replace(/_/g,'/');
+  while (input.length % 4) input += '=';
+  return Buffer.from(input, 'base64').toString('utf8');
+}
+
+// token: payload { orderId, lineItemId, tid, iat }
+function signTokenPayload(payloadObj){
+  const payload = JSON.stringify(payloadObj);
+  const p64 = b64url(payload);
+  const sig = crypto.createHmac('sha256', PROOF_TOKEN_SECRET).update(p64).digest('base64url');
+  return `${p64}.${sig}`;
+}
+function verifyAndParseToken(token){
+  const parts = String(token || '').split('.');
+  if (parts.length !== 2) return null;
+  const [p64, sig] = parts;
+  const expSig = crypto.createHmac('sha256', PROOF_TOKEN_SECRET).update(p64).digest('base64url');
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expSig))) return null;
+  } catch { return null; }
+  try { return JSON.parse(fromB64url(p64)); } catch { return null; }
+}
+function newTid(){ return crypto.randomBytes(8).toString('hex'); } // per-token id
+function nowIso(){ return new Date().toISOString(); }
+
+// Läs/skriv order-created
+async function readOrderProjects(orderId) {
+  const { data } = await axios.get(
+    `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+  const mf = (data.metafields || []).find(m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY);
+  if (!mf) return { metafieldId: null, projects: [] };
+  try { return { metafieldId: mf.id, projects: JSON.parse(mf.value || '[]') || [] }; }
+  catch { return { metafieldId: mf.id, projects: [] }; }
+}
+async function writeOrderProjects(metafieldId, projects) {
+  await axios.put(
+    `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
+    { metafield: { id: metafieldId, type: 'json', value: JSON.stringify(projects) } },
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+}
+
+// Snapshot helpers
+function safeProjectFields(p){
+  return {
+    previewUrl: p.previewUrl || p.preview_img || null,
+    productTitle: p.productTitle || '',
+    quantity: typeof p.quantity === 'number' ? p.quantity : 1,
+    proofNote: p.proofNote || null
+  };
+}
+function sliceActivityForLine(log, lineItemId){
+  const arr = Array.isArray(log) ? log.filter(e => String(e?.line_item_id) === String(lineItemId)) : [];
+  arr.sort((a,b)=> new Date(a?.ts||0) - new Date(b?.ts||0)); // äldst → nyast
+  const cut = Math.max(0, arr.length - PROOF_SNAPSHOT_ACTIVITY_LIMIT);
+  return arr.slice(cut);
+}
+/* ===== END PROOF TOKEN HELPERS ===== */
+
+
 // 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
 const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
 let __lastAdminCallAt = 0;
@@ -471,52 +542,66 @@ app.get('/pages/korrektur', async (req, res) => {
 });
 
 // Uppdatera korrektur-status (när du laddar upp korrekturbild)
+// Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
 app.post('/proof/upload', async (req, res) => {
-  // ⬇️ NYTT: valfritt fält proofNote (bakåtkompatibelt)
   const { orderId, lineItemId, previewUrl, proofNote } = req.body;
   if (!orderId || !lineItemId || !previewUrl) return res.status(400).json({ error: 'orderId, lineItemId och previewUrl krävs' });
 
   try {
-    const { data } = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-    );
+    // Läs order-created
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) return res.status(404).json({ error: 'Metafält hittades inte' });
 
-    const metafield = data.metafields.find(mf => mf.namespace === 'order-created' && mf.key === 'order-created');
-    if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
-
-    let projects = JSON.parse(metafield.value || '[]');
-    let updated = false;
-
-    projects = projects.map(p => {
-      if (p.lineItemId == lineItemId) {
-        updated = true;
+    // 1) Uppdatera preview/status (som tidigare)
+    let exists = false;
+    const nextProjects = projects.map(p => {
+      if (String(p.lineItemId) === String(lineItemId)) {
+        exists = true;
         return {
           ...p,
           previewUrl,
-          // ⬇️ NYTT: spara texten om den skickas (i övrigt oförändrat)
           ...(typeof proofNote === 'string' && proofNote.trim() ? { proofNote: proofNote.trim() } : {}),
           status: 'Korrektur redo'
         };
       }
       return p;
     });
+    if (!exists) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
 
-    if (!updated) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
+    // 2) Snapshot: “första” activity-hämtningen (för snabb token-vy)
+    const { log } = await getActivityLog(orderId);
+    const snapActivity = sliceActivityForLine(log, lineItemId);
+    const projAfter = nextProjects.find(p => String(p.lineItemId) === String(lineItemId));
+    const snap = { ...safeProjectFields(projAfter), activity: snapActivity, hideActivity: false };
 
-    await axios.put(
-      `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
-      { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-    );
+    // 3) Generera token + tid (kort id)
+    const tid = newTid();
+    const token = signTokenPayload({ orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
 
-    /* ==== ACTIVITY LOG: Pressify laddade upp korrektur ==== */
+    // 4) Rotera shares[] under rätt line item
+    const rotated = nextProjects.map(p => {
+      if (String(p.lineItemId) !== String(lineItemId)) return p;
+      const prev = Array.isArray(p.shares) ? p.shares : [];
+      const superseded = prev.map(s => ({ ...s, status: s.status === 'active' ? 'superseded' : (s.status || 'superseded') }));
+      const share = {
+        tid,
+        token_hash: crypto.createHash('sha256').update(token).digest('hex'),
+        status: 'active',
+        createdAt: nowIso(),
+        snapshot: snap
+      };
+      return { ...p, shares: [share, ...superseded].slice(0, 10), latestToken: tid };
+    });
+
+    // 5) Spara tillbaka i SAMMA metafält
+    await writeOrderProjects(metafieldId, rotated);
+
+    // 6) Logga som tidigare
     try {
-      const proj = projects.find(p => String(p.lineItemId) === String(lineItemId)) || {};
+      const proj = rotated.find(p => String(p.lineItemId) === String(lineItemId)) || {};
       const fileName = (() => {
         try { return (proj.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch { return ''; }
       })();
-
       await appendActivity(orderId, [{
         ts: new Date().toISOString(),
         actor: { type: 'admin', name: 'Pressify' },
@@ -531,14 +616,16 @@ app.post('/proof/upload', async (req, res) => {
     } catch (e) {
       console.warn('/proof/upload → appendActivity misslyckades:', e?.response?.data || e.message);
     }
-    /* ======================= END ACTIVITY LOG ======================= */
 
-    res.sendStatus(200);
+    // 7) Svara med token + url
+    const url = `${HOST}/pages/proof/${encodeURIComponent(token)}`;
+    return res.json({ ok: true, token, url });
   } catch (err) {
     console.error('❌ Fel vid /proof/upload:', err?.response?.data || err.message);
-    res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
+    return res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
   }
 });
+
 
 
 // Godkänn korrektur
@@ -598,6 +685,26 @@ projects = projects.map(p => {
       console.warn('/proof/approve → appendActivity misslyckades:', e?.response?.data || e.message);
     }
     /* ======================= END ACTIVITY LOG ======================= */
+    // 🧹 NYTT: Dölj activity i aktiv share.snapshot för tokensidan, men behåll preview/product/qty
+    try {
+      const { metafieldId, projects: prj2 } = await readOrderProjects(orderId);
+      if (metafieldId && Array.isArray(prj2)) {
+        const idx = prj2.findIndex(p => String(p.lineItemId) === String(lineItemId));
+        if (idx >= 0) {
+          const p = prj2[idx];
+          const shares = Array.isArray(p.shares) ? p.shares : [];
+          const activeIdx = shares.findIndex(s => s && s.status === 'active');
+          if (activeIdx >= 0) {
+            const snap = { ...(shares[activeIdx].snapshot || {}) };
+            shares[activeIdx] = { ...shares[activeIdx], snapshot: { ...snap, hideActivity: true } };
+            prj2[idx] = { ...p, shares };
+            await writeOrderProjects(metafieldId, prj2);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('mark hideActivity on approve failed:', e?.response?.data || e.message);
+    }
 
     res.sendStatus(200);
   } catch (err) {
@@ -675,6 +782,30 @@ app.post('/proof/request-changes', async (req, res) => {
       console.warn('/proof/request-changes → appendActivity misslyckades:', e?.response?.data || e.message);
     }
     /* ======================= END ACTIVITY LOG ======================= */
+    // 🔁 NYTT: Spegla senaste activity in i aktiv share.snapshot.activity
+    try {
+      const { metafieldId, projects: prj2 } = await readOrderProjects(orderId);
+      if (metafieldId && Array.isArray(prj2)) {
+        const idx = prj2.findIndex(p => String(p.lineItemId) === String(lineItemId));
+        if (idx >= 0) {
+          const p = prj2[idx];
+          const shares = Array.isArray(p.shares) ? p.shares : [];
+          const activeIdx = shares.findIndex(s => s && s.status === 'active');
+          if (activeIdx >= 0) {
+            const { log } = await getActivityLog(orderId);
+            const merged = sliceActivityForLine(log, lineItemId); // “första + nya”
+            shares[activeIdx] = {
+              ...shares[activeIdx],
+              snapshot: { ...(shares[activeIdx].snapshot || {}), activity: merged }
+            };
+            prj2[idx] = { ...p, shares };
+            await writeOrderProjects(metafieldId, prj2);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('mirror activity into active share failed:', e?.response?.data || e.message);
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -1290,6 +1421,42 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
   }
 });
 // ===== END APP PROXY =====
+
+// Publik vy via token – returnerar snapshot + safe fields för rätt lineItem
+app.get('/proof/share/:token', async (req, res) => {
+  try {
+    const token = req.params.token || '';
+    const payload = verifyAndParseToken(token);
+    if (!payload) return res.status(401).json({ error: 'Ogiltig token' });
+
+    const { orderId, lineItemId, tid } = payload || {};
+    if (!orderId || !lineItemId || !tid) return res.status(400).json({ error: 'Bad payload' });
+
+    const { projects } = await readOrderProjects(orderId);
+    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+
+    const share = (Array.isArray(proj.shares) ? proj.shares : []).find(s =>
+      s && s.status === 'active' && String(s.tid) === String(tid)
+    );
+    if (!share) return res.status(410).json({ error: 'Superseded or revoked' });
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      project: {
+        orderId,
+        lineItemId,
+        ...safeProjectFields(proj)
+      },
+      snapshot: share.snapshot || {}
+    });
+  } catch (e) {
+    console.error('GET /proof/share/:token error:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+
 
 // Starta servern
 const PORT = process.env.PORT || 3000;
