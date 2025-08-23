@@ -19,7 +19,7 @@ app.use(cors({
 // Shopify-info från miljövariabler
 const SHOP = process.env.SHOP;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET; 
 
 // 🔽 Nya env för Partner-app & Proxy
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
@@ -86,6 +86,47 @@ async function writeOrderProjects(metafieldId, projects) {
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 }
+
+/* ===== REVIEWS: produkt-metafält helpers (NYTT) ===== */
+const PRODUCT_REVIEW_NS = 'review';
+const PRODUCT_REVIEW_KEY = 'review';
+
+async function readProductReviews(productId) {
+  try {
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/products/${productId}/metafields.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const mf = (data.metafields || []).find(m => m.namespace === PRODUCT_REVIEW_NS && m.key === PRODUCT_REVIEW_KEY);
+    if (!mf) return { metafieldId: null, reviews: [] };
+    try { return { metafieldId: mf.id, reviews: JSON.parse(mf.value || '[]') || [] }; }
+    catch { return { metafieldId: mf.id, reviews: [] }; }
+  } catch (e) {
+    console.warn('readProductReviews():', e?.response?.data || e.message);
+    return { metafieldId: null, reviews: [] };
+  }
+}
+async function writeProductReviews(productId, metafieldId, reviewsArray) {
+  const payload = { metafield: { namespace: PRODUCT_REVIEW_NS, key: PRODUCT_REVIEW_KEY, type: 'json', value: JSON.stringify(reviewsArray || []) } };
+  try {
+    if (metafieldId) {
+      await axios.put(
+        `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
+        { metafield: { id: metafieldId, ...payload.metafield } },
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+    } else {
+      await axios.post(
+        `https://${SHOP}/admin/api/2025-07/products/${productId}/metafields.json`,
+        payload,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+    }
+  } catch (e) {
+    console.warn('writeProductReviews():', e?.response?.data || e.message);
+  }
+}
+/* ===== END REVIEWS helpers ===== */
 
 // Snapshot helpers
 function safeProjectFields(p){
@@ -412,7 +453,8 @@ app.post('/webhooks/order-created', async (req, res) => {
       orderNumber,
       status:            'Tar fram korrektur',
       tag:               'Tar fram korrektur',
-      date:              new Date().toISOString()
+      date:              new Date().toISOString(),
+      review: { status: 'pending' }
     };
   });
 
@@ -1218,9 +1260,8 @@ app.get('/proxy/orders-meta', async (req, res) => {
           fulfillmentStatus: e.node.fulfillmentStatus || null,
           displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
         }));
-
         out = out.filter(o => !isDeliveredOrderShape(o));
-
+        
         res.setHeader('Cache-Control', 'no-store');
         return res.json({ orders: out, admin: true });
       } catch (gqlErr) {
@@ -1335,7 +1376,61 @@ app.get('/proxy/orders-meta', async (req, res) => {
     }
   }
 });
+/* ===== NYTT: pending reviews för inloggad kund ===== */
+app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(204).end();
 
+    const q = `customer_id:${loggedInCustomerId} status:any`;
+    const query = `
+      query OrdersWithMeta($first:Int!,$q:String!,$ns:String!,$key:String!){
+        orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
+          edges{
+            node{
+              id
+              name
+              processedAt
+              metafield(namespace:$ns, key:$key){ value }
+            }
+          }
+        }
+      }`;
+    let data = await shopifyGraphQL(query, { first: 50, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+    if (data.errors) throw new Error('GraphQL error');
+
+    const edges = data?.data?.orders?.edges || [];
+    const out = [];
+    for (const e of edges) {
+      const orderId = parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id);
+      let items = [];
+      try { items = e.node.metafield?.value ? JSON.parse(e.node.metafield.value) : []; } catch { items = []; }
+      (items || []).forEach(p => {
+        const isDone = p?.review?.status === 'done';
+        if (!isDone) {
+          out.push({
+            orderId,
+            orderNumber: e.node.name,
+            processedAt: e.node.processedAt,
+            lineItemId: p.lineItemId,
+            productId: p.productId,
+            productTitle: p.productTitle,
+            preview_img: p.previewUrl || p.preview_img || null
+          });
+        }
+      });
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ pending: out });
+  } catch (err) {
+    console.error('GET /proxy/orders-meta/reviews/pending:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 // ===== NYA APP PROXY-ROUTER FÖR PROFILUPPDATERING =====
 app.post('/proxy/profile/update', async (req, res) => {
   try {
@@ -1493,6 +1588,37 @@ app.get('/proof/share/:token', async (req, res) => {
   }
 });
 
+/* ===== NYTT: hämta review-form data via token ===== */
+app.get('/review/share/:token', async (req, res) => {
+  try {
+    const token = req.params.token || '';
+    const payload = verifyAndParseToken(token);
+    if (!payload || payload.kind !== 'review') return res.status(401).json({ error: 'invalid_token' });
+
+    const { orderId, lineItemId, tid } = payload || {};
+    if (!orderId || !lineItemId || !tid) return res.status(400).json({ error: 'bad_payload' });
+
+    const { projects } = await readOrderProjects(orderId);
+    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+    if (!proj) return res.status(404).json({ error: 'not_found' });
+
+    const r = proj.review || {};
+    if (r.status === 'done') return res.status(410).json({ error: 'already_submitted' });
+    if (!r || String(r.tid || '') !== String(tid)) return res.status(410).json({ error: 'token_superseded' });
+
+    return res.json({
+      orderId,
+      lineItemId,
+      orderNumber: proj.orderNumber || null,
+      productId: proj.productId,
+      productTitle: proj.productTitle || '',
+      preview_img: proj.previewUrl || proj.preview_img || null
+    });
+  } catch (err) {
+    console.error('GET /review/share/:token:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 /* ======= SIMPLE CANCEL VIA APP PROXY (MVP) ======= */
 /* POST /apps/orders-meta/order/cancel  (Shopify App Proxy → server: /proxy/orders-meta/order/cancel)
    Body: { orderId }
@@ -1504,6 +1630,102 @@ app.get('/proof/share/:token', async (req, res) => {
    - Nekar om någon projekt-rad har status "I produktion".
    - Annars sätter ALLA projekt i orderns metafält till { status: "Annulerad", tag: "Annulerad", cancelledAt }.
 */
+
+/* ===== NYTT: spara review + markera done ===== */
+app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'not_logged_in' });
+
+    const token = String(req.body?.token || '');
+    let { rating, title, body, would_order_again } = req.body || {};
+    const payload = verifyAndParseToken(token);
+    if (!payload || payload.kind !== 'review') return res.status(401).json({ error: 'invalid_token' });
+
+    rating = parseInt(rating, 10);
+    if (!(rating >= 1 && rating <= 5)) return res.status(400).json({ error: 'invalid_rating' });
+    title = String(title || '').trim();
+    body = String(body || '').trim();
+    if (!title || !body) return res.status(400).json({ error: 'missing_fields' });
+    const again = (function(v){
+      if (typeof v === 'boolean') return v;
+      if (typeof v === 'number') return v !== 0;
+      if (typeof v === 'string') return /^(true|1|yes|ja)$/i.test(v);
+      return false;
+    })(would_order_again);
+
+    const { orderId, lineItemId, tid } = payload || {};
+
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const order = data?.order;
+    if (!order) return res.status(404).json({ error: 'order_not_found' });
+
+    const cidRaw = String(loggedInCustomerId);
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const ownerId = String(order?.customer?.id || '');
+    if (!ownerId.endsWith(cidNum)) return res.status(403).json({ error: 'forbidden_not_owner' });
+
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) return res.status(404).json({ error: 'metafield_not_found' });
+
+    const idx = (projects || []).findIndex(p => String(p.lineItemId) === String(lineItemId));
+    if (idx < 0) return res.status(404).json({ error: 'line_item_not_found' });
+
+    const p = projects[idx] || {};
+    const r = p.review || {};
+    if (r.status === 'done') return res.status(410).json({ error: 'already_submitted' });
+    if (!r || String(r.tid || '') !== String(tid)) return res.status(410).json({ error: 'token_superseded' });
+
+    const productId = p.productId;
+    const { metafieldId: revMfId, reviews } = await readProductReviews(productId);
+    const displayName = `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim() || 'Kund';
+
+    const entry = {
+      orderId: Number(orderId),
+      lineItemId: Number(lineItemId),
+      customerId: order.customer?.id || null,
+      productId: productId,
+      rating,
+      title,
+      body,
+      would_order_again: !!again,
+      createdAt: nowIso(),
+      displayName
+    };
+    const nextReviews = [entry, ...(Array.isArray(reviews) ? reviews : [])].slice(0, 500);
+
+    await writeProductReviews(productId, revMfId, nextReviews);
+
+    const updated = { ...(p.review || {}), status: 'done', submittedAt: nowIso() };
+    projects[idx] = { ...p, review: updated };
+    await writeOrderProjects(metafieldId, projects);
+
+    try {
+      await appendActivity(orderId, [{
+        ts: new Date().toISOString(),
+        actor: { type: 'customer', name: displayName, id: order.customer?.id ? `customer:${order.customer.id}` : undefined },
+        action: 'review.submitted',
+        order_id: Number(orderId),
+        line_item_id: Number(lineItemId),
+        product_title: p.productTitle || '',
+        data: { rating, would_order_again: !!again },
+        correlation_id: `review.submitted:${orderId}:${lineItemId}:${tid}`
+      }]);
+    } catch {}
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/reviews/submit:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
 
 app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
   try {
@@ -1580,6 +1802,62 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
   }
 });
 
+/* ===== NYTT: skapa review-token & skriv in i order-metafält ===== */
+app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'not_logged_in' });
+
+    const orderId = String(req.body?.orderId || '').trim();
+    const lineItemId = String(req.body?.lineItemId || '').trim();
+    if (!orderId || !lineItemId) return res.status(400).json({ error: 'missing_params' });
+
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const order = data?.order;
+    if (!order) return res.status(404).json({ error: 'order_not_found' });
+
+    const cidRaw = String(loggedInCustomerId);
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const ownerId = String(order?.customer?.id || '');
+    if (!ownerId.endsWith(cidNum)) return res.status(403).json({ error: 'forbidden_not_owner' });
+
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) return res.status(404).json({ error: 'metafield_not_found' });
+
+    const idx = (projects || []).findIndex(p => String(p.lineItemId) === String(lineItemId));
+    if (idx < 0) return res.status(404).json({ error: 'line_item_not_found' });
+
+    const tid = newTid();
+    const token = signTokenPayload({ kind: 'review', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
+    const token_hash = crypto.createHash('sha256').update(token).digest('hex');
+
+    const p = projects[idx] || {};
+    const reviewObj = Object.assign(
+      { status: 'pending' },
+      (p.review && typeof p.review === 'object') ? p.review : {}
+    );
+    if (reviewObj.status !== 'done') {
+      reviewObj.tid = tid;
+      reviewObj.token_hash = token_hash;
+      reviewObj.createdAt = nowIso();
+    }
+    projects[idx] = { ...p, review: reviewObj };
+
+    await writeOrderProjects(metafieldId, projects);
+
+    const url = `${STORE_BASE}/pages/review?token=${encodeURIComponent(token)}`;
+    return res.json({ ok: true, url });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/reviews/create:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 /* Duplicerad path för butiker där proxy-basen inte innehåller "/orders-meta"
    → klienten kan ändå anropa /apps/orders-meta/order/cancel, men vissa teman mappar till /proxy/... direkt. */
 app.post('/proxy/order/cancel', async (req, res) => {
