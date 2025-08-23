@@ -1493,6 +1493,104 @@ app.get('/proof/share/:token', async (req, res) => {
   }
 });
 
+/* ======= SIMPLE CANCEL VIA APP PROXY (MVP) ======= */
+/* POST /apps/orders-meta/order/cancel  (Shopify App Proxy → server: /proxy/orders-meta/order/cancel)
+   Body: { orderId }
+   Säkerhet:
+   - Verifierar App Proxy-signaturen (verifyAppProxySignature).
+   - Kräver logged_in_customer_id (kunden måste vara inloggad).
+   - Säkerställer att ordern tillhör kunden.
+   Beteende:
+   - Nekar om någon projekt-rad har status "I produktion".
+   - Annars sätter ALLA projekt i orderns metafält till { status: "Annulerad", tag: "Annulerad", cancelledAt }.
+*/
+
+app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ ok: false, error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    // 3) Läs orderId från body
+    const orderId = String(req.body?.orderId || '').trim();
+    if (!orderId) return res.status(400).json({ ok: false, error: 'orderId_required' });
+
+    // 4) Säkerställ att kunden äger ordern
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const order = data?.order;
+    if (!order) return res.status(404).json({ ok: false, error: 'order_not_found' });
+
+    // Shopify REST kör numeriska id för kunder, App Proxy sänder ibland GID → normalisera
+    const cidRaw = String(loggedInCustomerId);
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const orderCustomerId = String(order?.customer?.id || '');
+    if (!orderCustomerId.endsWith(cidNum)) {
+      return res.status(403).json({ ok: false, error: 'forbidden_not_owner' });
+    }
+
+    // 5) Läs projekten i orderns metafält
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) return res.status(404).json({ ok: false, error: 'projects_not_found' });
+
+    // 6) Neka om någon rad redan är i produktion (säkerhet även om UI döljer knappen)
+    const hasInProduction = (projects || []).some(p => String(p.status || '') === 'I produktion');
+    if (hasInProduction) {
+      return res.status(409).json({ ok: false, error: 'in_production' });
+    }
+
+    // 7) Sätt status till "Annulerad" på samtliga projekt
+    const now = new Date().toISOString();
+    const next = (projects || []).map(p => ({
+      ...p,
+      status: 'Annulerad',
+      tag: 'Annulerad',
+      cancelledAt: now
+    }));
+    await writeOrderProjects(metafieldId, next);
+
+    // 8) (valfritt) enkel activity-logg
+    try {
+      const entries = (order.line_items || []).map(li => ({
+        ts: now,
+        actor: { type: 'customer', name: `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim() || 'Kund' },
+        action: 'order.cancelled_request',
+        order_id: Number(orderId),
+        line_item_id: Number(li.id),
+        product_title: li.title,
+        data: { via: 'app_proxy', status: 'Annulerad' },
+        correlation_id: `order.cancelled_request:${orderId}:${li.id}:${cidNum}`
+      }));
+      await appendActivity(orderId, entries);
+    } catch {}
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('proxy cancel error:', e?.response?.data || e.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+/* Duplicerad path för butiker där proxy-basen inte innehåller "/orders-meta"
+   → klienten kan ändå anropa /apps/orders-meta/order/cancel, men vissa teman mappar till /proxy/... direkt. */
+app.post('/proxy/order/cancel', async (req, res) => {
+  // Återanvänd exakt samma logik som ovan genom att proxya req/res till vår huvudhandler.
+  // Enkelt sätt: sätt om pathen och kalla verify/signature igen – eller duplicera koden.
+  // Här kallar vi bara om samma funktionella kropp.
+  req.url = req.url.includes('?') ? req.url : (req.url + '?'); // säkerställ att split fungerar
+  return app._router.handle({ ...req, url: '/proxy/orders-meta/order/cancel' + req.url.slice(req.url.indexOf('?')) }, res, () => {});
+});
+/* ====== END SIMPLE CANCEL VIA APP PROXY ====== */
+
 
 // Starta servern
 const PORT = process.env.PORT || 3000;
