@@ -32,6 +32,95 @@ const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 // Publik butik (för delningslänkar till Shopify-sidan)
 const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
+/* ===== REFERLINK CONFIG ===== */
+const REFER_NS  = 'referlink';
+const REFER_KEY = 'referlink';          // JSON-metafält: {{ customer.metafields.referlink.referlink }}
+const SLUG_SECRET = process.env.SLUG_SECRET || 'CHANGE_ME_LONG_RANDOM';
+const BACKFILL_SECRET = process.env.BACKFILL_SECRET || '';
+// Vi använder en stabil, alfanumerisk slug via Base32 på HMAC(customerId) → låg kollisionsrisk och samma för evigt
+const B32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567'; // crockford-ish lower
+function hmacHex(input) {
+  return crypto.createHmac('sha256', SLUG_SECRET).update(String(input)).digest('hex');
+}
+function hexToBase32Lower(hex, len = 8) {
+  // Ta första 40 bit (~10 hex) och koda till base32; klipp till len tecken
+  const bits = BigInt('0x' + hex.slice(0, 10));
+  let s = '';
+  let v = bits;
+  for (let i=0;i<16;i++) { // 16*5=80 bits > 40, räcker
+    const idx = Number(v & BigInt(31));
+    s = B32_ALPHABET[idx] + s;
+    v >>= BigInt(5);
+  }
+  return s.slice(-len);
+}
+function makeSlugFromCustomerId(customerId) {
+  const hex = hmacHex(customerId);
+  return hexToBase32Lower(hex, 8); // 8 tecken, t.ex. "q7m2r9kd"
+}
+function referlinkJsonFor(slug) {
+  const url = `${STORE_BASE.replace(/\/$/,'')}/${slug}`;
+  return {
+    slug,
+    url,
+    createdAt: new Date().toISOString(),
+    version: 1
+  };
+}
+async function readCustomerReferlink(customerId) {
+  const { data } = await axios.get(
+    `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+  const mf = (data.metafields || []).find(m => m.namespace === REFER_NS && m.key === REFER_KEY);
+  if (!mf) return { metafieldId: null, value: null };
+  let value = null;
+  try { value = mf.value ? JSON.parse(mf.value) : null; } catch {}
+  return { metafieldId: mf.id, value };
+}
+async function writeCustomerReferlink(customerId, metafieldId, valueObj) {
+  const payload = {
+    metafield: {
+      namespace: REFER_NS,
+      key: REFER_KEY,
+      type: 'json',
+      value: JSON.stringify(valueObj)
+    }
+  };
+  if (metafieldId) {
+    await axios.put(
+      `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
+      { metafield: { id: metafieldId, ...payload.metafield } },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  } else {
+    await axios.post(
+      `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
+      payload,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  }
+}
+async function ensureRootRedirectToHome(slug) {
+  try {
+    // Finns redirect redan?
+    const check = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/redirects.json?path=%2F${encodeURIComponent(slug)}`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    if ((check.data.redirects || []).length) return true;
+    // Skapa 301 till startsidan
+    await axios.post(
+      `https://${SHOP}/admin/api/2025-07/redirects.json`,
+      { redirect: { path: `/${slug}`, target: '/' } },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    return true;
+  } catch (e) {
+    console.warn('ensureRootRedirectToHome:', e?.response?.data || e.message);
+    return false;
+  }
+}
 
 
 /* ===== PROOF TOKEN CONFIG & HELPERS (NYTT) ===== */
@@ -1015,6 +1104,41 @@ app.all('/proxy/avatar', async (req, res) => {
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+// ===== REFERLINK: hämta eller skapa per-kund slug + redirect =====
+app.get('/proxy/link', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'not_logged_in' });
+
+    const cidRaw = String(loggedInCustomerId);
+    const customerId = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+
+    // Läs JSON-metafältet referlink.referlink
+    let { metafieldId, value } = await readCustomerReferlink(customerId);
+
+    // Skapa om saknas
+    if (!value || !value.slug) {
+      const slug = makeSlugFromCustomerId(customerId);
+      value = referlinkJsonFor(slug);
+      await writeCustomerReferlink(customerId, metafieldId, value);
+      await ensureRootRedirectToHome(value.slug); // /<slug> → /
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, referlink: value });
+  } catch (e) {
+    console.error('GET /proxy/link:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+// Duplicerad path om din butik använder /proxy/orders-meta/...
+app.get('/proxy/orders-meta/link', async (req, res) => {
+  return app._router.handle({ ...req, url: '/proxy/link' }, res, () => {});
+});
 
 // ===== DUPLICATE ROUTE for stores where Proxy URL includes "/proxy/orders-meta" =====
 app.all('/proxy/orders-meta/avatar', async (req, res) => {
@@ -1873,6 +1997,53 @@ app.post('/proxy/order/cancel', async (req, res) => {
 });
 /* ====== END SIMPLE CANCEL VIA APP PROXY ====== */
 
+// ===== ADMIN: Backfill för alla kunder (skapa referlink om saknas) =====
+app.post('/admin/referlink/backfill', async (req, res) => {
+  try {
+    if (!BACKFILL_SECRET || req.get('x-backfill-secret') !== BACKFILL_SECRET) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    let url = `https://${SHOP}/admin/api/2025-07/customers.json?limit=250&fields=id`;
+    let created = 0, skipped = 0, errors = 0;
+
+    while (url) {
+      const r = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
+      const customers = r.data.customers || [];
+
+      for (const c of customers) {
+        try {
+          const customerId = c.id;
+          let { metafieldId, value } = await readCustomerReferlink(customerId);
+          if (value && value.slug) { skipped++; continue; }
+          const slug = makeSlugFromCustomerId(customerId);
+          value = referlinkJsonFor(slug);
+          await writeCustomerReferlink(customerId, metafieldId, value);
+          await ensureRootRedirectToHome(slug);
+          created++;
+        } catch (e) {
+          errors++;
+          console.warn('backfill customer failed:', e?.response?.data || e.message);
+        }
+      }
+
+      // Paginering via Link-header
+      const link = r.headers['link'] || r.headers['Link'];
+      const next = (link || '').split(',').find(p => p.includes('rel="next"'));
+      if (next) {
+        const m = next.match(/<([^>]+)>/);
+        url = m ? m[1] : null;
+      } else {
+        url = null;
+      }
+    }
+
+    return res.json({ ok: true, created, skipped, errors });
+  } catch (e) {
+    console.error('POST /admin/referlink/backfill:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 
 // Starta servern
 const PORT = process.env.PORT || 3000;
