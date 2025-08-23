@@ -1531,8 +1531,12 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
-    const payload = verifyAndParseToken(token);
-    if (!payload) return res.status(401).json({ error: 'Ogiltig token' });
+const payload = verifyAndParseToken(token);
+// Bakåtkompatibilitet: acceptera tokens utan 'kind' (äldre länkar), men neka fel 'kind'
+if (!payload || (payload.kind && payload.kind !== 'review')) {
+  return res.status(401).json({ error: 'invalid_token' });
+}
+
 
     const { orderId, lineItemId, tid } = payload || {};
     if (!orderId || !lineItemId || !tid) return res.status(400).json({ error: 'Bad payload' });
