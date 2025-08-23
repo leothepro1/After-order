@@ -1134,11 +1134,37 @@ app.get('/proxy/link', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+// ============================================================
+// ALIAS-ROUTES när App Proxy INTE har "/proxy" i Proxy URL
+// Ex: Shopify proxar /apps/orders-meta/link → din server /link
+// Vi skickar internt vidare till den säkrade /proxy/link (utan redirect).
+// ============================================================
+function forward(toPath) {
+  return (req, res, next) => {
+    const origUrl = req.url;
+    const qs = origUrl.includes('?') ? origUrl.slice(origUrl.indexOf('?')) : '';
+    // byt bara url till målroute + original querystring (signaturen behålls)
+    req.url = `${toPath}${qs}`;
+    app._router.handle(req, res, (err) => {
+      // återställ url ifall något mer middleware ska köra
+      req.url = origUrl;
+      if (err) return next(err);
+    });
+  };
+}
+
+// 1) /link  → /proxy/link
+app.get('/link', forward('/proxy/link'));
+
+// 2) /orders-meta/link  → /proxy/link
+app.get('/orders-meta/link', forward('/proxy/link'));
+
+// 3) /orders-meta/avatar (GET/POST) → /proxy/orders-meta/avatar
+app.all('/orders-meta/avatar', forward('/proxy/orders-meta/avatar'));
 
 // Duplicerad path om din butik använder /proxy/orders-meta/...
-app.get('/proxy/orders-meta/link', async (req, res) => {
-  return app._router.handle({ ...req, url: '/proxy/link' }, res, () => {});
-});
+app.get('/proxy/orders-meta/link', forward('/proxy/link'));
+
 
 // ===== DUPLICATE ROUTE for stores where Proxy URL includes "/proxy/orders-meta" =====
 app.all('/proxy/orders-meta/avatar', async (req, res) => {
@@ -1988,13 +2014,8 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
 });
 /* Duplicerad path för butiker där proxy-basen inte innehåller "/orders-meta"
    → klienten kan ändå anropa /apps/orders-meta/order/cancel, men vissa teman mappar till /proxy/... direkt. */
-app.post('/proxy/order/cancel', async (req, res) => {
-  // Återanvänd exakt samma logik som ovan genom att proxya req/res till vår huvudhandler.
-  // Enkelt sätt: sätt om pathen och kalla verify/signature igen – eller duplicera koden.
-  // Här kallar vi bara om samma funktionella kropp.
-  req.url = req.url.includes('?') ? req.url : (req.url + '?'); // säkerställ att split fungerar
-  return app._router.handle({ ...req, url: '/proxy/orders-meta/order/cancel' + req.url.slice(req.url.indexOf('?')) }, res, () => {});
-});
+app.post('/proxy/order/cancel', forward('/proxy/orders-meta/order/cancel'));
+
 /* ====== END SIMPLE CANCEL VIA APP PROXY ====== */
 
 // ===== ADMIN: Backfill för alla kunder (skapa referlink om saknas) =====
