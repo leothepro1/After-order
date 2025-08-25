@@ -1173,6 +1173,12 @@ app.all('/orders-meta/avatar', forward('/proxy/orders-meta/avatar'));
 // Duplicerad path om din butik använder /proxy/orders-meta/...
 app.get('/proxy/orders-meta/link', forward('/proxy/link'));
 
+// 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
+app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
+
+// 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
+app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
+
 
 // ===== DUPLICATE ROUTE for stores where Proxy URL includes "/proxy/orders-meta" =====
 app.all('/proxy/orders-meta/avatar', async (req, res) => {
@@ -1987,6 +1993,117 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
+// ===== RENAME: byt värdet på line item property "Tryckfil" via App Proxy =====
+app.post('/proxy/orders-meta/rename', async (req, res) => {
+  try {
+    // 1) Säkerhet: App Proxy-signatur + inloggad kund
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(401).json({ error: 'not_logged_in' });
+
+    // 2) Body-validering
+    const orderId   = String(req.body?.orderId   || '').trim();
+    const lineItemId= String(req.body?.lineItemId|| '').trim();
+    const oldName   = String(req.body?.oldName   ?? '').trim();
+    const newName   = String(req.body?.newName   ?? '').trim();
+    if (!orderId || !lineItemId || !newName) {
+      return res.status(400).json({ error: 'missing_params' });
+    }
+
+    // 3) Ägarcheck: kunden måste äga ordern
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const order = data?.order;
+    if (!order) return res.status(404).json({ error: 'order_not_found' });
+
+    const cidRaw = String(loggedInCustomerId);
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const ownerId = String(order?.customer?.id || '');
+    if (!ownerId.endsWith(cidNum)) {
+      return res.status(403).json({ error: 'forbidden_not_owner' });
+    }
+
+    // 4) Läs & uppdatera projekten i SAMMA metafält (order-created)
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) return res.status(404).json({ error: 'metafield_not_found' });
+
+    const idx = (projects || []).findIndex(p => String(p.lineItemId) === String(lineItemId));
+    if (idx < 0) return res.status(404).json({ error: 'line_item_not_found' });
+
+    const proj = projects[idx] || {};
+    const props = Array.isArray(proj.properties) ? proj.properties.slice() : [];
+
+    let touched = false;
+    const nextProps = props.map(pr => {
+      if (!pr || typeof pr !== 'object') return pr;
+      const nm = String(pr.name || '').toLowerCase();
+      if (nm === 'tryckfil') {
+        // Byt bara värdet
+        if (String(pr.value || '') !== newName) {
+          touched = true;
+          return { ...pr, value: newName };
+        } else {
+          touched = true; // redan samma namn → idempotent OK
+          return pr;
+        }
+      }
+      return pr;
+    });
+
+    if (!touched) {
+      // Hittade ingen "Tryckfil"-property i projektet
+      return res.status(404).json({ error: 'property_not_found' });
+    }
+
+    // Bevara övriga fält oförändrade; uppdatera ev. fallback "tryckfil" om det fanns
+    const nextProj = {
+      ...proj,
+      properties: nextProps,
+      ...(Object.prototype.hasOwnProperty.call(proj, 'tryckfil') ? { tryckfil: newName } : {})
+    };
+    const nextProjects = projects.slice();
+    nextProjects[idx] = nextProj;
+
+    await writeOrderProjects(metafieldId, nextProjects);
+
+    // 5) Activity-logg (kund agerade)
+    try {
+      const cust = await getCustomerNameByOrder(orderId);
+      await appendActivity(orderId, [{
+        ts: new Date().toISOString(),
+        actor: { type: 'customer', name: cust.name, id: cust.id },
+        action: 'file.renamed',
+        order_id: Number(orderId),
+        line_item_id: Number(lineItemId),
+        product_title: proj.productTitle || '',
+        project_id: oldName || undefined,
+        data: { from: oldName || null, to: newName },
+        correlation_id: `file.renamed:${orderId}:${lineItemId}:${crypto.createHash('sha256').update(`${oldName}→${newName}`).digest('hex')}`
+      }]);
+    } catch (e) {
+      console.warn('/proxy/orders-meta/rename → appendActivity misslyckades:', e?.response?.data || e.message);
+    }
+
+    // 6) Invalidera 20s micro-cachen för den här kunden (så /apps/orders-meta reflekterar bytet)
+    try {
+      const prefix = `${cidNum}:`;
+      for (const key of ordersMetaCache.keys()) {
+        if (key.startsWith(prefix)) ordersMetaCache.delete(key);
+      }
+    } catch {}
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/rename:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
 
 /* ===== NYTT: skapa review-token & skriv in i order-metafält ===== */
 app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
