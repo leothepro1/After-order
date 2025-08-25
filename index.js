@@ -548,90 +548,98 @@ app.post('/webhooks/order-created', async (req, res) => {
   });
 
   if (newProjects.length === 0) return res.sendStatus(200);
+  // 🔹 ENRICH: injicera productHandle per projekt (utan att ändra befintlig logik)
+// ... efter newProjects och enrich-blocket:
+let enrichedProjects = newProjects;
+try {
+  const ids = newProjects.map(p => p.productId).filter(Boolean);
+  const handleMap = await getProductHandlesById(ids);
+  enrichedProjects = newProjects.map(p => ({
+    ...p,
+    ...(handleMap[p.productId] ? { productHandle: handleMap[p.productId] } : {})
+  }));
+} catch (e) {
+  console.warn('order-created enrich productHandle:', e?.response?.data || e.message);
+}
 
-  try {
-    // Hämta befintliga metafält (🔧 fixad URL)
-    const existing = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`, {
-        headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
-      }
-    );
+// ❌ TA BORT hela den här felaktiga biten som fanns före metafelts-hämtningen:
+// let combined = [...enrichedProjects];
+// if (currentMetafield && currentMetafield.value) { ... }  // ← currentMetafield finns inte än
 
-    const currentMetafield = existing.data.metafields.find(mf =>
-      mf.namespace === 'order-created' && mf.key === 'order-created'
-    );
+try {
+  // 1) Läs befintliga metafält
+  const existing = await axios.get(
+    `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
 
-    // Kombinera nya med gamla projekt
-    let combined = [...newProjects];
-    if (currentMetafield && currentMetafield.value) {
-      try {
-        const existingData = JSON.parse(currentMetafield.value);
-        if (Array.isArray(existingData)) {
-          combined = [...existingData, ...newProjects];
-        }
-      } catch (e) {
-        console.warn('Kunde inte tolka gammal JSON:', e);
-      }
-    }
+  const currentMetafield = (existing.data.metafields || []).find(
+    mf => mf.namespace === 'order-created' && mf.key === 'order-created'
+  );
 
-    // Uppdatera eller skapa metafältet
-    if (currentMetafield) {
-      await axios.put(
-        `https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json`,
-        { metafield: { id: currentMetafield.id, type: 'json', value: JSON.stringify(combined) } },
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-    } else {
-      await axios.post(
-        `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
-        { metafield: { namespace: 'order-created', key: 'order-created', type: 'json', value: JSON.stringify(combined) } },
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-    }
-
-    console.log('✅ Metafält sparat!');
-
-    /* ==== ACTIVITY LOG: Första loggen per line item (file.uploaded) ==== */
+  // 2) Kombinera ALLTID med enrichedProjects (inte newProjects)
+  let combined = [...enrichedProjects];
+  if (currentMetafield && currentMetafield.value) {
     try {
-      const customerName = ((order.customer?.first_name || '') + ' ' + (order.customer?.last_name || '')).trim() || 'Kund';
-      const customerActor = { type: 'customer', name: customerName, id: customerId ? `customer:${customerId}` : undefined };
-      const ts = order.processed_at || order.created_at || new Date().toISOString();
-
-      const firstEntries = combined.map(p => {
-        // Hitta filnamn från property "Tryckfil"
-        let fileName = '';
-        try {
-          fileName = (p.properties || []).find(x => x && x.name === 'Tryckfil')?.value || '';
-        } catch {}
-        const entry = {
-          ts,
-          actor: customerActor,
-          action: 'file.uploaded',
-          order_id: orderId,
-          line_item_id: p.lineItemId,
-          product_title: p.productTitle,
-          project_id: fileName || undefined,
-          data: Object.assign(
-            {},
-            fileName ? { fileName } : {},
-            p.instructions ? { instructions: String(p.instructions) } : {}
-          ),
-          correlation_id: `order.created:${orderId}:${p.lineItemId}`
-        };
-        return entry;
-      });
-
-      await appendActivity(orderId, firstEntries);
+      const existingData = JSON.parse(currentMetafield.value);
+      if (Array.isArray(existingData)) {
+        combined = [...existingData, ...enrichedProjects];
+      }
     } catch (e) {
-      console.warn('order-created → appendActivity misslyckades:', e?.response?.data || e.message);
+      console.warn('Kunde inte tolka gammal JSON:', e);
     }
-    /* ======================= END ACTIVITY LOG ======================= */
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('❌ Fel vid webhook/order-created:', err?.response?.data || err.message);
-    res.sendStatus(500);
   }
+
+  // 3) Spara combined
+  if (currentMetafield) {
+    await axios.put(
+      `https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json`,
+      { metafield: { id: currentMetafield.id, type: 'json', value: JSON.stringify(combined) } },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  } else {
+    await axios.post(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+      { metafield: { namespace: 'order-created', key: 'order-created', type: 'json', value: JSON.stringify(combined) } },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  }
+
+  console.log('✅ Metafält sparat!');
+
+  // 4) Activity-log använder samma combined (som nu innehåller productHandle)
+  try {
+    const customerName = ((order.customer?.first_name || '') + ' ' + (order.customer?.last_name || '')).trim() || 'Kund';
+    const customerActor = { type: 'customer', name: customerName, id: customerId ? `customer:${customerId}` : undefined };
+    const ts = order.processed_at || order.created_at || new Date().toISOString();
+
+    const firstEntries = combined.map(p => {
+      let fileName = '';
+      try { fileName = (p.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch {}
+      return {
+        ts,
+        actor: customerActor,
+        action: 'file.uploaded',
+        order_id: orderId,
+        line_item_id: p.lineItemId,
+        product_title: p.productTitle,
+        project_id: fileName || undefined,
+        data: Object.assign({}, fileName ? { fileName } : {}, p.instructions ? { instructions: String(p.instructions) } : {}),
+        correlation_id: `order.created:${orderId}:${p.lineItemId}`
+      };
+    });
+
+    await appendActivity(orderId, firstEntries);
+  } catch (e) {
+    console.warn('order-created → appendActivity misslyckades:', e?.response?.data || e.message);
+  }
+
+  res.sendStatus(200);
+} catch (err) {
+  console.error('❌ Fel vid webhook/order-created:', err?.response?.data || err.message);
+  res.sendStatus(500);
+}
+
 });
 
 // Hämta korrektur-status för kund
@@ -1281,6 +1289,30 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+
+// 🔹 Hjälp: hämta product.handle för en lista av product_id (unik, liten volym per order)
+async function getProductHandlesById(productIds = []) {
+  const uniq = Array.from(new Set((productIds || []).filter(Boolean)));
+  const map = Object.create(null);
+
+  for (const pid of uniq) {
+    try {
+      // Minimalt fältuttag (handle); REST duger bra här pga din throttling
+      const { data } = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=handle`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const handle = data?.product?.handle;
+      if (handle) map[pid] = handle;
+    } catch (e) {
+      // Rör inte flödet om lookup failar; vi fortsätter utan handle
+      console.warn('getProductHandlesById:', pid, e?.response?.data || e.message);
+    }
+  }
+  return map; // { [productId]: handle }
+}
+
+
 
 // 🔰 NYTT: 20s micro-cache för /proxy/orders-meta (utökad med scope i nyckeln)
 const ordersMetaCache = new Map(); // key -> { at, data }
