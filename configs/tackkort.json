@@ -1,0 +1,97 @@
+{
+  "id": "tackkort",
+  "title": "Tackkort",
+  "version": "1.1.0",
+  "currency": "SEK",
+  "options": [
+    {
+      "id": "size",
+      "label": "Storlek",
+      "type": "select",
+      "default": 1,
+      "choices": [
+        { "value": 1, "code": "4x4",   "label": "A6 | 105 x 148 mm",   "w_cm": 105,  "h_cm": 148,  "area_cm2": 16 },
+        { "value": 3, "code": "A5 | 148 x 210 mm",   "label": "A5 | 148 x 210 mm",   "w_cm": 6,  "h_cm": 6,  "area_cm2": 36 },
+        { "value": 2, "code": "Kvadratiskt kort | 148 x 148 mm",   "label": "Kvadratiskt kort | 148 x 148 mm",   "w_cm": 8,  "h_cm": 8,  "area_cm2": 64 },
+        { "value": 4, "code": "Rack kort | 105 x 210 mm", "label": "Rack kort | 105 x 210 mm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
+      "id": "variant_cards",
+      "label": "Material",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "alt_standard",
+      "choices": [
+        { "value": "premiumpapper", "title": "Premiumpapper", "text": "Ett tjockt och hållbart pappersval för att lämna ett långvarigt uttryck. (216–270 gsm)", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219185/1754482017476jpeg-optimizer_vinyl_ipd0cr_vwakhk.png" },
+        { "value": "deluxepapper", "title": "Deluxe-papper", "text": "Vårt förstklassiga pappersalternativ, för både kvalitet och hållbarhet. (300 – 350 gsm)", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219193/1754482252898jpeg-optimizer_fgdfdg_cqlpvh.png" },      ],
+      "export": true
+    },
+    {
+      "id": "finish",
+      "label": "Finish",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "alt_standard",
+      "choices": [
+        { "value": "alt_standard", "title": "Matt yta", "text": "Subtil yta med livfulla färger. Du kan skriva på den.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228991/FQc9ZbCKd_udonlh.png" },
+        { "value": "alt_utomhus", "title": "Glansig yta", "text": "Mild glans för extra skydd. Inte avsedd att skrivas på.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228995/FQc4pQF9f_kx3iwm.png" },
+        { "value": "alt_utomhus", "title": "Obestruken yta", "text": "Jämn struktur för ett varmare utseende. Du kan skriva på den.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756229007/FQc_f6Ejd_ry8sqa.png" },],
+      "export": true
+    },
+    {
+      "id": "qty",
+      "label": "Antal",
+      "type": "select",
+      "default": 10,
+      "choices": [
+        { "value": 10, "label": "10" },
+        { "value": 50, "label": "50" },
+        { "value": 100, "label": "100" },
+        { "value": 150, "label": "150" },
+        { "value": 250, "label": "250" },
+        { "value": 500, "label": "500" },
+        { "value": 1000, "label": "1000" },
+        { "value": 1500, "label": "1500" },
+        { "value": 1750, "label": "1750" },
+        { "value": 2000, "label": "2000" },
+        { "value": 2500, "label": "2500" },
+        { "value": 5000, "label": "5000" }        
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    }
+  ],
+"tables": {
+  "unit_price": {
+    "rows": [5, 10, 50, 100, 150, 200, 250, 500, 1000, 1500, 2000, 2500, 5000, 10000],
+    "cols": [1, 2, 3, 4],
+    "data": [
+      [26.97, 30.69, 28.83, 32.55],
+      [16.28, 17.67, 16.74, 18.60],
+      [6.42,  6.42,  6.79,  7.24],
+      [3.72,  3.81,  4.09,  4.45],
+      [2.74,  2.98,  3.26,  3.97],
+      [2.23,  2.42,  2.60,  2.97],
+      [1.95,  2.14,  2.33,  2.78],
+      [1.30,  1.49,  1.67,  2.10],
+      [0.79,  0.88,  1.02,  1.67],
+      [0.61,  0.69,  0.82,  1.02],
+      [0.54,  0.59,  0.71,  0.82],
+      [0.47,  0.52,  0.62,  0.71],
+      [0.40,  0.45,  0.54,  0.62],
+      [0.36,  0.41,  0.50,  0.54]
+    ]
+  }
+}
+  "formulas": {
+    "tier": "size",
+    "unit_price": "table('unit_price', qty, tier)",
+    "total_price": "unit * qty"
+  },
+  "export": ["size", "variant_cards", "finish", "qty"]
+}
