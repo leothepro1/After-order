@@ -27,7 +27,7 @@
     },
     {
       "id": "variant_cards",
-      "label": "Välj alternativ",
+      "label": "Material",
       "type": "cards",
       "maxVisible": 3,
       "showMoreLabel": "Visa fler",
