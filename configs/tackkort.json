@@ -45,16 +45,13 @@
       "id": "finish",
       "label": "Finish",
       "type": "select",
-      "default": 1,
+      "default": "matt",
       "choices": [
-        { "value": 1, "code": "Matt yta", "label": "Matt yta" },
-        { "value": 2, "code": "KV148", "label": "Glansig yta" },
-        { "value": 3, "code": "A5", "label": "Obestruken yta" }
+        { "value": "matt", "label": "Matt yta" },
+        { "value": "gloss", "label": "Glansig yta" },
+        { "value": "uncoated", "label": "Obestruken yta" }
       ],
       "ui": { "component": "shared-select" },
-      "export": true
-    }
-      ],
       "export": true
     },
     {
