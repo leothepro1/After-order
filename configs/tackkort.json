@@ -27,13 +27,13 @@
       "default": "premiumpapper",
       "choices": [
         {
-          "value": "premiumpapper",
+          "value": "1",
           "title": "Premiumpapper",
           "text": "Ett tjockt och hållbart pappersval för att lämna ett långvarigt uttryck. (216–270 gsm)",
           "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228854/FQc1Hlin3_mqvcj2.png"
         },
         {
-          "value": "deluxepapper",
+          "value": "1.3",
           "title": "Deluxe-papper",
           "text": "Vårt förstklassiga pappersalternativ, för både kvalitet och hållbarhet. (300–350 gsm)",
           "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228860/FQc-WdmEs_ayytcn.png"
@@ -97,10 +97,10 @@
       ]
     }
   },
-  "formulas": {
-    "tier": "size",
-    "unit_price": "table('unit_price', qty, tier)",
-    "total_price": "unit * qty"
-  },
+"formulas": {
+  "tier": "size",
+  "unit_price": "table('unit_price', qty, tier) * parseFloat(variant_cards) * 1.25",
+  "total_price": "unit * qty"
+}
   "export": ["size", "variant_cards", "finish", "qty"]
 }
