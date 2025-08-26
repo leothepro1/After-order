@@ -1,0 +1,54 @@
+{
+  "id": "etiketter",
+  "title": "Etiketter",
+  "version": "1.0.0",
+  "currency": "SEK",
+  "quantities": [ { "value": 50 }, { "value": 100 }, { "value": 200 }, { "value": 500 }, { "value": 1000 }, { "value": 2000 } ],
+  "options": [
+    {
+      "id": "shape",
+      "label": "Form",
+      "type": "buttons",
+      "choices": [
+        { "value": "round",  "label": "Rund"     },
+        { "value": "square", "label": "Kvadrat"  }
+      ],
+      "export": true
+    },
+    {
+      "id": "finish",
+      "label": "Ytfinish",
+      "type": "buttons",
+      "choices": [
+        { "value": "standard", "label": "Standard" },
+        { "value": "premium",  "label": "Premium"  }
+      ],
+      "when": { "expr": "material == 'papper'" },
+      "priceMod": "IF(finish == 'premium', 0.2, 0)",
+      "export": true
+    },
+    { "id": "upload", "label": "Tryckfil", "type": "upload", "export": true }
+  ],
+  "tables": [
+    {
+      "id": "base",
+      "key": "qty",
+      "source": { "type": "csv", "data": "qty,price\n50,2.50\n100,2.00\n200,1.40\n500,0.85\n1000,0.60\n2000,0.45" }
+    },
+    {
+      "id": "lam_add",
+      "key": "qty",
+      "source": { "type": "inline", "data": "[{\"qty\":50,\"price\":0.20},{\"qty\":100,\"price\":0.18},{\"qty\":200,\"price\":0.15},{\"qty\":500,\"price\":0.12},{\"qty\":1000,\"price\":0.10},{\"qty\":2000,\"price\":0.08}]" }
+    }
+  ],
+  "formulas": {
+    "unit": "ROUND( LOOKUP('base', qty, 'price') + IF(material=='plast' && laminate=='gloss', LOOKUP('lam_add', qty, 'price'), 0) + IF(shape=='round', 0.02, 0) + IF(finish=='premium', 0.2, 0), 2)",
+    "breakdown": {
+      "Bas": "LOOKUP('base', qty, 'price')",
+      "Laminat": "IF(material=='plast' && laminate=='gloss', LOOKUP('lam_add', qty, 'price'), 0)",
+      "Formtillägg": "IF(shape=='round', 0.02, 0)",
+      "Premiumfinish": "IF(finish=='premium', 0.2, 0)"
+    }
+  },
+  "export": ["material","laminate","shape","finish","upload"]
+}
