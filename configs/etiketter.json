@@ -24,10 +24,10 @@
     {
       "id": "variant_cards",
       "label": "Välj alternativ",
-      "type": "cards",                     // special: renderas som knappar
-      "maxVisible": 3,                    // visa 3, resten bakom “Visa fler”
+      "type": "cards",              
+      "maxVisible": 3,                    
       "showMoreLabel": "Visa fler",
-      "default": "alt_standard",          // första är alltid förvald
+      "default": "alt_standard",       
       "choices": [
         {
           "value": "alt_standard",
@@ -48,7 +48,6 @@
           "image": "https://cdn.example.com/etiketter/eco.png"
         },
 
-        /* Fler kort? Lägg här – de döljs tills “Visa fler” klickas */
         {
           "value": "alt_premium",
           "title": "Premium",
@@ -95,8 +94,8 @@
     }
   ],
 
-  "tables": [],      // läggs till senare (priser)
-  "formulas": {},    // kopplas senare
+  "tables": [],   
+  "formulas": {},  
 
   "export": ["size","variant_cards","finish","qty"]
 }
