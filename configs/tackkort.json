@@ -44,29 +44,16 @@
     {
       "id": "finish",
       "label": "Finish",
-      "type": "cards",
-      "maxVisible": 3,
-      "showMoreLabel": "Visa fler",
-      "default": "matt",
+      "type": "select",
+      "default": 1,
       "choices": [
-        {
-          "value": "matt",
-          "title": "Matt yta",
-          "text": "Subtil yta med livfulla färger. Du kan skriva på den.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228991/FQc9ZbCKd_udonlh.png"
-        },
-        {
-          "value": "gloss",
-          "title": "Glansig yta",
-          "text": "Mild glans för extra skydd. Inte avsedd att skrivas på.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228995/FQc4pQF9f_kx3iwm.png"
-        },
-        {
-          "value": "uncoated",
-          "title": "Obestruken yta",
-          "text": "Jämn struktur för ett varmare utseende. Du kan skriva på den.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756229007/FQc_f6Ejd_ry8sqa.png"
-        }
+        { "value": 1, "code": "Matt yta", "label": "Matt yta" },
+        { "value": 2, "code": "KV148", "label": "Glansig yta" },
+        { "value": 3, "code": "A5", "label": "Obestruken yta" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    }
       ],
       "export": true
     },
