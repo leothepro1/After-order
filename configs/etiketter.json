@@ -5,21 +5,23 @@
   "currency": "SEK",
 
   "options": [
-    {
-      "id": "size",
-      "label": "Storlek (BxH)",
-      "type": "select",
-      "default": "4x4",
-      "choices": [
-        { "value": "4x4",   "label": "4×4 cm",   "w_cm": 4,  "h_cm": 4,  "area_cm2": 16  },
-        { "value": "6x6",   "label": "6×6 cm",   "w_cm": 6,  "h_cm": 6,  "area_cm2": 36  },
-        { "value": "8x8",   "label": "8×8 cm",   "w_cm": 8,  "h_cm": 8,  "area_cm2": 64  },
-        { "value": "10x10", "label": "10×10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
-        { "value": "14x14", "label": "14×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 }
-      ],
-      "ui": { "component": "shared-select" },
-      "export": true
-    },
+ {
+  "id": "size",
+  "label": "Storlek (BxH)",
+  "type": "select",
+  "default": "4x4",
+  "choices": [
+    { "value": "4x4",   "label": "4×4 cm",   "w_cm": 4,  "h_cm": 4,  "area_cm2": 16  },
+    { "value": "6x6",   "label": "6×6 cm",   "w_cm": 6,  "h_cm": 6,  "area_cm2": 36  },
+    { "value": "8x8",   "label": "8×8 cm",   "w_cm": 8,  "h_cm": 8,  "area_cm2": 64  },
+    { "value": "10x10", "label": "10×10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
+    { "value": "14x14", "label": "14×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 },
+    { "value": "custom", "label": "Egen storlek (cm)" }
+  ],
+  "ui": { "component": "shared-select" },
+  "export": true
+}
+
 
     {
       "id": "variant_cards",
@@ -84,7 +86,7 @@
         { "value": 500,  "label": "500"  },
         { "value": 750,  "label": "750"  },
         { "value": 1000, "label": "1000" },
-        { "value": 1500, "label": "1500" },
+        { "value": 1500, "label": "1500" }
         { "value": 2000, "label": "2000" },
         { "value": 2500, "label": "2500" },
         { "value": 5000, "label": "5000" }
