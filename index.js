@@ -332,6 +332,155 @@ const productPath = path.join(baseDir, `${id}.json`);
 });
 // ⬆️⬆️ SLUT NYTT
 
+// ========= DRAFT CHECKOUT (skapa Draft Order från cart-payload) =========
+app.post('/draft/checkout', async (req, res) => {
+  try {
+    const { lines, customerId, note } = req.body || {};
+    if (!Array.isArray(lines) || !lines.length) {
+      return res.status(400).json({ error: 'lines krävs' });
+    }
+
+    // Helpers (samma idé som på frontend)
+    function round(n, d = 2) { const f = Math.pow(10, d|0); return Math.round(Number(n||0)*f)/f; }
+    function indexClosest(arr, num) {
+      if (!Array.isArray(arr) || !arr.length) return -1;
+      let best=0, diff=Math.abs(arr[0]-num);
+      for (let i=1;i<arr.length;i++){ const d=Math.abs(arr[i]-num); if(d<diff){best=i; diff=d;} }
+      return best;
+    }
+    function table(cfg, tableName, rowKey, colKey){
+      const t = cfg.tables && cfg.tables[tableName];
+      if (!t || !Array.isArray(t.rows) || !Array.isArray(t.cols) || !Array.isArray(t.data)) return 0;
+      let rIdx = t.rows.indexOf(Number(rowKey));
+      let cIdx = t.cols.indexOf(Number(colKey));
+      if (rIdx < 0) rIdx = indexClosest(t.rows, Number(rowKey));
+      if (cIdx < 0) cIdx = indexClosest(t.cols, Number(colKey));
+      if (rIdx < 0 || cIdx < 0) return 0;
+      const val = Number((t.data[rIdx] || [])[cIdx]); 
+      return isFinite(val) ? val : 0;
+    }
+    function resolveTierByArea(cfg, w, h, rulesPath) {
+      const getByPath = (obj, path) => String(path||'').split('.').reduce((o,k)=>(o && k in o ? o[k] : undefined), obj);
+      const sizeOpt = (cfg.options || []).find(o => o.id === 'size') || {};
+      const rules = (rulesPath && rulesPath.startsWith('size.'))
+        ? getByPath(sizeOpt, rulesPath.replace(/^size\./,''))
+        : getByPath(cfg, rulesPath);
+      const area = Number(w||0) * Number(h||0);
+      const bps = (rules && rules.breakpoints) || [];
+      const tiers = (rules && rules.tiers) || [];
+      if (!bps.length || !tiers.length) return 1;
+      for (let i=0;i<bps.length;i++) if (area <= bps[i]) return tiers[i];
+      return tiers[tiers.length-1] || 7;
+    }
+    function computeFromCalc(cfg, calc) {
+      const state = Object.assign({}, calc?.options || {});
+      const qty = Number(calc?.qty || state.qty || 0);
+      const sizeRaw = String(state.size ?? '');
+      const isCustom = sizeRaw === 'custom';
+      const tier = isCustom
+        ? resolveTierByArea(cfg, state.size_w_cm, state.size_h_cm, 'size.customTierRules')
+        : Number(state.size || 1);
+
+      const unitExpr = cfg.formulas?.unit_price || '0';
+      const totalExpr = cfg.formulas?.total_price || 'unit*qty';
+
+      const vars = { ...state, qty, tier, pricing: (cfg.pricing || {}) };
+      const argNames = Object.keys(vars);
+      const argVals  = Object.values(vars);
+      // eval som på klienten men med våra helpers
+      const fnUnit  = new Function('table','round','resolveTierByArea', ...argNames, `return (${unitExpr});`);
+      const unit = Number(fnUnit((...a)=>table(cfg,...a), round, (...a)=>resolveTierByArea(cfg,...a), ...argVals)) || 0;
+
+      const fnTotal = new Function('table','round','resolveTierByArea','unit', ...argNames, `return (${totalExpr});`);
+      const total = Number(fnTotal((...a)=>table(cfg,...a), round, (...a)=>resolveTierByArea(cfg,...a), unit, ...argVals)) || (unit * qty);
+
+      return { qty, unit: round(unit, 2), total: round(total, 2) };
+    }
+
+    // Läs configs en gång per id (cache lokal i request)
+    const baseDir = process.env.CONFIG_DIR || path.join(__dirname, 'configs');
+    const globalsPath = path.join(baseDir, 'globals.json');
+    const globalsCfg = fs.existsSync(globalsPath) ? readJson(globalsPath) : { options: [] };
+    const cfgCache = new Map();
+    const loadCfg = (id) => {
+      if (!id) return null;
+      if (cfgCache.has(id)) return cfgCache.get(id);
+      const productPath = path.join(baseDir, `${id}.json`);
+      if (!fs.existsSync(productPath)) return null;
+      const productCfg = readJson(productPath);
+      const merged = mergeConfig(productCfg, globalsCfg);
+      cfgCache.set(id, merged);
+      return merged;
+    };
+
+    // Bygg DraftOrder-rader
+    const draftLines = [];
+    for (const line of lines) {
+      const qty = Math.max(1, parseInt(line.quantity || line.qty || 1, 10));
+      const title = (line.productTitle || 'Trycksak').toString();
+      const propsArr = Array.isArray(line.properties) ? line.properties : [];
+
+      // plocka ev. calc-payload (vi accepterar både objekt och JSON-sträng)
+      let calc = null;
+      try {
+        const raw = propsArr.find(p => p && String(p.name).toLowerCase() === 'calc_payload')?.value;
+        calc = line.calc || (typeof raw === 'string' ? JSON.parse(raw) : raw) || null;
+      } catch { calc = null; }
+
+      // valuta från config (fallback SEK)
+      const cfgId = calc?.configId || line.configId || null;
+      const cfg = cfgId ? loadCfg(cfgId) : null;
+
+      let unit = 0, total = 0;
+      if (cfg && calc) {
+        const r = computeFromCalc(cfg, calc);
+        unit  = r.unit;
+        total = r.total; // inte nödvändigt men bra för validering
+      } else if (typeof line.unit === 'number') {
+        unit = line.unit;
+      }
+
+      // draft-rad (custom: true → fri prissättning)
+      draftLines.push({
+        title,
+        quantity: qty,
+        price: unit,            // pris per styck
+        custom: true,
+        properties: propsArr.filter(Boolean).map(p => ({ name: String(p.name), value: String(p.value ?? '') }))
+      });
+    }
+
+    const payload = {
+      draft_order: {
+        line_items: draftLines,
+        ...(note ? { note } : {}),
+        ...(customerId ? { customer: { id: customerId } } : {}),
+        tags: 'pressify,draft-checkout'
+      }
+    };
+
+    const r = await axios.post(
+      `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
+      payload,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
+    );
+
+    const draft = r.data?.draft_order;
+    if (!draft || !draft.invoice_url) {
+      return res.status(500).json({ error: 'draft_order saknar invoice_url' });
+    }
+
+    return res.json({
+      ok: true,
+      draft_order_id: draft.id,
+      name: draft.name,
+      invoice_url: draft.invoice_url
+    });
+  } catch (e) {
+    console.error('/draft/checkout error:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 
 // Starta installationen: /auth?shop=xxxx.myshopify.com
 app.get('/auth', (req, res) => {
