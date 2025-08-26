@@ -1,0 +1,26 @@
+{
+  "options": [
+    {
+      "id": "material",
+      "label": "Material",
+      "type": "buttons",
+      "choices": [
+        { "value": "papper", "label": "Papper" },
+        { "value": "plast",  "label": "Plast"  }
+      ],
+      "export": true
+    },
+    {
+      "id": "laminate",
+      "label": "Laminering",
+      "type": "buttons",
+      "choices": [
+        { "value": "none",  "label": "Ingen" },
+        { "value": "matte", "label": "Matt"  },
+        { "value": "gloss", "label": "Blank" }
+      ],
+      "when": { "expr": "material == 'plast'" },
+      "export": true
+    }
+  ]
+}
