@@ -1,178 +1,103 @@
 {
-    "id": "etiketter",
-    "title": "Etiketter",
-    "version": "1.0.0",
-    "currency": "SEK",
-    "options": [
-        {
-            "id": "size",
-            "label": "Storlek (BxH)",
-            "type": "select",
-            "default": "4x4",
-            "choices": [
-                {
-                    "value": "4x4",
-                    "label": "4×4 cm",
-                    "w_cm": 4,
-                    "h_cm": 4,
-                    "area_cm2": 16
-                },
-                {
-                    "value": "6x6",
-                    "label": "6×6 cm",
-                    "w_cm": 6,
-                    "h_cm": 6,
-                    "area_cm2": 36
-                },
-                {
-                    "value": "8x8",
-                    "label": "8×8 cm",
-                    "w_cm": 8,
-                    "h_cm": 8,
-                    "area_cm2": 64
-                },
-                {
-                    "value": "10x10",
-                    "label": "10×10 cm",
-                    "w_cm": 10,
-                    "h_cm": 10,
-                    "area_cm2": 100
-                },
-                {
-                    "value": "14x14",
-                    "label": "14×14 cm",
-                    "w_cm": 14,
-                    "h_cm": 14,
-                    "area_cm2": 196
-                },
-                {
-                    "value": "custom",
-                    "label": "Egen storlek (cm)"
-                }
-            ],
-            "ui": {
-                "component": "shared-select"
-            },
-            "export": true
-        },
-        {
-            "id": "variant_cards",
-            "label": "Välj alternativ",
-            "type": "cards",
-            "maxVisible": 3,
-            "showMoreLabel": "Visa fler",
-            "default": "alt_standard",
-            "choices": [
-                {
-                    "value": "alt_standard",
-                    "title": "Standard",
-                    "text": "Vardagstålig etikett för de flesta ändamål.",
-                    "image": "https://cdn.example.com/etiketter/standard.png"
-                },
-                {
-                    "value": "alt_utomhus",
-                    "title": "Utomhus",
-                    "text": "Slitstark och väderbeständig för tuffa miljöer.",
-                    "image": "https://cdn.example.com/etiketter/outdoor.png"
-                },
-                {
-                    "value": "alt_miljo",
-                    "title": "Miljösmart",
-                    "text": "Tillverkad med återvunnet material.",
-                    "image": "https://cdn.example.com/etiketter/eco.png"
-                },
-                {
-                    "value": "alt_premium",
-                    "title": "Premium",
-                    "text": "Extra fin yta och färgåtergivning.",
-                    "image": "https://cdn.example.com/etiketter/premium.png"
-                }
-            ],
-            "export": true
-        },
-        {
-            "id": "finish",
-            "label": "Finish",
-            "type": "select",
-            "default": "gloss",
-            "choices": [
-                {
-                    "value": "gloss",
-                    "label": "Glansigt"
-                },
-                {
-                    "value": "uncoated",
-                    "label": "Obestruken"
-                },
-                {
-                    "value": "matte",
-                    "label": "Matt"
-                }
-            ],
-            "ui": {
-                "component": "shared-select"
-            },
-            "export": true
-        },
-        {
-            "id": "qty",
-            "label": "Antal",
-            "type": "select",
-            "default": 80,
-            "choices": [
-                {
-                    "value": 80,
-                    "label": "80"
-                },
-                {
-                    "value": 100,
-                    "label": "100"
-                },
-                {
-                    "value": 250,
-                    "label": "250"
-                },
-                {
-                    "value": 500,
-                    "label": "500"
-                },
-                {
-                    "value": 750,
-                    "label": "750"
-                },
-                {
-                    "value": 1000,
-                    "label": "1000"
-                },
-                {
-                    "value": 1500,
-                    "label": "1500"
-                },
-                {
-                    "value": 2000,
-                    "label": "2000"
-                },
-                {
-                    "value": 2500,
-                    "label": "2500"
-                },
-                {
-                    "value": 5000,
-                    "label": "5000"
-                }
-            ],
-            "ui": {
-                "component": "shared-select"
-            },
-            "export": true
-        }
-    ],
-    "tables": [],
-    "formulas": {},
-    "export": [
-        "size",
-        "variant_cards",
-        "finish",
-        "qty"
-    ]
+  "id": "etiketter",
+  "title": "Etiketter",
+  "version": "1.0.0",
+  "currency": "SEK",
+  "options": [
+    {
+      "id": "size",
+      "label": "Storlek (BxH)",
+      "type": "select",
+      "default": 1,
+      "choices": [
+        { "value": 1, "code": "4x4",   "label": "4×4 cm",   "w_cm": 4,  "h_cm": 4,  "area_cm2": 16 },
+        { "value": 2, "code": "6x6",   "label": "6×6 cm",   "w_cm": 6,  "h_cm": 6,  "area_cm2": 36 },
+        { "value": 3, "code": "8x8",   "label": "8×8 cm",   "w_cm": 8,  "h_cm": 8,  "area_cm2": 64 },
+        { "value": 4, "code": "10x10", "label": "10×10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
+        { "value": 5, "code": "14x14", "label": "14×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 },
+        { "value": "custom", "code": "custom", "label": "Egen storlek (cm)" }
+      ],
+      "customTierRules": {
+        "type": "area_cm2",
+        "breakpoints": [25, 50, 80, 120, 200, 300],
+        "tiers":       [1,   2,  3,  4,   5,   6,   7]
+      },
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
+      "id": "variant_cards",
+      "label": "Välj alternativ",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "alt_standard",
+      "choices": [
+        { "value": "alt_standard", "title": "Standard", "text": "Vardagstålig etikett för de flesta ändamål.", "image": "https://cdn.example.com/etiketter/standard.png" },
+        { "value": "alt_utomhus", "title": "Utomhus", "text": "Slitstark och väderbeständig för tuffa miljöer.", "image": "https://cdn.example.com/etiketter/outdoor.png" },
+        { "value": "alt_miljo", "title": "Miljösmart", "text": "Tillverkad med återvunnet material.", "image": "https://cdn.example.com/etiketter/eco.png" },
+        { "value": "alt_premium", "title": "Premium", "text": "Extra fin yta och färgåtergivning.", "image": "https://cdn.example.com/etiketter/premium.png" }
+      ],
+      "export": true
+    },
+    {
+      "id": "finish",
+      "label": "Finish",
+      "type": "select",
+      "default": "gloss",
+      "choices": [
+        { "value": "gloss", "label": "Glansigt" },
+        { "value": "uncoated", "label": "Obestruken" },
+        { "value": "matte", "label": "Matt" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
+      "id": "qty",
+      "label": "Antal",
+      "type": "select",
+      "default": 80,
+      "choices": [
+        { "value": 80, "label": "80" },
+        { "value": 100, "label": "100" },
+        { "value": 250, "label": "250" },
+        { "value": 500, "label": "500" },
+        { "value": 750, "label": "750" },
+        { "value": 1000, "label": "1000" },
+        { "value": 1500, "label": "1500" },
+        { "value": 2000, "label": "2000" },
+        { "value": 2500, "label": "2500" },
+        { "value": 5000, "label": "5000" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    }
+  ],
+  "tables": {
+    "unit_price": {
+      "rows": [80, 100, 250, 500, 750, 1000, 1500, 2000, 2500, 5000, 10000],
+      "cols": [1, 2, 3, 4, 5, 6, 7],
+      "data": [
+        [3.2,   4.54, 7.86, 8.45, 11.66, 14.27,  9.81],
+        [2.87,  4.37, 6.67, 8.45, 11.66, 14.27,  7.66],
+        [1.59,  3.44, 4.6,  6.34, 7.86,  8.92,   3.22],
+        [1.49,  3.44, 4.6,  6.34, 7.86,  8.82,   3.22],
+        [1.49,  3.31, 3.5,  4.47, 5.34,  8.4,    2.53],
+        [1.45,  1.97, 3.4,  4.31, 5.32,  6.95,   2.17],
+        [0.993, 1.67, 2.81, 3.41, 4.29,  6.06,   1.84],
+        [0.993, 1.57, 2.73, 3.28, 4.13,  5.85,   1.4],
+        [0.992, 1.57, 2.65, 3.15, 4.13,  5.64,   1.2],
+        [0.953, 1.57, 2.57, 3.03, 4.11,  5.44,   0.99],
+        [0.863, 1.00, 2.49, 3.21, 3.02,  5.25,   0.99]
+      ]
+    }
+  },
+  "formulas": {
+    "tier": "size === 'custom' ? resolveTierByArea(w_cm, h_cm, 'size.customTierRules') : size",
+    "unit_price": "table('unit_price', qty, tier)",
+    "total_price": "round(unit_price * qty, 2)"
+  },
+  "export": ["size", "variant_cards", "finish", "qty"]
 }
+
