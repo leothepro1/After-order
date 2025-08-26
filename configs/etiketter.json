@@ -3,52 +3,100 @@
   "title": "Etiketter",
   "version": "1.0.0",
   "currency": "SEK",
-  "quantities": [ { "value": 50 }, { "value": 100 }, { "value": 200 }, { "value": 500 }, { "value": 1000 }, { "value": 2000 } ],
+
   "options": [
     {
-      "id": "shape",
-      "label": "Form",
-      "type": "buttons",
+      "id": "size",
+      "label": "Storlek (BxH)",
+      "type": "select",
+      "default": "4x4",
       "choices": [
-        { "value": "round",  "label": "Rund"     },
-        { "value": "square", "label": "Kvadrat"  }
+        { "value": "4x4",   "label": "4×4 cm",   "w_cm": 4,  "h_cm": 4,  "area_cm2": 16  },
+        { "value": "6x6",   "label": "6×6 cm",   "w_cm": 6,  "h_cm": 6,  "area_cm2": 36  },
+        { "value": "8x8",   "label": "8×8 cm",   "w_cm": 8,  "h_cm": 8,  "area_cm2": 64  },
+        { "value": "10x10", "label": "10×10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
+        { "value": "14x14", "label": "14×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+
+    {
+      "id": "variant_cards",
+      "label": "Välj alternativ",
+      "type": "cards",                     // special: renderas som knappar
+      "maxVisible": 3,                    // visa 3, resten bakom “Visa fler”
+      "showMoreLabel": "Visa fler",
+      "default": "alt_standard",          // första är alltid förvald
+      "choices": [
+        {
+          "value": "alt_standard",
+          "title": "Standard",
+          "text": "Vardagstålig etikett för de flesta ändamål.",
+          "image": "https://cdn.example.com/etiketter/standard.png"
+        },
+        {
+          "value": "alt_utomhus",
+          "title": "Utomhus",
+          "text": "Slitstark och väderbeständig för tuffa miljöer.",
+          "image": "https://cdn.example.com/etiketter/outdoor.png"
+        },
+        {
+          "value": "alt_miljo",
+          "title": "Miljösmart",
+          "text": "Tillverkad med återvunnet material.",
+          "image": "https://cdn.example.com/etiketter/eco.png"
+        },
+
+        /* Fler kort? Lägg här – de döljs tills “Visa fler” klickas */
+        {
+          "value": "alt_premium",
+          "title": "Premium",
+          "text": "Extra fin yta och färgåtergivning.",
+          "image": "https://cdn.example.com/etiketter/premium.png"
+        }
       ],
       "export": true
     },
+
     {
       "id": "finish",
-      "label": "Ytfinish",
-      "type": "buttons",
+      "label": "Finish",
+      "type": "select",
+      "default": "gloss",
       "choices": [
-        { "value": "standard", "label": "Standard" },
-        { "value": "premium",  "label": "Premium"  }
+        { "value": "gloss", "label": "Glansigt"    },
+        { "value": "uncoated", "label": "Obestruken" },
+        { "value": "matte", "label": "Matt"        }
       ],
-      "when": { "expr": "material == 'papper'" },
-      "priceMod": "IF(finish == 'premium', 0.2, 0)",
+      "ui": { "component": "shared-select" },
       "export": true
     },
-    { "id": "upload", "label": "Tryckfil", "type": "upload", "export": true }
-  ],
-  "tables": [
+
     {
-      "id": "base",
-      "key": "qty",
-      "source": { "type": "csv", "data": "qty,price\n50,2.50\n100,2.00\n200,1.40\n500,0.85\n1000,0.60\n2000,0.45" }
-    },
-    {
-      "id": "lam_add",
-      "key": "qty",
-      "source": { "type": "inline", "data": "[{\"qty\":50,\"price\":0.20},{\"qty\":100,\"price\":0.18},{\"qty\":200,\"price\":0.15},{\"qty\":500,\"price\":0.12},{\"qty\":1000,\"price\":0.10},{\"qty\":2000,\"price\":0.08}]" }
+      "id": "qty",
+      "label": "Antal",
+      "type": "select",
+      "default": 80,
+      "choices": [
+        { "value": 80,   "label": "80"   },
+        { "value": 100,  "label": "100"  },
+        { "value": 250,  "label": "250"  },
+        { "value": 500,  "label": "500"  },
+        { "value": 750,  "label": "750"  },
+        { "value": 1000, "label": "1000" },
+        { "value": 1500, "label": "1500" },
+        { "value": 2000, "label": "2000" },
+        { "value": 2500, "label": "2500" },
+        { "value": 5000, "label": "5000" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
     }
   ],
-  "formulas": {
-    "unit": "ROUND( LOOKUP('base', qty, 'price') + IF(material=='plast' && laminate=='gloss', LOOKUP('lam_add', qty, 'price'), 0) + IF(shape=='round', 0.02, 0) + IF(finish=='premium', 0.2, 0), 2)",
-    "breakdown": {
-      "Bas": "LOOKUP('base', qty, 'price')",
-      "Laminat": "IF(material=='plast' && laminate=='gloss', LOOKUP('lam_add', qty, 'price'), 0)",
-      "Formtillägg": "IF(shape=='round', 0.02, 0)",
-      "Premiumfinish": "IF(finish=='premium', 0.2, 0)"
-    }
-  },
-  "export": ["material","laminate","shape","finish","upload"]
+
+  "tables": [],      // läggs till senare (priser)
+  "formulas": {},    // kopplas senare
+
+  "export": ["size","variant_cards","finish","qty"]
 }
