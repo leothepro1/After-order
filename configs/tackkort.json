@@ -24,7 +24,7 @@
       "type": "cards",
       "maxVisible": 3,
       "showMoreLabel": "Visa fler",
-      "default": "premiumpapper",
+      "default": "1",
       "choices": [
         {
           "value": "1",
@@ -97,10 +97,10 @@
       ]
     }
   },
-"formulas": {
-  "tier": "size",
-  "unit_price": "table('unit_price', qty, tier) * parseFloat(variant_cards) * 1.25",
-  "total_price": "unit * qty"
-}
+  "formulas": {
+    "tier": "size",
+    "unit_price": "table('unit_price', qty, tier) * parseFloat(variant_cards) * 1.25",
+    "total_price": "unit * qty"
+  },
   "export": ["size", "variant_cards", "finish", "qty"]
 }
