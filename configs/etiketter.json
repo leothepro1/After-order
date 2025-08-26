@@ -37,7 +37,7 @@
         { "value": "alt_utomhus", "title": "Transparent", "text": "Slitstark och väderbeständig för tuffa miljöer.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219193/1754482252898jpeg-optimizer_fgdfdg_cqlpvh.png" },
         { "value": "alt_miljo", "title": "Kraftpapper", "text": "Tillverkad med återvunnet material.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219200/1754482031310jpeg-optimizer_kraftpapper_yerxm2_ax11uj.png" },
         { "value": "alt_premium", "title": "Metallic", "text": "Extra fin yta och färgåtergivning.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219207/1754482036584jpeg-optimizer_metallic_gvxjbo_cyzbe0.png" },
-        { "value": "alt_premium", "title": "Holografisk", "text": "Extra fin yta och färgåtergivning.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219210/1754485236837jpeg-optimizer_holografisk_93_csmvry.png" }
+        { "value": "alt_sacre", "title": "Holografisk", "text": "Extra fin yta och färgåtergivning.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756219210/1754485236837jpeg-optimizer_holografisk_93_csmvry.png" }
       ],
       "export": true
     },
