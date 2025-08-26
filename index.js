@@ -5,6 +5,8 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const bodyParser = require('body-parser');
+const fs = require('fs');         
+const path = require('path');  
 
 const app = express(); // ✅ Skapa app INNAN du använder den
 
@@ -278,18 +280,57 @@ const shopTokenStore = {};    // { shop: token }  // OBS: din kod använder fort
 // Temporär lagring för förhandsdata från frontend
 const temporaryStorage = {}; // { [projectId]: { previewUrl, cloudinaryPublicId, instructions, date } }
 
-// Middleware
 app.use(bodyParser.json({ verify: (req, res, buf) => {
   req.rawBody = buf;
 }}));
-// ⬇️ NYTT: för att hantera application/x-www-form-urlencoded från HTML-formulär
 app.use(bodyParser.urlencoded({ extended: true }));
+
+/* ====== NYTT: config-hjälpare ====== */
+function readJson(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  return JSON.parse(raw);
+}
+function mergeConfig(productCfg, globalsCfg) {
+  const merged = { ...productCfg };
+  merged.options = [ ...(globalsCfg.options || []), ...(productCfg.options || []) ];
+  return merged;
+}
+function sendWithCache(res, cfg, versionHint) {
+  const etag = `"cfg-${versionHint || cfg.version || Date.now()}"`;
+  res.set('ETag', etag);
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json(cfg);
+}
+/* ====== SLUT config-hjälpare ====== */
 
 // Liten hälsosida så "Cannot GET /" försvinner
 app.get('/', (req, res) => res.type('text').send('OK'));
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 
-// ===== OAuth (Partner-app) =====
+// ⬇️⬇️ NYTT: hämta merged config (ex: /calc/etiketter)
+app.get('/calc/:id', (req, res) => {
+  try {
+    const id = req.params.id;
+    const cfgDir = path.join(process.cwd(), 'configs');
+    const globalsPath = path.join(cfgDir, 'globals.json');
+    const productPath = path.join(cfgDir, `${id}.json`);
+
+    if (!fs.existsSync(productPath)) {
+      return res.status(404).json({ error: `Config not found: ${id}` });
+    }
+
+    const productCfg = readJson(productPath);
+    const globalsCfg = fs.existsSync(globalsPath) ? readJson(globalsPath) : { options: [] };
+    const merged = mergeConfig(productCfg, globalsCfg);
+    sendWithCache(res, merged, productCfg.version);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to load config' });
+  }
+});
+// ⬆️⬆️ SLUT NYTT
+
+
 // Starta installationen: /auth?shop=xxxx.myshopify.com
 app.get('/auth', (req, res) => {
   const shop = req.query.shop;
