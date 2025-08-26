@@ -1,103 +1,178 @@
 {
-  "id": "etiketter",
-  "title": "Etiketter",
-  "version": "1.0.0",
-  "currency": "SEK",
-
-  "options": [
- {
-  "id": "size",
-  "label": "Storlek (BxH)",
-  "type": "select",
-  "default": "4x4",
-  "choices": [
-    { "value": "4x4",   "label": "4×4 cm",   "w_cm": 4,  "h_cm": 4,  "area_cm2": 16  },
-    { "value": "6x6",   "label": "6×6 cm",   "w_cm": 6,  "h_cm": 6,  "area_cm2": 36  },
-    { "value": "8x8",   "label": "8×8 cm",   "w_cm": 8,  "h_cm": 8,  "area_cm2": 64  },
-    { "value": "10x10", "label": "10×10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
-    { "value": "14x14", "label": "14×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 },
-    { "value": "custom", "label": "Egen storlek (cm)" }
-  ],
-  "ui": { "component": "shared-select" },
-  "export": true
-}
-
-
-    {
-      "id": "variant_cards",
-      "label": "Välj alternativ",
-      "type": "cards",              
-      "maxVisible": 3,                    
-      "showMoreLabel": "Visa fler",
-      "default": "alt_standard",       
-      "choices": [
+    "id": "etiketter",
+    "title": "Etiketter",
+    "version": "1.0.0",
+    "currency": "SEK",
+    "options": [
         {
-          "value": "alt_standard",
-          "title": "Standard",
-          "text": "Vardagstålig etikett för de flesta ändamål.",
-          "image": "https://cdn.example.com/etiketter/standard.png"
+            "id": "size",
+            "label": "Storlek (BxH)",
+            "type": "select",
+            "default": "4x4",
+            "choices": [
+                {
+                    "value": "4x4",
+                    "label": "4×4 cm",
+                    "w_cm": 4,
+                    "h_cm": 4,
+                    "area_cm2": 16
+                },
+                {
+                    "value": "6x6",
+                    "label": "6×6 cm",
+                    "w_cm": 6,
+                    "h_cm": 6,
+                    "area_cm2": 36
+                },
+                {
+                    "value": "8x8",
+                    "label": "8×8 cm",
+                    "w_cm": 8,
+                    "h_cm": 8,
+                    "area_cm2": 64
+                },
+                {
+                    "value": "10x10",
+                    "label": "10×10 cm",
+                    "w_cm": 10,
+                    "h_cm": 10,
+                    "area_cm2": 100
+                },
+                {
+                    "value": "14x14",
+                    "label": "14×14 cm",
+                    "w_cm": 14,
+                    "h_cm": 14,
+                    "area_cm2": 196
+                },
+                {
+                    "value": "custom",
+                    "label": "Egen storlek (cm)"
+                }
+            ],
+            "ui": {
+                "component": "shared-select"
+            },
+            "export": true
         },
         {
-          "value": "alt_utomhus",
-          "title": "Utomhus",
-          "text": "Slitstark och väderbeständig för tuffa miljöer.",
-          "image": "https://cdn.example.com/etiketter/outdoor.png"
+            "id": "variant_cards",
+            "label": "Välj alternativ",
+            "type": "cards",
+            "maxVisible": 3,
+            "showMoreLabel": "Visa fler",
+            "default": "alt_standard",
+            "choices": [
+                {
+                    "value": "alt_standard",
+                    "title": "Standard",
+                    "text": "Vardagstålig etikett för de flesta ändamål.",
+                    "image": "https://cdn.example.com/etiketter/standard.png"
+                },
+                {
+                    "value": "alt_utomhus",
+                    "title": "Utomhus",
+                    "text": "Slitstark och väderbeständig för tuffa miljöer.",
+                    "image": "https://cdn.example.com/etiketter/outdoor.png"
+                },
+                {
+                    "value": "alt_miljo",
+                    "title": "Miljösmart",
+                    "text": "Tillverkad med återvunnet material.",
+                    "image": "https://cdn.example.com/etiketter/eco.png"
+                },
+                {
+                    "value": "alt_premium",
+                    "title": "Premium",
+                    "text": "Extra fin yta och färgåtergivning.",
+                    "image": "https://cdn.example.com/etiketter/premium.png"
+                }
+            ],
+            "export": true
         },
         {
-          "value": "alt_miljo",
-          "title": "Miljösmart",
-          "text": "Tillverkad med återvunnet material.",
-          "image": "https://cdn.example.com/etiketter/eco.png"
+            "id": "finish",
+            "label": "Finish",
+            "type": "select",
+            "default": "gloss",
+            "choices": [
+                {
+                    "value": "gloss",
+                    "label": "Glansigt"
+                },
+                {
+                    "value": "uncoated",
+                    "label": "Obestruken"
+                },
+                {
+                    "value": "matte",
+                    "label": "Matt"
+                }
+            ],
+            "ui": {
+                "component": "shared-select"
+            },
+            "export": true
         },
-
         {
-          "value": "alt_premium",
-          "title": "Premium",
-          "text": "Extra fin yta och färgåtergivning.",
-          "image": "https://cdn.example.com/etiketter/premium.png"
+            "id": "qty",
+            "label": "Antal",
+            "type": "select",
+            "default": 80,
+            "choices": [
+                {
+                    "value": 80,
+                    "label": "80"
+                },
+                {
+                    "value": 100,
+                    "label": "100"
+                },
+                {
+                    "value": 250,
+                    "label": "250"
+                },
+                {
+                    "value": 500,
+                    "label": "500"
+                },
+                {
+                    "value": 750,
+                    "label": "750"
+                },
+                {
+                    "value": 1000,
+                    "label": "1000"
+                },
+                {
+                    "value": 1500,
+                    "label": "1500"
+                },
+                {
+                    "value": 2000,
+                    "label": "2000"
+                },
+                {
+                    "value": 2500,
+                    "label": "2500"
+                },
+                {
+                    "value": 5000,
+                    "label": "5000"
+                }
+            ],
+            "ui": {
+                "component": "shared-select"
+            },
+            "export": true
         }
-      ],
-      "export": true
-    },
-
-    {
-      "id": "finish",
-      "label": "Finish",
-      "type": "select",
-      "default": "gloss",
-      "choices": [
-        { "value": "gloss", "label": "Glansigt"    },
-        { "value": "uncoated", "label": "Obestruken" },
-        { "value": "matte", "label": "Matt"        }
-      ],
-      "ui": { "component": "shared-select" },
-      "export": true
-    },
-
-    {
-      "id": "qty",
-      "label": "Antal",
-      "type": "select",
-      "default": 80,
-      "choices": [
-        { "value": 80,   "label": "80"   },
-        { "value": 100,  "label": "100"  },
-        { "value": 250,  "label": "250"  },
-        { "value": 500,  "label": "500"  },
-        { "value": 750,  "label": "750"  },
-        { "value": 1000, "label": "1000" },
-        { "value": 1500, "label": "1500" }
-        { "value": 2000, "label": "2000" },
-        { "value": 2500, "label": "2500" },
-        { "value": 5000, "label": "5000" }
-      ],
-      "ui": { "component": "shared-select" },
-      "export": true
-    }
-  ],
-
-  "tables": [],   
-  "formulas": {},  
-
-  "export": ["size","variant_cards","finish","qty"]
+    ],
+    "tables": [],
+    "formulas": {},
+    "export": [
+        "size",
+        "variant_cards",
+        "finish",
+        "qty"
+    ]
 }
