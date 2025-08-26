@@ -311,9 +311,11 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 app.get('/calc/:id', (req, res) => {
   try {
     const id = req.params.id;
-    const cfgDir = path.join(process.cwd(), 'configs');
-    const globalsPath = path.join(cfgDir, 'globals.json');
-    const productPath = path.join(cfgDir, `${id}.json`);
+    // ERSÄTT i din /calc/:id-route:
+const baseDir = process.env.CONFIG_DIR || path.join(__dirname, 'configs');
+const globalsPath = path.join(baseDir, 'globals.json');
+const productPath = path.join(baseDir, `${id}.json`);
+
 
     if (!fs.existsSync(productPath)) {
       return res.status(404).json({ error: `Config not found: ${id}` });
