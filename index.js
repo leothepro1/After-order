@@ -368,7 +368,7 @@ app.get('/calc/:id', (req, res) => {
 const STRIP_KEYS = new Set([
   'calc_payload','_preview_img','preview_img',
   '_total_price','total_price',
-  'qty','Qty','Antal','antal'
+  'qty','Qty'
 ]);
 function isBlank(v){ return v==null || String(v).trim()===''; }
 function num(v){ const n = Number(String(v??'').replace(',','.')); return Number.isFinite(n)?n:0; }
