@@ -76,8 +76,8 @@
   },
   "formulas": {
     "tier": "variant_cards",
-    "unit_price": "table('unit_price', qty, tier) * 1.25",
-    "total_price": "unit * qty"
+  "unit_price": "table('unit_price', qty, (variant_cards*1)) * 1.25",
+  "total_price": "unit * qty"
   },
   "export": ["variant_cards", "qty"]
 }
