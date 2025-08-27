@@ -1,0 +1,124 @@
+{
+  "id": "brevboxar",
+  "title": "boxar",
+  "version": "1.1.0",
+  "currency": "SEK",
+  "options": [
+    {
+      "id": "size",
+      "label": "Storlek",
+      "type": "select",
+      "default": 1,
+      "choices": [
+        { "value": 1, "code": "A56",    "label": "15 × 12 × 5 cm",  "w_cm": 15, "h_cm": 12, "area_cm2": 180 },
+        { "value": 2, "code": "KV1481", "label": "20 × 14 × 8 cm",  "w_cm": 20, "h_cm": 14, "area_cm2": 280 },
+        { "value": 3, "code": "A52",    "label": "23 × 23 × 8 cm",  "w_cm": 23, "h_cm": 23, "area_cm2": 529 },
+        { "value": 4, "code": "RAC3K",  "label": "35 × 21 × 10 cm", "w_cm": 35, "h_cm": 21, "area_cm2": 735 }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
+      "id": "variant_cards",
+      "label": "Material",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "1",
+      "choices": [
+        {
+          "value": "1",
+          "title": "Brun wellpapp",
+          "text": "Standard – prisvärt och robust.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228854/FQc1Hlin3_mqvcj2.png"
+        },
+        {
+          "value": "1.3",
+          "title": "Vit wellpapp",
+          "text": "Premiumlook – något högre kostnad.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756228860/FQc-WdmEs_ayytcn.png"
+        }
+      ],
+      "export": true
+    },
+    {
+      "id": "closing",
+      "label": "Typ av stängning",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "1",
+      "choices": [
+        {
+          "value": "1",
+          "title": "Viks in framtill",
+          "text": "Standardstängning – ingen prispåverkan.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756299288/1755272181727hjgghj_kovkw2.png"
+        },
+        {
+          "value": "1",
+          "title": "Dubbelsidig tejp",
+          "text": "Enkel montering – samma pris.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756299291/1755272186062hjg_r7y7uh.png"
+        }
+      ],
+      "export": true
+    },
+    {
+      "id": "finish",
+      "label": "Tryckplacering",
+      "type": "select",
+      "default": "outside",
+      "choices": [
+        { "value": "outside", "label": "Endast utsida" },
+        { "value": "both",    "label": "Utsida + Insida" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
+      "id": "qty",
+      "label": "Antal",
+      "type": "select",
+      "default": 25,
+      "choices": [
+        { "value": 25,  "label": "25" },
+        { "value": 50,  "label": "50" },
+        { "value": 75,  "label": "75" },
+        { "value": 100, "label": "100" },
+        { "value": 150, "label": "150" },
+        { "value": 200, "label": "200" },
+        { "value": 300, "label": "300" },
+        { "value": 400, "label": "400" },
+        { "value": 500, "label": "500" },
+        { "value": 600, "label": "600" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    }
+  ],
+  "tables": {
+    "unit_price": {
+      "rows": [25, 50, 75, 100, 150, 200, 300, 400, 500, 600],
+      "cols": [1, 2, 3, 4],
+      "data": [
+        [22.20, 36.77, 45.34, 61.37],
+        [17.74, 27.61, 35.83, 49.06],
+        [15.35, 25.75, 35.83, 47.68],
+        [14.39, 24.52, 33.35, 42.94],
+        [14.39, 23.92, 33.35, 42.94],
+        [13.29, 25.51, 31.09, 41.70],
+        [13.26, 20.23, 29.78, 41.07],
+        [11.93, 19.62, 28.61, 41.07],
+        [10.61, 18.39, 27.50, 39.85],
+        [10.60, 18.39, 27.58, 39.85]
+      ]
+    }
+  },
+  "formulas": {
+    "tier": "size",
+    "unit_price": "table('unit_price', qty, tier) * ((Number(variant_cards) || 1)) * 1.25",
+    "total_price": "unit * qty"
+  },
+  "export": ["size", "variant_cards", "closing", "finish", "qty"]
+}
