@@ -362,155 +362,179 @@ app.get('/calc/:id', (req, res) => {
 
 // ⬆️⬆️ SLUT NYTT
 
-// ========= DRAFT CHECKOUT (skapa Draft Order från cart-payload) =========
-app.post('/draft/checkout', async (req, res) => {
-  try {
-    const { lines, customerId, note } = req.body || {};
-    if (!Array.isArray(lines) || !lines.length) {
-      return res.status(400).json({ error: 'lines krävs' });
-    }
+/* ========= PRESSIFY DRAFT ORDER (ENDPOINTS + NORMALISERING + SANERING) ========= */
 
-    // Helpers (samma idé som på frontend)
-    function round(n, d = 2) { const f = Math.pow(10, d|0); return Math.round(Number(n||0)*f)/f; }
-    function indexClosest(arr, num) {
-      if (!Array.isArray(arr) || !arr.length) return -1;
-      let best=0, diff=Math.abs(arr[0]-num);
-      for (let i=1;i<arr.length;i++){ const d=Math.abs(arr[i]-num); if(d<diff){best=i; diff=d;} }
-      return best;
-    }
-    function table(cfg, tableName, rowKey, colKey){
-      const t = cfg.tables && cfg.tables[tableName];
-      if (!t || !Array.isArray(t.rows) || !Array.isArray(t.cols) || !Array.isArray(t.data)) return 0;
-      let rIdx = t.rows.indexOf(Number(rowKey));
-      let cIdx = t.cols.indexOf(Number(colKey));
-      if (rIdx < 0) rIdx = indexClosest(t.rows, Number(rowKey));
-      if (cIdx < 0) cIdx = indexClosest(t.cols, Number(colKey));
-      if (rIdx < 0 || cIdx < 0) return 0;
-      const val = Number((t.data[rIdx] || [])[cIdx]); 
-      return isFinite(val) ? val : 0;
-    }
-    function resolveTierByArea(cfg, w, h, rulesPath) {
-      const getByPath = (obj, path) => String(path||'').split('.').reduce((o,k)=>(o && k in o ? o[k] : undefined), obj);
-      const sizeOpt = (cfg.options || []).find(o => o.id === 'size') || {};
-      const rules = (rulesPath && rulesPath.startsWith('size.'))
-        ? getByPath(sizeOpt, rulesPath.replace(/^size\./,''))
-        : getByPath(cfg, rulesPath);
-      const area = Number(w||0) * Number(h||0);
-      const bps = (rules && rules.breakpoints) || [];
-      const tiers = (rules && rules.tiers) || [];
-      if (!bps.length || !tiers.length) return 1;
-      for (let i=0;i<bps.length;i++) if (area <= bps[i]) return tiers[i];
-      return tiers[tiers.length-1] || 7;
-    }
-    function computeFromCalc(cfg, calc) {
-      const state = Object.assign({}, calc?.options || {});
-      const qty = Number(calc?.qty || state.qty || 0);
-      const sizeRaw = String(state.size ?? '');
-      const isCustom = sizeRaw === 'custom';
-      const tier = isCustom
-        ? resolveTierByArea(cfg, state.size_w_cm, state.size_h_cm, 'size.customTierRules')
-        : Number(state.size || 1);
+// 1) Sanera properties – tillåt bara synliga fält (det du visar i varukorgen)
+const STRIP_KEYS = new Set([
+  'calc_payload','_preview_img','preview_img',
+  '_total_price','total_price',
+  'qty','Qty','Antal','antal'
+]);
+function isBlank(v){ return v==null || String(v).trim()===''; }
+function num(v){ const n = Number(String(v??'').replace(',','.')); return Number.isFinite(n)?n:0; }
 
-      const unitExpr = cfg.formulas?.unit_price || '0';
-      const totalExpr = cfg.formulas?.total_price || 'unit*qty';
+// Object → [{name,value}]
+function propsObjToArray(obj){
+  const out = [];
+  for (const [k,v] of Object.entries(obj||{})){
+    if (isBlank(v)) continue;
+    out.push({ name:String(k), value:String(v) });
+  }
+  return out;
+}
 
-      const vars = { ...state, qty, tier, pricing: (cfg.pricing || {}) };
-      const argNames = Object.keys(vars);
-      const argVals  = Object.values(vars);
-      // eval som på klienten men med våra helpers
-      const fnUnit  = new Function('table','round','resolveTierByArea', ...argNames, `return (${unitExpr});`);
-      const unit = Number(fnUnit((...a)=>table(cfg,...a), round, (...a)=>resolveTierByArea(cfg,...a), ...argVals)) || 0;
+// Array/Obj → sanerad array
+function sanitizeProps(props){
+  const arr = Array.isArray(props) ? props : propsObjToArray(props);
+  const out = [];
+  for (const p of (arr||[])){
+    if (!p) continue;
+    const name = String(p.name||p.key||'');
+    const value = String(p.value ?? '');
+    if (isBlank(value)) continue;
+    if (STRIP_KEYS.has(name)) continue;
+    out.push({ name, value });
+  }
+  return out;
+}
 
-      const fnTotal = new Function('table','round','resolveTierByArea','unit', ...argNames, `return (${totalExpr});`);
-      const total = Number(fnTotal((...a)=>table(cfg,...a), round, (...a)=>resolveTierByArea(cfg,...a), unit, ...argVals)) || (unit * qty);
-
-      return { qty, unit: round(unit, 2), total: round(total, 2) };
-    }
-
-    // Läs configs en gång per id (cache lokal i request)
-    const baseDir = process.env.CONFIG_DIR || path.join(__dirname, 'configs');
-    const globalsPath = path.join(baseDir, 'globals.json');
-    const globalsCfg = fs.existsSync(globalsPath) ? readJson(globalsPath) : { options: [] };
-    const cfgCache = new Map();
-    const loadCfg = (id) => {
-      if (!id) return null;
-      if (cfgCache.has(id)) return cfgCache.get(id);
-      const productPath = path.join(baseDir, `${id}.json`);
-      if (!fs.existsSync(productPath)) return null;
-      const productCfg = readJson(productPath);
-      const merged = mergeConfig(productCfg, globalsCfg);
-      cfgCache.set(id, merged);
-      return merged;
-    };
-
-    // Bygg DraftOrder-rader
-    const draftLines = [];
-    for (const line of lines) {
-      const qty = Math.max(1, parseInt(line.quantity || line.qty || 1, 10));
-      const title = (line.productTitle || 'Trycksak').toString();
-      const propsArr = Array.isArray(line.properties) ? line.properties : [];
-
-      // plocka ev. calc-payload (vi accepterar både objekt och JSON-sträng)
-      let calc = null;
+// 2) Bygg "custom line items" från generisk payload (fallback om ingen shopify.draft_order skickas)
+function buildCustomLinesFromGeneric(items){
+  const lines = [];
+  for (const it of (items||[])){
+    const qty = Math.max(1, parseInt(it.quantity ?? it.qty ?? 1, 10));
+    // radtotal → _total_price / total_price / hint
+    const propsIn  = it.properties || {};
+    const propsArr = Array.isArray(propsIn) ? propsIn : propsObjToArray(propsIn);
+    const rawTotalProp = (() => {
       try {
-        const raw = propsArr.find(p => p && String(p.name).toLowerCase() === 'calc_payload')?.value;
-        calc = line.calc || (typeof raw === 'string' ? JSON.parse(raw) : raw) || null;
-      } catch { calc = null; }
+        const map = new Map(propsArr.map(p=>[String(p.name||'').toLowerCase(), p.value]));
+        return map.get('_total_price') ?? map.get('total_price');
+      } catch { return null; }
+    })();
+    const lineTotal =
+      !isBlank(rawTotalProp) ? num(rawTotalProp) :
+      (typeof it.custom_line_total === 'number' ? it.custom_line_total :
+      (typeof it.line_price_hint === 'number' ? it.line_price_hint : 0));
 
-      // valuta från config (fallback SEK)
-      const cfgId = calc?.configId || line.configId || null;
-      const cfg = cfgId ? loadCfg(cfgId) : null;
+    const unitCustom = qty > 0
+      ? (typeof it.custom_price === 'number' ? it.custom_price : Number((lineTotal/qty).toFixed(2)))
+      : 0;
 
-      let unit = 0, total = 0;
-      if (cfg && calc) {
-        const r = computeFromCalc(cfg, calc);
-        unit  = r.unit;
-        total = r.total; // inte nödvändigt men bra för validering
-      } else if (typeof line.unit === 'number') {
-        unit = line.unit;
-      }
+    lines.push({
+      custom: true,
+      title: String(it.title || it.productTitle || 'Trycksak'),
+      quantity: qty,
+      price: Number(unitCustom.toFixed(2)),
+      properties: sanitizeProps(propsArr)
+    });
+  }
+  return lines;
+}
 
-      // draft-rad (custom: true → fri prissättning)
-      draftLines.push({
-        title,
-        quantity: qty,
-        price: unit,            // pris per styck
-        custom: true,
-        properties: propsArr.filter(Boolean).map(p => ({ name: String(p.name), value: String(p.value ?? '') }))
+// 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
+async function handleDraftCreate(req, res){
+  try{
+    const body = req.body || {};
+    let payloadToShopify = null;
+
+    // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
+    if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft_order.line_items)) {
+      const incoming = body.shopify.draft_order;
+      const cleanLines = incoming.line_items.map(li => {
+        const clean = {
+          // Tillåt bara fält Shopify bryr sig om
+          ...(li.variant_id ? { variant_id: li.variant_id } : {}),
+          ...(li.custom ? { custom: !!li.custom } : {}),
+          ...(li.title ? { title: String(li.title) } : {}),
+          quantity: Math.max(1, parseInt(li.quantity || 1, 10)),
+          properties: sanitizeProps(li.properties || [])
+        };
+        if (li.custom || typeof li.price !== 'undefined') {
+          // custom line (eller tvinga pris om redan satt)
+          clean.custom = true;
+          clean.price = Number(num(li.price).toFixed(2));
+        } else if (li.applied_discount) {
+          // variant + rabattsänkning
+          const ad = li.applied_discount || {};
+          clean.applied_discount = {
+            title: String(ad.title || 'Pressify pris'),
+            value_type: ad.value_type === 'fixed_amount' ? 'fixed_amount' : 'percentage' /* fallback */,
+            value: num(ad.value)
+          };
+        }
+        return clean;
       });
+
+      payloadToShopify = {
+        draft_order: {
+          ...incoming,
+          line_items: cleanLines,
+          ...(body.note ? { note: body.note } : {})
+        }
+      };
     }
 
-    const payload = {
-      draft_order: {
-        line_items: draftLines,
-        ...(note ? { note } : {}),
-        ...(customerId ? { customer: { id: customerId } } : {}),
-        tags: 'pressify,draft-checkout'
+    // B) Annars: bygg egna custom lines från lineItems/lines (kör på ert pris)
+    if (!payloadToShopify) {
+      const items = Array.isArray(body.lineItems) ? body.lineItems :
+                    Array.isArray(body.lines)     ? body.lines     : [];
+      if (!items.length) {
+        return res.status(400).json({ error: 'Inga rader i payload' });
       }
-    };
+      const line_items = buildCustomLinesFromGeneric(items);
+      payloadToShopify = {
+        draft_order: {
+          line_items,
+          ...(body.note ? { note: body.note } : {}),
+          ...(body.customerId ? { customer: { id: body.customerId } } : {}),
+          tags: 'pressify,draft-checkout'
+        }
+      };
+    }
 
+    // 4) Skicka till Shopify
     const r = await axios.post(
       `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
-      payload,
+      payloadToShopify,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
     );
 
     const draft = r.data?.draft_order;
     if (!draft || !draft.invoice_url) {
-      return res.status(500).json({ error: 'draft_order saknar invoice_url' });
+      return res.status(502).json({ error: 'draft_order saknar invoice_url' });
     }
 
+    // 5) Svara uniformt (frontend letar flera nycklar)
     return res.json({
       ok: true,
       draft_order_id: draft.id,
       name: draft.name,
-      invoice_url: draft.invoice_url
+      invoice_url: draft.invoice_url,
+      invoiceUrl: draft.invoice_url,
+      url: draft.invoice_url
     });
-  } catch (e) {
-    console.error('/draft/checkout error:', e?.response?.data || e.message);
+  } catch (e){
+    console.error('[draft create] error:', e?.response?.data || e.message);
+    try { setCorsOnError(req, res); } catch {}
     return res.status(500).json({ error: 'internal' });
   }
-});
+}
+
+// 4) Montera alla endpoints som frontend testar → samma handler
+[
+  '/draft-order/create',
+  '/api/draft-order/create',
+  '/draft/create',
+  '/api/draft/create',
+  '/shopify/draft-order/create',
+  '/api/shopify/draft-order/create',
+  '/invoice/create',
+  '/api/invoice/create'
+].forEach(p => app.post(p, handleDraftCreate));
+
+/* ========= SLUT PRESSIFY DRAFT ORDER ========= */
+
 
 // Starta installationen: /auth?shop=xxxx.myshopify.com
 app.get('/auth', (req, res) => {
