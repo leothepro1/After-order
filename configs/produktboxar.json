@@ -44,18 +44,6 @@
       "export": true
     },
     {
-      "id": "size",
-      "label": "Storlek (B x D x H)",
-      "type": "select",
-      "default": 1,
-      "choices": [
-        { "value": 1, "code": "231dsa",    "label": "Endast utsida",  "w_cm": 15, "h_cm": 12, "area_cm2": 180 },
-        { "value": 2, "code": "zzsda", "label": "Utsida + Insida",  "w_cm": 20, "h_cm": 14, "area_cm2": 280 }
-      ],
-      "ui": { "component": "shared-select" },
-      "export": true
-    },
-    {
       "id": "finish",
       "label": "Tryckplacering",
       "type": "select",
@@ -108,7 +96,7 @@
   },
   "formulas": {
     "tier": "size",
-    "unit_price": "table('unit_price', qty, tier) * ((Number(variant_cards) || 1)) * 1.25",
+    "unit_price": "table('unit_price', qty, tier) * ((Number(finish) || 1)) * 1.25",
     "total_price": "unit * qty"
   },
   "export": ["size", "variant_cards", "closing", "finish", "qty"]
