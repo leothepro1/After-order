@@ -3,7 +3,12 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
+axios.defaults.httpAgent  = new http.Agent({ keepAlive: true, maxSockets: 100 });
+axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
 const crypto = require('crypto');
+const compression = require('compression');
 const bodyParser = require('body-parser');
 const fs = require('fs');         
 const path = require('path');  
@@ -17,6 +22,21 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: false
 }));
+
+// Svara på preflight för alla paths
+app.options('*', cors());
+app.use(compression({ level: 6, threshold: 1024 }));
+
+// En enkel helper för att sätta CORS på fel också
+const ALLOWED = ['https://pressify.se', 'https://www.pressify.se'];
+function setCorsOnError(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+}
+
 
 // Shopify-info från miljövariabler
 const SHOP = process.env.SHOP;
@@ -306,30 +326,40 @@ function sendWithCache(res, cfg, versionHint) {
 // Liten hälsosida så "Cannot GET /" försvinner
 app.get('/', (req, res) => res.type('text').send('OK'));
 app.get('/healthz', (req, res) => res.json({ ok: true }));
+app.get('/health', (req, res) => res.sendStatus(204));
 
 // ⬇️⬇️ NYTT: hämta merged config (ex: /calc/etiketter)
+const cfgMem = new Map(); // id -> { at, data }
 app.get('/calc/:id', (req, res) => {
   try {
     const id = req.params.id;
-    // ERSÄTT i din /calc/:id-route:
-const baseDir = process.env.CONFIG_DIR || path.join(__dirname, 'configs');
-const globalsPath = path.join(baseDir, 'globals.json');
-const productPath = path.join(baseDir, `${id}.json`);
+    const now = Date.now();
+    const hit = cfgMem.get(id);
+    if (hit && (now - hit.at) < 60_000) { // 60s
+      return sendWithCache(res, hit.data, hit.data.version);
+    }
 
+    const baseDir = process.env.CONFIG_DIR || path.join(__dirname, 'configs');
+    const globalsPath = path.join(baseDir, 'globals.json');
+    const productPath = path.join(baseDir, `${id}.json`);
 
     if (!fs.existsSync(productPath)) {
+      setCorsOnError(req, res);
       return res.status(404).json({ error: `Config not found: ${id}` });
     }
 
     const productCfg = readJson(productPath);
     const globalsCfg = fs.existsSync(globalsPath) ? readJson(globalsPath) : { options: [] };
     const merged = mergeConfig(productCfg, globalsCfg);
+    cfgMem.set(id, { at: now, data: merged });
+
     sendWithCache(res, merged, productCfg.version);
   } catch (e) {
-    console.error(e);
+    setCorsOnError(req, res);
     res.status(500).json({ error: 'Failed to load config' });
   }
 });
+
 // ⬆️⬆️ SLUT NYTT
 
 // ========= DRAFT CHECKOUT (skapa Draft Order från cart-payload) =========
@@ -664,6 +694,7 @@ app.get('/activity', async (req, res) => {
     return res.json({ log: out });
   } catch (e) {
     console.error('GET /activity error:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -911,8 +942,8 @@ app.post('/proof/upload', async (req, res) => {
     const snap = { ...safeProjectFields(projAfter), activity: snapActivity, hideActivity: false };
 
     // 3) Generera token + tid (kort id)
-    const tid = newTid();
-    const token = signTokenPayload({ orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
+const tid = newTid();
+const token = signTokenPayload({ kind: 'proof', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
 
     // 4) Rotera shares[] under rätt line item
     const rotated = nextProjects.map(p => {
@@ -1301,6 +1332,7 @@ app.all('/proxy/avatar', async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
     console.error('/proxy/avatar error:', err?.response?.data || err.message);
+    setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -1484,6 +1516,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
     console.error('/proxy/orders-meta/avatar error:', err?.response?.data || err.message);
+    setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -1679,6 +1712,7 @@ app.get('/proxy/orders-meta', async (req, res) => {
           return res.json({ orders: filtered, admin: true });
         } catch (restErr) {
           console.error('Admin REST fallback error:', restErr?.response?.data || restErr.message);
+          setCorsOnError(req, res);
           return res.status(500).json({ error: 'Internal error' });
         }
       }
@@ -1752,6 +1786,7 @@ app.get('/proxy/orders-meta', async (req, res) => {
       return res.json({ orders: out });
     } catch (err) {
       console.error('proxy/orders-meta error:', err?.response?.data || err.message);
+      setCorsOnError(req, res);
       return res.status(500).json({ error: 'Internal error' });
     }
   }
@@ -1856,6 +1891,7 @@ app.post('/proxy/profile/update', async (req, res) => {
   } catch (err) {
     console.error('profile/update error:', err?.response?.data || err.message);
     if (req.get('accept')?.includes('application/json')) {
+      setCorsOnError(req, res);
       return res.status(500).json({ error: 'Internal error' });
     }
     return res.redirect(302, '/account?profile_error=Internal%20error');
@@ -1901,6 +1937,7 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
   } catch (err) {
     console.error('profile/update (orders-meta) error:', err?.response?.data || err.message);
     if (req.get('accept')?.includes('application/json')) {
+      setCorsOnError(req, res);
       return res.status(500).json({ error: 'Internal error' });
     }
     return res.redirect(302, '/account?profile_error=Internal%20error');
@@ -1912,11 +1949,10 @@ app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
 const payload = verifyAndParseToken(token);
-// Bakåtkompatibilitet: acceptera tokens utan 'kind' (äldre länkar), men neka fel 'kind'
-if (!payload || (payload.kind && payload.kind !== 'review')) {
+// Bakåtkompatibilitet: acceptera tokens utan 'kind' (äldre länkar), men kräva kind:'proof' om den finns
+if (!payload || (payload.kind && payload.kind !== 'proof')) {
   return res.status(401).json({ error: 'invalid_token' });
 }
-
 
     const { orderId, lineItemId, tid } = payload || {};
     if (!orderId || !lineItemId || !tid) return res.status(400).json({ error: 'Bad payload' });
@@ -1968,6 +2004,7 @@ if (!payload || (payload.kind && payload.kind !== 'review')) {
 
   } catch (e) {
     console.error('GET /proof/share/:token error:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -2407,6 +2444,12 @@ app.post('/admin/referlink/backfill', async (req, res) => {
   }
 });
 
+// Global felhanterare – sist i filen (före app.listen), men vi lägger en TIDIG också:
+app.use((err, req, res, next) => {
+  try { setCorsOnError(req, res); } catch {}
+  const status = err?.status || 500;
+  res.status(status).json({ error: err?.message || 'Internal error' });
+});
 // Starta servern
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
