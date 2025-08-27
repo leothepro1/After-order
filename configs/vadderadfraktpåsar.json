@@ -53,8 +53,8 @@
   },
   "formulas": {
     "tier": "size",
-    "unit_price": "table('unit_price', qty, tier) * parseFloat(variant_cards) * 1.25 * 1.5",
-    "total_price": "unit * qty"
+  "unit_price": "table('unit_price', qty, tier) * 1.25",
+  "total_price": "unit * qty"
   },
   "export": ["size", "qty"]
 }
