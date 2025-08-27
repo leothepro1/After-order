@@ -23,7 +23,7 @@
           "title": "2-färgstryck",
           "text": "Två färger för mer variation och tydligare kontraster.",
           "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_2f%C3%A4rg_fx15q3.png"
-                  },
+        },
         {
           "value": "3",
           "title": "Fullfärgstryck",
@@ -39,45 +39,143 @@
       "type": "select",
       "default": 36,
       "choices": [
-        { "value": 36, "label": "36" },
-        { "value": 72, "label": "72" },
-        { "value": 108, "label": "108" },
-        { "value": 144, "label": "144" },
-        { "value": 180, "label": "180" },
-        { "value": 216, "label": "216" },
-        { "value": 252, "label": "252" },
-        { "value": 288, "label": "288" },
-        { "value": 324, "label": "324" },
-        { "value": 360, "label": "360" },
-        { "value": 540, "label": "540" }
+        {
+          "value": 36,
+          "label": "36"
+        },
+        {
+          "value": 72,
+          "label": "72"
+        },
+        {
+          "value": 108,
+          "label": "108"
+        },
+        {
+          "value": 144,
+          "label": "144"
+        },
+        {
+          "value": 180,
+          "label": "180"
+        },
+        {
+          "value": 216,
+          "label": "216"
+        },
+        {
+          "value": 252,
+          "label": "252"
+        },
+        {
+          "value": 288,
+          "label": "288"
+        },
+        {
+          "value": 324,
+          "label": "324"
+        },
+        {
+          "value": 360,
+          "label": "360"
+        },
+        {
+          "value": 540,
+          "label": "540"
+        }
       ],
-      "ui": { "component": "shared-select" },
+      "ui": {
+        "component": "shared-select"
+      },
       "export": true
     }
   ],
-"tables": {
-  "unit_price": {
-    "rows": [36, 72, 108, 144, 180, 216, 252, 288, 324, 360, 540],
-    "cols": [1, 2, 3],
-    "data": [
-      [31.54, 39.54, 47.65],
-      [22.28, 25.12, 28.96],
-      [19.59, 22.44, 24.84],
-      [16.75, 18.26, 20.13],
-      [15.63, 17.18, 18.51],
-      [15.04, 16.39, 17.77],
-      [14.78, 15.83, 17.06],
-      [14.33, 15.44, 16.43],
-      [14.24, 15.13, 16.19],
-      [12.02, 13.02, 14.42],
-      [11.20, 11.53, 15.52]
-    ]
-  }
-}
+  "tables": {
+    "unit_price": {
+      "rows": [
+        36,
+        72,
+        108,
+        144,
+        180,
+        216,
+        252,
+        288,
+        324,
+        360,
+        540
+      ],
+      "cols": [
+        1,
+        2,
+        3
+      ],
+      "data": [
+        [
+          31.54,
+          39.54,
+          47.65
+        ],
+        [
+          22.28,
+          25.12,
+          28.96
+        ],
+        [
+          19.59,
+          22.44,
+          24.84
+        ],
+        [
+          16.75,
+          18.26,
+          20.13
+        ],
+        [
+          15.63,
+          17.18,
+          18.51
+        ],
+        [
+          15.04,
+          16.39,
+          17.77
+        ],
+        [
+          14.78,
+          15.83,
+          17.06
+        ],
+        [
+          14.33,
+          15.44,
+          16.43
+        ],
+        [
+          14.24,
+          15.13,
+          16.19
+        ],
+        [
+          12.02,
+          13.02,
+          14.42
+        ],
+        [
+          11.20,
+          11.53,
+          15.52
+        ]
+      ]
+    }
+  },
   "formulas": {
     "tier": "variant_cards",
     "unit_price": "table('unit_price', qty, tier)* 1.25",
     "total_price": "unit * qty"
   },
-  "export": ["variant_cards", "qty"]
+  "export": [
+    "variant_cards",
+    "qty"
+  ]
 }
