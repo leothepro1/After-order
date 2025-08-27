@@ -117,8 +117,8 @@
   },
   "formulas": {
     "tier": "size",
-    "unit_price": "table('unit_price', qty, tier) * ((Number(finish) || 1)) * 1.25",
-    "total_price": "unit * qty"
+  "unit_price": "table('unit_price', qty, tier) * Number(finish) * 1.25",
+  "total_price": "unit_price * qty"
   },
   "export": ["size", "variant_cards", "closing", "finish", "qty"]
 }
