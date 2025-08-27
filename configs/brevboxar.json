@@ -68,7 +68,7 @@
       "id": "finish",
       "label": "Tryckplacering",
       "type": "select",
-      "default": "outside",
+      "default": "1",
       "choices": [
         { "value": "1", "label": "Endast utsida" },
         { "value": "1.25",    "label": "Utsida + Insida" }
