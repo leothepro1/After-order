@@ -906,40 +906,54 @@ app.post('/webhooks/order-created', async (req, res) => {
   const lineItems = order.line_items || [];
 
   // Mappa varje radpost till ett projekt
-  const newProjects = lineItems.map(item => {
-    // Ta med alla line item properties
-    const props = item.properties || [];
+  // Mappa varje radpost till ett projekt – med exakt gammal struktur
+const newProjects = lineItems.map(item => {
+  const props = Array.isArray(item.properties) ? item.properties : [];
+  const m = arrToMapByName(props);
 
-    // Hämta projekt-id (originalt filnamn) från line item properties
-    const projectId = props.find(p => p.name === 'Tryckfil')?.value;
-    const fallback = projectId ? (temporaryStorage[projectId] || {}) : {};
+  // 1) Tryckfil (filnamnet)
+  const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','fileName','filnamn']);
 
-    // Hämta instruktioner direkt från properties om de finns, annars från fallback
-    const instructionProp = props.find(p => p.name === 'instructions')?.value;
-    const instructions = instructionProp != null
-      ? instructionProp
-      : (fallback.instructions || null);
+  // 2) Instructions (täck olika namn)
+  const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','Önskemål','onskemal']);
 
-    return {
-      orderId,
-      lineItemId:        item.id,
-      productId:         item.product_id,
-      productTitle:      item.title,
-      variantId:         item.variant_id,
-      variantTitle:      item.variant_title,
-      quantity:          item.quantity,
-      properties:        props,
-      preview_img:       fallback.previewUrl || null,
-      cloudinaryPublicId: fallback.cloudinaryPublicId || null,
-      instructions,     // <-- nu inkluderar vi både property- eller fallback-instruktioner
-      customerId,
-      orderNumber,
-      status:            'Tar fram korrektur',
-      tag:               'Tar fram korrektur',
-      date:              new Date().toISOString(),
-      review: { status: 'pending' }
-    };
-  });
+  // 3) preview_img
+  //   - 1:a hand: property 'preview_img' om den finns (kan finnas på vanliga ordrar)
+  //   - 2:a hand: fallback från temporaryStorage via projectId=Tryckfil
+  const previewFromProp = pickFirstNonEmpty(m, ['preview_img','_preview_img']);
+  const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
+  const preview_img = previewFromProp || fallback.previewUrl || null;
+
+  // 4) cloudinaryPublicId (om vi har det i fallback)
+  const cloudinaryPublicId = fallback.cloudinaryPublicId || null;
+
+  // 5) Snygg properties-lista, samma som förr
+  const prettyProps = buildPrettyProperties(m);
+  // säkerställ att Tryckfil alltid finns i properties om vi har ett filnamn
+  if (tryckfil && !prettyProps.some(p => p.name === 'Tryckfil')) {
+    prettyProps.push({ name: 'Tryckfil', value: tryckfil });
+  }
+
+  return {
+    orderId,
+    lineItemId:   item.id,
+    productId:    item.product_id,
+    productTitle: item.title,           // Shopify line_item.title = produkttitel
+    variantId:    item.variant_id,
+    variantTitle: item.variant_title,
+    quantity:     item.quantity,
+    properties:   prettyProps,          // ← prydlig lista som i ditt gamla exempel
+    preview_img,                        // ← exakt fält som förr
+    cloudinaryPublicId,                 // ← exakt fält som förr
+    instructions: instructionsProp ?? null, // ← toppnivå "instructions"
+    customerId,
+    orderNumber,
+    status: 'Väntar på korrektur',      // ← matcha ditt gamla case
+    tag:    'Väntar på korrektur',      // ← matcha ditt gamla case
+    date: new Date().toISOString()
+  };
+});
+
 
   if (newProjects.length === 0) return res.sendStatus(200);
   // 🔹 ENRICH: injicera productHandle per projekt (utan att ändra befintlig logik)
