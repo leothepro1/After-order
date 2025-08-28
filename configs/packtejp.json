@@ -1,7 +1,7 @@
 {
   "id": "packtejp",
   "title": "rullar",
-  "version": "1.1.4",
+  "version": "1.1.1",
   "currency": "SEK",
 
   "options": [
@@ -60,7 +60,7 @@
   "tables": {
     "unit_price": {
       "rows": [36, 72, 108, 144, 180, 216, 252, 288, 324, 360, 540],
-      "cols": [1, 2, 3],
+      "cols": ["1", "2", "3"],
       "data": [
         [31.54, 39.54, 47.65],
         [22.28, 25.12, 28.96],
@@ -74,16 +74,11 @@
         [12.02, 13.02, 14.42],
         [11.20, 11.53, 15.52]
       ]
-    },
-    "color_cols": {
-      "rows": ["1", "2", "3"],
-      "cols": ["col"],
-      "data": [[1], [2], [3]]
     }
   },
 
   "formulas": {
-    "tier": "table('color_cols', color, 'col')",
+    "tier": "color",
     "unit_price": "table('unit_price', qty, tier) * 1.25",
     "total_price": "unit * qty"
   },
