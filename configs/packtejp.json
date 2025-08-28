@@ -78,7 +78,7 @@
   },
 
   "formulas": {
-  "tier": "Number(color)",
+    "tier": "color",
     "unit_price": "table('unit_price', qty, tier) * 1.25",
     "total_price": "unit_price * qty"
   },
