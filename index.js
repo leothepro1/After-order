@@ -15,27 +15,30 @@ const path = require('path');
 
 const app = express(); // ✅ Skapa app INNAN du använder den
 
-// Aktivera CORS
-app.use(cors({
-  origin: [ 'https://pressify.se', 'https://www.pressify.se' ],
+// CORS – en gång (inkl. preflight) + helper för fel
+const ALLOWED_ORIGINS = ['https://pressify.se', 'https://www.pressify.se'];
+
+const CORS_OPTIONS = {
+  origin: ALLOWED_ORIGINS,                  // räcker – cors speglar origin om det matchar listan
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: false
-}));
+};
 
-// Svara på preflight för alla paths
-app.options('*', cors());
+app.use(cors(CORS_OPTIONS));               // <– enda cors-middleware
+app.options('*', cors(CORS_OPTIONS));      // preflight för alla paths
+
 app.use(compression({ level: 6, threshold: 1024 }));
 
-// En enkel helper för att sätta CORS på fel också
-const ALLOWED = ['https://pressify.se', 'https://www.pressify.se'];
+// CORS på fel-svar (t.ex. i catch)
 function setCorsOnError(req, res) {
   const origin = req.headers.origin;
-  if (origin && ALLOWED.includes(origin)) {
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
   }
 }
+
 
 
 // Shopify-info från miljövariabler
@@ -389,21 +392,20 @@ function sanitizeProps(props){
   const out = [];
   for (const p of (arr||[])){
     if (!p) continue;
-    const name = String(p.name||p.key||'');
-    const value = String(p.value ?? '');
-    if (isBlank(value)) continue;
+    const name = String(p.name||p.key||'').trim();
+    const value = String(p.value ?? '').trim();
+    if (!name || isBlank(value)) continue;
     if (STRIP_KEYS.has(name)) continue;
     out.push({ name, value });
   }
   return out;
 }
 
-// 2) Bygg "custom line items" från generisk payload (fallback om ingen shopify.draft_order skickas)
 function buildCustomLinesFromGeneric(items){
   const lines = [];
   for (const it of (items||[])){
     const qty = Math.max(1, parseInt(it.quantity ?? it.qty ?? 1, 10));
-    // radtotal → _total_price / total_price / hint
+
     const propsIn  = it.properties || {};
     const propsArr = Array.isArray(propsIn) ? propsIn : propsObjToArray(propsIn);
     const rawTotalProp = (() => {
@@ -425,12 +427,40 @@ function buildCustomLinesFromGeneric(items){
       custom: true,
       title: String(it.title || it.productTitle || 'Trycksak'),
       quantity: qty,
-      price: Number(unitCustom.toFixed(2)),
+      price: normalizePrice(unitCustom),         // ⬅️ sträng "xx.xx"
       properties: sanitizeProps(propsArr)
     });
   }
   return lines;
 }
+// --- helpers för pris och email ---
+
+// Shopify vill ha pris som STRÄNG med två decimaler, punkt som decimaltecken
+function normalizePrice(v) {
+  const n = Number(String(v ?? '').toString().replace(',', '.'));
+  const safe = Number.isFinite(n) ? n : 0;
+  return safe.toFixed(2); // alltid "123.45"
+}
+
+// Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem
+function isValidEmail(e) {
+  if (!e || typeof e !== 'string') return false;
+  // enkel men robust: text@text.tld, inga mellanslag
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+}
+
+// Ta bort felaktiga email så att Shopify inte försöker koppla kund eller trigga moms/discount-regler fel
+function purgeInvalidEmails(payload) {
+  try {
+    const d = payload?.draft_order || {};
+    if (d.email && !isValidEmail(d.email)) delete d.email;
+    if (d.customer && typeof d.customer === 'object') {
+      if (d.customer.email && !isValidEmail(d.customer.email)) delete d.customer.email;
+    }
+  } catch {}
+  return payload;
+}
+
 
 // 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
 async function handleDraftCreate(req, res){
@@ -441,39 +471,62 @@ async function handleDraftCreate(req, res){
     // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
     if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft_order.line_items)) {
       const incoming = body.shopify.draft_order;
-      const cleanLines = incoming.line_items.map(li => {
-        const clean = {
-          // Tillåt bara fält Shopify bryr sig om
-          ...(li.variant_id ? { variant_id: li.variant_id } : {}),
-          ...(li.custom ? { custom: !!li.custom } : {}),
-          ...(li.title ? { title: String(li.title) } : {}),
-          quantity: Math.max(1, parseInt(li.quantity || 1, 10)),
-          properties: sanitizeProps(li.properties || [])
-        };
-        if (li.custom || typeof li.price !== 'undefined') {
-          // custom line (eller tvinga pris om redan satt)
-          clean.custom = true;
-          clean.price = Number(num(li.price).toFixed(2));
-        } else if (li.applied_discount) {
-          // variant + rabattsänkning
-          const ad = li.applied_discount || {};
-          clean.applied_discount = {
-            title: String(ad.title || 'Pressify pris'),
-            value_type: ad.value_type === 'fixed_amount' ? 'fixed_amount' : 'percentage' /* fallback */,
-            value: num(ad.value)
-          };
-        }
-        return clean;
-      });
+const cleanLines = incoming.line_items.map(li => {
+  const qty = Math.max(1, parseInt(li.quantity || 1, 10));
+  const props = sanitizeProps(li.properties || []);
+  const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
 
-      payloadToShopify = {
-        draft_order: {
-          ...incoming,
-          line_items: cleanLines,
-          ...(body.note ? { note: body.note } : {})
-        }
-      };
-    }
+  if (hasCustomPrice) {
+    // 👉 CUSTOM ITEM: INGEN variant_id, pris sätts direkt
+    return {
+      custom: true,
+      title: String(li.title || 'Trycksak'),
+      quantity: qty,
+      price: normalizePrice(li.price),
+      properties: props
+    };
+  }
+
+  // 👉 Variant utan custom-pris: tillåt applied_discount om inkommande har det
+  const out = {
+    ...(li.variant_id ? { variant_id: li.variant_id } : {}),
+    quantity: qty,
+    properties: props
+  };
+
+  if (li.applied_discount) {
+    const ad = li.applied_discount || {};
+    out.applied_discount = {
+      title: String(ad.title || 'Pressify pris'),
+      value_type: ad.value_type === 'fixed_amount' ? 'fixed_amount' : 'percentage',
+      value: Number.isFinite(Number(ad.value)) ? String(ad.value) : '0'
+    };
+  }
+
+  // Om varken variant_id eller custom-pris: fall tillbaka till custom 0.00
+  if (!out.variant_id) {
+    return {
+      custom: true,
+      title: String(li.title || 'Trycksak'),
+      quantity: qty,
+      price: normalizePrice(0),
+      properties: props
+    };
+  }
+  return out;
+});
+
+
+payloadToShopify = {
+  draft_order: {
+    ...incoming,
+    line_items: cleanLines,
+    ...(body.note ? { note: body.note } : {}),
+    taxes_included: true,                 // ✅ Pris tolkas som inkl. moms
+    tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
+  }
+};
+}
 
     // B) Annars: bygg egna custom lines från lineItems/lines (kör på ert pris)
     if (!payloadToShopify) {
@@ -483,17 +536,20 @@ async function handleDraftCreate(req, res){
         return res.status(400).json({ error: 'Inga rader i payload' });
       }
       const line_items = buildCustomLinesFromGeneric(items);
-      payloadToShopify = {
-        draft_order: {
-          line_items,
-          ...(body.note ? { note: body.note } : {}),
-          ...(body.customerId ? { customer: { id: body.customerId } } : {}),
-          tags: 'pressify,draft-checkout'
-        }
-      };
-    }
+payloadToShopify = {
+  draft_order: {
+    line_items,
+    ...(body.note ? { note: body.note } : {}),
+    ...(body.customerId ? { customer: { id: body.customerId } } : {}),
+    taxes_included: true,                // ✅
+    tags: 'pressify,draft-checkout'
+  }
+};
+  }
 
     // 4) Skicka till Shopify
+    payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
+      
     const r = await axios.post(
       `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
       payloadToShopify,
@@ -559,13 +615,14 @@ app.get('/auth', (req, res) => {
 function verifyOAuthHmac(query) {
   const { hmac, signature, ...rest } = query;
   const ordered = Object.keys(rest).sort().map(k => `${k}=${Array.isArray(rest[k]) ? rest[k].join(',') : rest[k]}`).join('&');
-  const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(ordered).digest('hex');
+  const digestHex = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(ordered).digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(String(hmac || ''), 'utf8'));
+    return crypto.timingSafeEqual(Buffer.from(digestHex, 'hex'), Buffer.from(String(hmac || ''), 'hex'));
   } catch {
     return false;
   }
 }
+
 
 // Callback efter godkännande
 app.get('/auth/callback', async (req, res) => {
@@ -820,9 +877,9 @@ try {
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 
-  const currentMetafield = (existing.data.metafields || []).find(
-    mf => mf.namespace === 'order-created' && mf.key === 'order-created'
-  );
+ const currentMetafield = (existing.data.metafields || []).find(
+  mf => mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY
+);
 
   // 2) Kombinera ALLTID med enrichedProjects (inte newProjects)
   let combined = [...enrichedProjects];
@@ -909,9 +966,9 @@ app.get('/pages/korrektur', async (req, res) => {
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
 
-      const proofMetafield = metafieldsRes.data.metafields.find(mf =>
-        mf.namespace === 'order-created' && mf.key === 'order-created'
-      );
+ const proofMetafield = metafieldsRes.data.metafields.find(mf =>
+  mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY
+);
       if (!proofMetafield) continue;
 
       const projects = JSON.parse(proofMetafield.value || '[]');
@@ -1036,7 +1093,7 @@ app.post('/proof/approve', async (req, res) => {
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
-    const metafield = data.metafields.find(mf => mf.namespace === 'order-created' && mf.key === 'order-created');
+const metafield = data.metafields.find(mf => mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY);
     if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
 
 let projects = JSON.parse(metafield.value || '[]');
@@ -1124,9 +1181,9 @@ app.post('/proof/request-changes', async (req, res) => {
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
-    const metafield = mfRes.data.metafields.find(mf =>
-      mf.namespace === 'order-created' && mf.key === 'order-created'
-    );
+ const metafield = mfRes.data.metafields.find(mf =>
+  mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY
+);
     if (!metafield) {
       console.error('❌ Metafält hittades inte vid request-changes');
       return res.status(404).json({ error: 'Metafält hittades inte' });
@@ -1399,15 +1456,14 @@ function forward(toPath) {
   return (req, res, next) => {
     const origUrl = req.url;
     const qs = origUrl.includes('?') ? origUrl.slice(origUrl.indexOf('?')) : '';
-    // byt bara url till målroute + original querystring (signaturen behålls)
     req.url = `${toPath}${qs}`;
-    app._router.handle(req, res, (err) => {
-      // återställ url ifall något mer middleware ska köra
+    return app._router.handle(req, res, (err) => {
       req.url = origUrl;
       if (err) return next(err);
     });
   };
 }
+
 
 // 1) /link  → /proxy/link
 app.get('/link', forward('/proxy/link'));
