@@ -46,9 +46,9 @@
       "type": "select",
       "default": "gloss",
       "choices": [
-        { "value": "gloss", "label": "Glansigt" },
-        { "value": "uncoated", "label": "Obestruken" },
-        { "value": "matte", "label": "Matt" }
+        { "value": "gloss", "label": "Glansig yta" },
+        { "value": "uncoated", "label": "Obestruken yta" },
+        { "value": "matte", "label": "Matt yta" }
       ],
       "ui": { "component": "shared-select" },
       "export": true
