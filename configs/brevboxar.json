@@ -1,124 +1,87 @@
 {
-  "id": "brevboxar",
-  "title": "boxar",
-  "version": "1.1.0",
+  "id": "packtejp",
+  "title": "rullar",
+  "version": "1.1.2",
   "currency": "SEK",
+
   "options": [
     {
-      "id": "size",
-      "label": "Storlek",
-      "type": "select",
+      "id": "color",
+      "label": "Antal färger i trycket",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
       "default": 1,
       "choices": [
-        { "value": 1, "code": "A56",    "label": "15 × 12 × 5 cm",  "w_cm": 15, "h_cm": 12, "area_cm2": 180 },
-        { "value": 2, "code": "KV1481", "label": "20 × 14 × 8 cm",  "w_cm": 20, "h_cm": 14, "area_cm2": 280 },
-        { "value": 3, "code": "A52",    "label": "23 × 23 × 8 cm",  "w_cm": 23, "h_cm": 23, "area_cm2": 529 },
-        { "value": 4, "code": "RAC3K",  "label": "35 × 21 × 10 cm", "w_cm": 35, "h_cm": 21, "area_cm2": 735 }
-      ],
-      "ui": { "component": "shared-select" },
-      "export": true
-    },
-    {
-      "id": "variant_cards",
-      "label": "Material",
-      "type": "cards",
-      "maxVisible": 3,
-      "showMoreLabel": "Visa fler",
-      "default": "1",
-      "choices": [
         {
-          "value": "1",
-          "title": "Brun wellpapp",
-          "text": "Naturligt utseende med klassisk brun färg.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756300368/329392-outside-kraft_l8utzs.png"
+          "value": 1,
+          "title": "1-färgstryck",
+          "text": "Enkel design i svart. Perfekt för budget, logotyper eller text.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_svart_tryck_hgzuil.png"
         },
         {
-          "value": "0",
-          "title": "Vit wellpapp",
-          "text": "Ljus och ren design med vit yta.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756300372/122950-outside-white_nkwwo5.png"
-        }
-      ],
-      "export": true
-    },
-    {
-      "id": "closing",
-      "label": "Typ av stängning",
-      "type": "cards",
-      "maxVisible": 3,
-      "showMoreLabel": "Visa fler",
-      "default": "1",
-      "choices": [
+          "value": 2,
+          "title": "2-färgstryck",
+          "text": "Två färger för mer variation och tydligare kontraster.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_2f%C3%A4rg_fx15q3.png"
+        },
         {
-  "value": "1",
-  "title": "Viks in framtill",
-  "text": "Klassisk stängning där framdelen viks in.",
-  "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756299288/1755272181727hjgghj_kovkw2.png"
-},
-{
-  "value": "0",
-  "title": "Dubbelsidig tejp",
-  "text": "Stängning med tejpremsa för snabb montering.",
-  "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756299291/1755272186062hjg_r7y7uh.png"
+          "value": 3,
+          "title": "Fullfärgstryck",
+          "text": "Fullfärg för maximal detalj och levande färger.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_helf%C3%A4rgs_grbemc.png"
         }
       ],
-      "export": true
-    },
-    {
-      "id": "finish",
-      "label": "Tryckplacering",
-      "type": "select",
-      "default": "1",
-      "choices": [
-        { "value": "1", "label": "Endast utsida" },
-        { "value": "1.25",    "label": "Utsida + Insida" }
-      ],
-      "ui": { "component": "shared-select" },
       "export": true
     },
     {
       "id": "qty",
       "label": "Antal",
       "type": "select",
-      "default": 25,
+      "default": 36,
       "choices": [
-        { "value": 25,  "label": "25" },
-        { "value": 50,  "label": "50" },
-        { "value": 75,  "label": "75" },
-        { "value": 100, "label": "100" },
-        { "value": 150, "label": "150" },
-        { "value": 200, "label": "200" },
-        { "value": 300, "label": "300" },
-        { "value": 400, "label": "400" },
-        { "value": 500, "label": "500" },
-        { "value": 600, "label": "600" }
+        { "value": 36, "label": "36" },
+        { "value": 72, "label": "72" },
+        { "value": 108, "label": "108" },
+        { "value": 144, "label": "144" },
+        { "value": 180, "label": "180" },
+        { "value": 216, "label": "216" },
+        { "value": 252, "label": "252" },
+        { "value": 288, "label": "288" },
+        { "value": 324, "label": "324" },
+        { "value": 360, "label": "360" },
+        { "value": 540, "label": "540" }
       ],
       "ui": { "component": "shared-select" },
       "export": true
     }
   ],
+
   "tables": {
     "unit_price": {
-      "rows": [25, 50, 75, 100, 150, 200, 300, 400, 500, 600],
-      "cols": [1, 2, 3, 4],
+      "rows": [36, 72, 108, 144, 180, 216, 252, 288, 324, 360, 540],
+      "cols": [1, 2, 3],
       "data": [
-        [22.20, 36.77, 45.34, 61.37],
-        [17.74, 27.61, 35.83, 49.06],
-        [15.35, 25.75, 35.83, 47.68],
-        [14.39, 24.52, 33.35, 42.94],
-        [14.39, 23.92, 33.35, 42.94],
-        [13.29, 25.51, 31.09, 41.70],
-        [13.26, 20.23, 29.78, 41.07],
-        [11.93, 19.62, 28.61, 41.07],
-        [10.61, 18.39, 27.50, 39.85],
-        [10.60, 18.39, 27.58, 39.85]
+        [31.54, 39.54, 47.65],
+        [22.28, 25.12, 28.96],
+        [19.59, 22.44, 24.84],
+        [16.75, 18.26, 20.13],
+        [15.63, 17.18, 18.51],
+        [15.04, 16.39, 17.77],
+        [14.78, 15.83, 17.06],
+        [14.33, 15.44, 16.43],
+        [14.24, 15.13, 16.19],
+        [12.02, 13.02, 14.42],
+        [11.20, 11.53, 15.52]
       ]
     }
   },
+
   "formulas": {
-    "tier": "size",
-  "unit_price": "table('unit_price', qty, tier) * Number(finish) * 1.25",
-  "total_price": "unit * qty"
+    "tier": "color",
+    "unit_price": "table('unit_price', qty, tier) * 1.25",
+    "total_price": "unit * qty"
   },
-  "export": ["size", "variant_cards", "closing", "finish", "qty"]
+
+  "export": ["color", "qty"]
 }
