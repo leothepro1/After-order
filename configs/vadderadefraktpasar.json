@@ -53,7 +53,7 @@
   },
   "formulas": {
     "tier": "size",
-  "unit_price": "table('unit_price', qty, tier) * 1.25",
+  "unit_price": "table('unit_price', qty, tier) * 1.25 * 1.5",
   "total_price": "unit * qty"
   },
   "export": ["size", "qty"]
