@@ -1161,16 +1161,19 @@ app.get('/pages/korrektur', async (req, res) => {
 // Uppdatera korrektur-status (när du laddar upp korrekturbild)
 // Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
 // Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
+// Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT (inkluderar senaste eventet)
 app.post('/proof/upload', async (req, res) => {
   const { orderId, lineItemId, previewUrl, proofNote } = req.body;
-  if (!orderId || !lineItemId || !previewUrl) return res.status(400).json({ error: 'orderId, lineItemId och previewUrl krävs' });
+  if (!orderId || !lineItemId || !previewUrl) {
+    return res.status(400).json({ error: 'orderId, lineItemId och previewUrl krävs' });
+  }
 
   try {
-    // Läs order-created
+    // 1) Läs order-created
     const { metafieldId, projects } = await readOrderProjects(orderId);
     if (!metafieldId) return res.status(404).json({ error: 'Metafält hittades inte' });
 
-    // 1) Uppdatera preview/status (som tidigare)
+    // 2) Uppdatera preview/status
     let exists = false;
     const nextProjects = projects.map(p => {
       if (String(p.lineItemId) === String(lineItemId)) {
@@ -1186,57 +1189,22 @@ app.post('/proof/upload', async (req, res) => {
     });
     if (!exists) return res.status(404).json({ error: 'Line item hittades inte i metafält' });
 
-    // 2) Snapshot: “första” activity-hämtningen (för snabb token-vy)
-    const { log } = await getActivityLog(orderId);
-    const snapActivity = sliceActivityForLine(log, lineItemId);
-    const projAfter = nextProjects.find(p => String(p.lineItemId) === String(lineItemId));
-    const snap = { ...safeProjectFields(projAfter), activity: snapActivity, hideActivity: false };
+    // 3) Förbered data för activity-entry (innan snapshot)
+    const projAfter = nextProjects.find(p => String(p.lineItemId) === String(lineItemId)) || {};
+    const fileName = (() => {
+      try { return (projAfter.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch { return ''; }
+    })();
+    const nowTs = new Date().toISOString();
 
-    // 3) Generera token + tid (kort id)
-    const tid = newTid();
-    const token = signTokenPayload({ kind: 'proof', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
-
-    // 🆕 Bygg publik URL + token-hash direkt (behövs för att spara i metafältet)
-    const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
-    const token_hash = crypto.createHash('sha256').update(token).digest('hex');
-
-    // 4) Rotera shares[] under rätt line item – lägg in url både på share och i snapshot
-    const rotated = nextProjects.map(p => {
-      if (String(p.lineItemId) !== String(lineItemId)) return p;
-      const prev = Array.isArray(p.shares) ? p.shares : [];
-      const superseded = prev.map(s => ({ ...s, status: s.status === 'active' ? 'superseded' : (s.status || 'superseded') }));
-      const share = {
-        tid,
-        token_hash,
-        status: 'active',
-        createdAt: nowIso(),
-        url,                              // 🆕 direkt på share
-        snapshot: { ...snap, url }        // 🆕 även inuti snapshot
-      };
-      return {
-        ...p,
-        shares: [share, ...superseded].slice(0, 10),
-        latestToken: tid,
-        latestShareUrl: url               // 🆕 lättåtkomligt på projektet
-      };
-    });
-
-    // 5) Spara tillbaka i SAMMA metafält
-    await writeOrderProjects(metafieldId, rotated);
-
-    // 6) Logga som tidigare
+    // 4) Skriv in activity “proof.uploaded” FÖRST
     try {
-      const proj = rotated.find(p => String(p.lineItemId) === String(lineItemId)) || {};
-      const fileName = (() => {
-        try { return (proj.properties || []).find(x => x && x.name === 'Tryckfil')?.value || ''; } catch { return ''; }
-      })();
       await appendActivity(orderId, [{
-        ts: new Date().toISOString(),
+        ts: nowTs,
         actor: { type: 'admin', name: 'Pressify' },
         action: 'proof.uploaded',
         order_id: Number(orderId),
         line_item_id: Number(lineItemId),
-        product_title: proj.productTitle || '',
+        product_title: projAfter.productTitle || '',
         project_id: fileName || undefined,
         data: Object.assign({ previewUrl }, (proofNote && proofNote.trim() ? { note: proofNote.trim() } : {})),
         correlation_id: `proof.uploaded:${orderId}:${lineItemId}:${previewUrl}`
@@ -1245,7 +1213,35 @@ app.post('/proof/upload', async (req, res) => {
       console.warn('/proof/upload → appendActivity misslyckades:', e?.response?.data || e.message);
     }
 
-    // 7) Svara med token + URL (återanvänd samma url-variabel)
+    // 5) Läs aktivitetsloggen EFTER att vi lagt in “proof.uploaded” och bygg snapshot
+    const { log } = await getActivityLog(orderId);
+    const snapActivity = sliceActivityForLine(log, lineItemId);
+    const snap = { ...safeProjectFields(projAfter), activity: snapActivity, hideActivity: false };
+
+    // 6) Generera token
+    const tid = newTid();
+    const token = signTokenPayload({ kind: 'proof', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
+
+    // 7) Rotera shares[] och spara snapshot
+    const rotated = nextProjects.map(p => {
+      if (String(p.lineItemId) !== String(lineItemId)) return p;
+      const prev = Array.isArray(p.shares) ? p.shares : [];
+      const superseded = prev.map(s => ({ ...s, status: s.status === 'active' ? 'superseded' : (s.status || 'superseded') }));
+      const share = {
+        tid,
+        token_hash: crypto.createHash('sha256').update(token).digest('hex'),
+        status: 'active',
+        createdAt: nowIso(),
+        snapshot: snap
+      };
+      return { ...p, shares: [share, ...superseded].slice(0, 10), latestToken: tid, latestShareUrl: `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}` };
+    });
+
+    // 8) Spara tillbaka i SAMMA metafält
+    await writeOrderProjects(metafieldId, rotated);
+
+    // 9) Svara med token + URL
+    const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
     const backendShare = `${HOST}/proof/share/${encodeURIComponent(token)}`;
     return res.json({ ok: true, token, url, backendShare });
 
@@ -1254,6 +1250,7 @@ app.post('/proof/upload', async (req, res) => {
     return res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
   }
 });
+
 
 
 
