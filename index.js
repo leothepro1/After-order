@@ -67,6 +67,63 @@ const B32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567'; // crockford-ish lower
 function hmacHex(input) {
   return crypto.createHmac('sha256', SLUG_SECRET).update(String(input)).digest('hex');
 }
+// ===== Shop tax config (cache 5 min) =====
+let __shopTaxCfg = { at: 0, taxes_included: true };
+async function getShopTaxConfig() {
+  const now = Date.now();
+  if (now - __shopTaxCfg.at < 5 * 60 * 1000) return __shopTaxCfg; // 5 min
+  const { data } = await axios.get(`https://${SHOP}/admin/api/2025-07/shop.json`, {
+    headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+  });
+  const taxes_included = !!data?.shop?.taxes_included;
+  __shopTaxCfg = { at: now, taxes_included };
+  return __shopTaxCfg;
+}
+
+/* ====== GLOBALA TAXABLE-HELPERS (NYTT) ====== */
+async function getVariantTaxableMap(variantIds = []) {
+  const uniq = Array.from(new Set(variantIds.filter(Boolean)));
+  const out = Object.create(null);
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(uniq, 8)) {
+    await Promise.all(group.map(async (vid) => {
+      try {
+        const { data } = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/variants/${vid}.json?fields=taxable,id`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+        out[vid] = !!data?.variant?.taxable;
+      } catch (e) {
+        console.warn('getVariantTaxableMap:', vid, e?.response?.data || e.message);
+      }
+    }));
+  }
+  return out;
+}
+
+async function getProductDefaultTaxableMap(productIds = []) {
+  const uniq = Array.from(new Set(productIds.filter(Boolean)));
+  const out = Object.create(null);
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(uniq, 5)) {
+    await Promise.all(group.map(async (pid) => {
+      try {
+        const { data } = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+        const v = (data?.product?.variants || [])[0];
+        if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
+      } catch (e) {
+        console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
+      }
+    }));
+  }
+  return out;
+}
+/* ====== SLUT GLOBALA TAXABLE-HELPERS ====== */
+
+
 function hexToBase32Lower(hex, len = 8) {
   // Ta första 40 bit (~10 hex) och koda till base32; klipp till len tecken
   const bits = BigInt('0x' + hex.slice(0, 10));
@@ -401,13 +458,22 @@ function sanitizeProps(props){
   return out;
 }
 
-function buildCustomLinesFromGeneric(items){
+async function buildCustomLinesFromGeneric(items){
   const lines = [];
+
+  // Batcha uppslag av taxable
+  const variantIds = items.map(it => it.variantId || it.variant_id).filter(Boolean);
+  const productIds = items.map(it => it.productId  || it.product_id).filter(Boolean);
+  const [vTaxMap, pTaxMap] = await Promise.all([
+    getVariantTaxableMap(variantIds),
+    getProductDefaultTaxableMap(productIds)
+  ]);
+
   for (const it of (items||[])){
     const qty = Math.max(1, parseInt(it.quantity ?? it.qty ?? 1, 10));
-
     const propsIn  = it.properties || {};
     const propsArr = Array.isArray(propsIn) ? propsIn : propsObjToArray(propsIn);
+
     const rawTotalProp = (() => {
       try {
         const map = new Map(propsArr.map(p=>[String(p.name||'').toLowerCase(), p.value]));
@@ -418,29 +484,41 @@ function buildCustomLinesFromGeneric(items){
       !isBlank(rawTotalProp) ? num(rawTotalProp) :
       (typeof it.custom_line_total === 'number' ? it.custom_line_total :
       (typeof it.line_price_hint === 'number' ? it.line_price_hint : 0));
-
     const unitCustom = qty > 0
       ? (typeof it.custom_price === 'number' ? it.custom_price : Number((lineTotal/qty).toFixed(2)))
       : 0;
+
+    // Bestäm taxable
+    const vid = it.variantId || it.variant_id;
+    const pid = it.productId  || it.product_id;
+    let taxable = true; // default moms = på
+    if (vid && typeof vTaxMap[vid] === 'boolean') {
+      taxable = vTaxMap[vid];
+    } else if (pid && typeof pTaxMap[pid] === 'boolean') {
+      taxable = pTaxMap[pid];
+    }
 
     lines.push({
       custom: true,
       title: String(it.title || it.productTitle || 'Trycksak'),
       quantity: qty,
-      price: normalizePrice(unitCustom),         // ⬅️ sträng "xx.xx"
+      price: normalizePrice(unitCustom),
+      taxable, // ⬅️ viktigt
       properties: sanitizeProps(propsArr)
     });
   }
   return lines;
 }
+
 // --- helpers för pris och email ---
 
 // Shopify vill ha pris som STRÄNG med två decimaler, punkt som decimaltecken
 function normalizePrice(v) {
-  const n = Number(String(v ?? '').toString().replace(',', '.'));
-  const safe = Number.isFinite(n) ? n : 0;
-  return safe.toFixed(2); // alltid "123.45"
+  const n = Number(String(v ?? '').replace(',', '.'));
+  const safe = Number.isFinite(n) ? Math.max(0, n) : 0;
+  return safe.toFixed(2);
 }
+
 
 // Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem
 function isValidEmail(e) {
@@ -471,23 +549,32 @@ async function handleDraftCreate(req, res){
     // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
     if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft_order.line_items)) {
       const incoming = body.shopify.draft_order;
+// Bygg taxable-kartor en gång
+const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
+const pTaxMap = await getProductDefaultTaxableMap((incoming.line_items || []).map(li => li.product_id).filter(Boolean));
+
 const cleanLines = incoming.line_items.map(li => {
   const qty = Math.max(1, parseInt(li.quantity || 1, 10));
   const props = sanitizeProps(li.properties || []);
   const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
 
+  const vid = li.variant_id;
+  const pid = li.product_id;
+  const inferredTaxable =
+    typeof vTaxMap[vid] === 'boolean' ? vTaxMap[vid] :
+    (typeof pTaxMap[pid] === 'boolean' ? pTaxMap[pid] : true);
+
   if (hasCustomPrice) {
-    // 👉 CUSTOM ITEM: INGEN variant_id, pris sätts direkt
     return {
       custom: true,
       title: String(li.title || 'Trycksak'),
       quantity: qty,
       price: normalizePrice(li.price),
+      taxable: inferredTaxable,          // ⬅️ lägg på taxable
       properties: props
     };
   }
 
-  // 👉 Variant utan custom-pris: tillåt applied_discount om inkommande har det
   const out = {
     ...(li.variant_id ? { variant_id: li.variant_id } : {}),
     quantity: qty,
@@ -503,13 +590,13 @@ const cleanLines = incoming.line_items.map(li => {
     };
   }
 
-  // Om varken variant_id eller custom-pris: fall tillbaka till custom 0.00
   if (!out.variant_id) {
     return {
       custom: true,
       title: String(li.title || 'Trycksak'),
       quantity: qty,
       price: normalizePrice(0),
+      taxable: inferredTaxable,          // ⬅️ även här
       properties: props
     };
   }
@@ -517,12 +604,14 @@ const cleanLines = incoming.line_items.map(li => {
 });
 
 
+
+const shopCfg = await getShopTaxConfig();
 payloadToShopify = {
   draft_order: {
     ...incoming,
     line_items: cleanLines,
     ...(body.note ? { note: body.note } : {}),
-    taxes_included: true,                 // ✅ Pris tolkas som inkl. moms
+    taxes_included: shopCfg.taxes_included,
     tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
   }
 };
@@ -535,13 +624,14 @@ payloadToShopify = {
       if (!items.length) {
         return res.status(400).json({ error: 'Inga rader i payload' });
       }
-      const line_items = buildCustomLinesFromGeneric(items);
+ const shopCfg = await getShopTaxConfig();
+const line_items = await buildCustomLinesFromGeneric(items);
 payloadToShopify = {
   draft_order: {
     line_items,
     ...(body.note ? { note: body.note } : {}),
     ...(body.customerId ? { customer: { id: body.customerId } } : {}),
-    taxes_included: true,                // ✅
+    taxes_included: shopCfg.taxes_included,
     tags: 'pressify,draft-checkout'
   }
 };
@@ -866,9 +956,29 @@ try {
   console.warn('order-created enrich productHandle:', e?.response?.data || e.message);
 }
 
-// ❌ TA BORT hela den här felaktiga biten som fanns före metafelts-hämtningen:
-// let combined = [...enrichedProjects];
-// if (currentMetafield && currentMetafield.value) { ... }  // ← currentMetafield finns inte än
+// Fallback: produktens första variant
+async function getProductDefaultTaxableMap(productIds = []) {
+  const uniq = Array.from(new Set(productIds.filter(Boolean)));
+  const out = Object.create(null);
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(uniq, 5)) {
+    await Promise.all(group.map(async (pid) => {
+      try {
+        const { data } = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+        const v = (data?.product?.variants || [])[0];
+        if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
+      } catch (e) {
+        console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
+      }
+    }));
+  }
+  return out;
+}
+
+
 
 try {
   // 1) Läs befintliga metafält
