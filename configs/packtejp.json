@@ -5,7 +5,7 @@
   "currency": "SEK",
   "options": [
     {
-      "id": "color",
+      "id": "size",
       "label": "Antal färger i trycket",
       "type": "cards",
       "maxVisible": 3,
@@ -75,7 +75,7 @@
     }
   },
   "formulas": {
-    "tier": "(color === '1' ? 1 : (color === '2' ? 2 : 3))",
+    "tier": "size",
     "unit_price": "table('unit_price', qty, tier) * 1.25",
     "total_price": "unit * qty"
   },
