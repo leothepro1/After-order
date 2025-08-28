@@ -944,54 +944,60 @@ app.post('/webhooks/order-created', async (req, res) => {
   const orderNumber = order.name;
   const lineItems = order.line_items || [];
 
-  // Mappa varje radpost till ett projekt
-  // Mappa varje radpost till ett projekt – med exakt gammal struktur
+
+  // Mappa varje radpost till ett projekt – SPARA ALLA PROPERTIES (pretty först)
 const newProjects = lineItems.map(item => {
-  const props = Array.isArray(item.properties) ? item.properties : [];
-  const m = arrToMapByName(props);
+  // A) Läs ALLA properties från raden och normalisera (behåll allt icke-tomt)
+  const rawProps = Array.isArray(item.properties) ? item.properties : [];
+  const allClean = rawProps
+    .filter(p => p && typeof p.name === 'string')
+    .map(p => ({ name: String(p.name), value: String(p.value ?? '') }))
+    .filter(p => p.value.trim() !== '');
 
-  // 1) Tryckfil (filnamnet)
+  // B) Bygg uppslagskarta på allClean (används av alias + övriga fält)
+  const m = arrToMapByName(allClean);
+
+  // C) Derivera nyckelfält
   const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','fileName','filnamn']);
-
-  // 2) Instructions (täck olika namn)
   const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','Önskemål','onskemal']);
-
-  // 3) preview_img
-  //   - 1:a hand: property 'preview_img' om den finns (kan finnas på vanliga ordrar)
-  //   - 2:a hand: fallback från temporaryStorage via projectId=Tryckfil
   const previewFromProp = pickFirstNonEmpty(m, ['preview_img','_preview_img']);
   const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
   const preview_img = previewFromProp || fallback.previewUrl || null;
-
-  // 4) cloudinaryPublicId (om vi har det i fallback)
   const cloudinaryPublicId = fallback.cloudinaryPublicId || null;
 
-  // 5) Snygg properties-lista, samma som förr
-  const prettyProps = buildPrettyProperties(m);
-  // säkerställ att Tryckfil alltid finns i properties om vi har ett filnamn
-  if (tryckfil && !prettyProps.some(p => p.name === 'Tryckfil')) {
-    prettyProps.push({ name: 'Tryckfil', value: tryckfil });
+  // D) “Pretty” alias först …
+  const pretty = buildPrettyProperties(m);
+
+  // … följt av ALLA övriga properties utan dubbletter (namn-match, case-insensitivt)
+  const picked = new Set(pretty.map(p => p.name.toLowerCase()));
+  const rest = allClean.filter(p => !picked.has(p.name.toLowerCase()));
+  let properties = [...pretty, ...rest];
+
+  // E) Säkerställ Tryckfil i listan om den saknas
+  if (tryckfil && !properties.some(p => p.name.toLowerCase() === 'tryckfil')) {
+    properties.push({ name: 'Tryckfil', value: tryckfil });
   }
 
   return {
     orderId,
     lineItemId:   item.id,
     productId:    item.product_id,
-    productTitle: item.title,           // Shopify line_item.title = produkttitel
+    productTitle: item.title,
     variantId:    item.variant_id,
     variantTitle: item.variant_title,
     quantity:     item.quantity,
-    properties:   prettyProps,          // ← prydlig lista som i ditt gamla exempel
-    preview_img,                        // ← exakt fält som förr
-    cloudinaryPublicId,                 // ← exakt fält som förr
-    instructions: instructionsProp ?? null, // ← toppnivå "instructions"
+    properties,              // ⬅️ nu ALLA props (pretty först)
+    preview_img,
+    cloudinaryPublicId,
+    instructions: instructionsProp ?? null,
     customerId,
     orderNumber,
-    status: 'Väntar på korrektur',      // ← matcha ditt gamla case
-    tag:    'Väntar på korrektur',      // ← matcha ditt gamla case
+    status: 'Väntar på korrektur',
+    tag:    'Väntar på korrektur',
     date: new Date().toISOString()
   };
 });
+
 
 
   if (newProjects.length === 0) return res.sendStatus(200);
