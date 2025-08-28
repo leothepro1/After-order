@@ -1160,6 +1160,7 @@ app.get('/pages/korrektur', async (req, res) => {
 
 // Uppdatera korrektur-status (när du laddar upp korrekturbild)
 // Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
+// Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
 app.post('/proof/upload', async (req, res) => {
   const { orderId, lineItemId, previewUrl, proofNote } = req.body;
   if (!orderId || !lineItemId || !previewUrl) return res.status(400).json({ error: 'orderId, lineItemId och previewUrl krävs' });
@@ -1192,22 +1193,32 @@ app.post('/proof/upload', async (req, res) => {
     const snap = { ...safeProjectFields(projAfter), activity: snapActivity, hideActivity: false };
 
     // 3) Generera token + tid (kort id)
-const tid = newTid();
-const token = signTokenPayload({ kind: 'proof', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
+    const tid = newTid();
+    const token = signTokenPayload({ kind: 'proof', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
 
-    // 4) Rotera shares[] under rätt line item
+    // 🆕 Bygg publik URL + token-hash direkt (behövs för att spara i metafältet)
+    const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
+    const token_hash = crypto.createHash('sha256').update(token).digest('hex');
+
+    // 4) Rotera shares[] under rätt line item – lägg in url både på share och i snapshot
     const rotated = nextProjects.map(p => {
       if (String(p.lineItemId) !== String(lineItemId)) return p;
       const prev = Array.isArray(p.shares) ? p.shares : [];
       const superseded = prev.map(s => ({ ...s, status: s.status === 'active' ? 'superseded' : (s.status || 'superseded') }));
       const share = {
         tid,
-        token_hash: crypto.createHash('sha256').update(token).digest('hex'),
+        token_hash,
         status: 'active',
         createdAt: nowIso(),
-        snapshot: snap
+        url,                              // 🆕 direkt på share
+        snapshot: { ...snap, url }        // 🆕 även inuti snapshot
       };
-      return { ...p, shares: [share, ...superseded].slice(0, 10), latestToken: tid };
+      return {
+        ...p,
+        shares: [share, ...superseded].slice(0, 10),
+        latestToken: tid,
+        latestShareUrl: url               // 🆕 lättåtkomligt på projektet
+      };
     });
 
     // 5) Spara tillbaka i SAMMA metafält
@@ -1234,20 +1245,16 @@ const token = signTokenPayload({ kind: 'proof', orderId: Number(orderId), lineIt
       console.warn('/proof/upload → appendActivity misslyckades:', e?.response?.data || e.message);
     }
 
-// 7) Svara med token + URL till butikens publika sida (Shopify pages kan inte ha dynamiska segments)
-// Använd query-param: /pages/proof?token=...
-const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
-
-// (valfritt) skicka även backend-länken om du vill felsöka
-const backendShare = `${HOST}/proof/share/${encodeURIComponent(token)}`;
-
-return res.json({ ok: true, token, url, backendShare });
+    // 7) Svara med token + URL (återanvänd samma url-variabel)
+    const backendShare = `${HOST}/proof/share/${encodeURIComponent(token)}`;
+    return res.json({ ok: true, token, url, backendShare });
 
   } catch (err) {
     console.error('❌ Fel vid /proof/upload:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'Kunde inte uppdatera korrektur' });
   }
 });
+
 
 
 
