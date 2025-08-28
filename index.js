@@ -889,6 +889,45 @@ app.post('/precheckout-store', (req, res) => {
   console.log(`💾 Sparade temporärt projekt för ${projectId}`);
   res.sendStatus(200);
 });
+// ---------------- HELPER-FUNKTIONER FÖR ORDER-PROPERTIES ----------------
+function arrToMapByName(props = []) {
+  // Gör uppslag både case-sens och lowercased för smidiga hits
+  const m = new Map();
+  for (const p of props) {
+    if (!p || typeof p.name !== 'string') continue;
+    const name = String(p.name);
+    const val = p.value ?? '';
+    m.set(name, val);
+    m.set(name.toLowerCase(), val);
+  }
+  return m;
+}
+
+function pickFirstNonEmpty(map, keys = []) {
+  for (const k of keys) {
+    const v = map.get(k) ?? map.get(String(k).toLowerCase());
+    if (v != null && String(v).trim() !== '') return String(v);
+  }
+  return null;
+}
+
+function buildPrettyProperties(propsMap) {
+  // Bygg en prydlig, konsekvent lista för admin/UIs
+  const out = [];
+  const add = (name, keyList) => {
+    const v = pickFirstNonEmpty(propsMap, keyList);
+    if (v) out.push({ name, value: v });
+  };
+
+  add('Storlek (BxH)', ['Storlek (BxH)', 'Storlek', 'size']);
+  add('Material',      ['Material']);
+  add('Finish',        ['Finish']);
+  add('Antal',         ['Antal', 'qty', 'quantity']);
+  add('Tryckfil',      ['Tryckfil', 'fileName', 'filnamn']); // säkerställs alltid nedan också
+
+  return out;
+}
+// ---------------- SLUT HELPER-FUNKTIONER ----------------
 
 // Webhook: Order skapad
 app.post('/webhooks/order-created', async (req, res) => {
