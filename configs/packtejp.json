@@ -76,8 +76,8 @@
   },
   "formulas": {
     "tier": "color",
-  "unit_price": "table('unit_price', qty, tier) * 1.25",
+  "unit_price": "table('unit_price', qty, color) * 1.25",
   "total_price": "unit * qty"
   },
-  "export": ["variant_cards", "qty"]
+  "export": ["color", "qty"]
 }
