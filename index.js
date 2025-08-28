@@ -426,7 +426,7 @@ app.get('/calc/:id', (req, res) => {
 
 // 1) Sanera properties – tillåt bara synliga fält (det du visar i varukorgen)
 const STRIP_KEYS = new Set([
-  'calc_payload','_preview_img','preview_img',
+  'calc_payload','preview_img',
   '_total_price','total_price',
   'qty','Qty'
 ]);
@@ -958,8 +958,8 @@ const newProjects = lineItems.map(item => {
   const m = arrToMapByName(allClean);
 
   // C) Derivera nyckelfält
-  const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','fileName','filnamn']);
-  const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','Önskemål','onskemal']);
+const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','_tryckfil','fileName','filnamn']);
+const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','_instructions','Önskemål','onskemal']);
   const previewFromProp = pickFirstNonEmpty(m, ['preview_img','_preview_img']);
   const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
   const preview_img = previewFromProp || fallback.previewUrl || null;
