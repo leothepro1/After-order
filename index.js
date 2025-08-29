@@ -101,26 +101,6 @@ async function getVariantTaxableMap(variantIds = []) {
   return out;
 }
 
-async function getProductDefaultTaxableMap(productIds = []) {
-  const uniq = Array.from(new Set(productIds.filter(Boolean)));
-  const out = Object.create(null);
-  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
-  for (const group of chunk(uniq, 5)) {
-    await Promise.all(group.map(async (pid) => {
-      try {
-        const { data } = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-        const v = (data?.product?.variants || [])[0];
-        if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
-      } catch (e) {
-        console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
-      }
-    }));
-  }
-  return out;
-}
 /* ====== SLUT GLOBALA TAXABLE-HELPERS ====== */
 
 
@@ -741,15 +721,18 @@ app.get('/auth/callback', async (req, res) => {
 
 // Verifiera Shopify-signatur (webhooks – behåll som du hade, eftersom dina webhooks tillhör gamla appen)
 function verifyShopifyRequest(req) {
-  const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
+  const hmacHeader = String(req.get('X-Shopify-Hmac-Sha256') || '');
   const digest = crypto
     .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
     .update(req.rawBody, 'utf8')
     .digest('base64');
 
-  return digest === hmacHeader;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
+  } catch {
+    return false;
+  }
 }
-
 /* ============================================================
    ==== ACTIVITY LOG: Helper-funktioner (namespace=activity) ===
    - LÄSER/SKRIVER order.metafields.activity.activity (type=json)
@@ -1892,44 +1875,51 @@ app.get('/proxy/orders-meta', async (req, res) => {
     const scope = String(req.query.scope || '').toLowerCase();
 
     // ===== NYTT: ADMIN-LÄGE (scope=all) – hämta ALLA ordrar och filtrera bort levererade =====
-    if (scope === 'all') {
-      const ok = await isAdminCustomer(loggedInCustomerId);
-      if (!ok) return res.status(403).json({ error: 'Forbidden' });
+if (scope === 'all') {
+  const ok = await isAdminCustomer(loggedInCustomerId);
+  if (!ok) return res.status(403).json({ error: 'Forbidden' });
 
-      // Först: GraphQL
-      try {
- // BYT UT hela query-strängen i kund-scope till:
-const query = `
-  query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
-    orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
-      edges {
-        node {
-          id
-          name
-          processedAt
-          fulfillmentStatus
-          metafield(namespace: $ns, key: $key) { value }
+  // Först: GraphQL
+  try {
+    const query = `
+      query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
+        orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
+          edges {
+            node {
+              id
+              name
+              processedAt
+              fulfillmentStatus
+              displayFulfillmentStatus
+              metafield(namespace: $ns, key: $key) { value }
+            }
+          }
         }
       }
-    }
-  }
-`;
-        const data = await shopifyGraphQL(query, { first: limit, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
-        if (data.errors) throw new Error('GraphQL error');
+    `;
+    // Viktigt: skicka in 'q' – t.ex. status:any
+    const gqlVars = {
+      first: limit,
+      q: 'status:any',
+      ns: ORDER_META_NAMESPACE,
+      key: ORDER_META_KEY
+    };
+    const data = await shopifyGraphQL(query, gqlVars);
+    if (data.errors) throw new Error('GraphQL error');
 
-        const edges = data?.data?.orders?.edges || [];
-        let out = edges.map(e => ({
-          id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
-          name: e.node.name,
-          processedAt: e.node.processedAt,
-          metafield: e.node.metafield ? e.node.metafield.value : null,
-          fulfillmentStatus: e.node.fulfillmentStatus || null,
-          displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
-        }));
-        out = out.filter(o => !isDeliveredOrderShape(o));
-        
-        res.setHeader('Cache-Control', 'no-store');
-        return res.json({ orders: out, admin: true });
+    const edges = data?.data?.orders?.edges || [];
+    let out = edges.map(e => ({
+      id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
+      name: e.node.name,
+      processedAt: e.node.processedAt,
+      metafield: e.node.metafield ? e.node.metafield.value : null,
+      fulfillmentStatus: e.node.fulfillmentStatus || null,
+      displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
+    }));
+    out = out.filter(o => !isDeliveredOrderShape(o));
+    
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ orders: out, admin: true });
       } catch (gqlErr) {
         // REST-FALLBACK: hämta ALLA ordrar utan customer_id
         try {
