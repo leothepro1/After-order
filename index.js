@@ -323,13 +323,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // (Ta bort RateLimiter-klassen och adminLimiter-instansen, eller kommentera ut dem)
 
 // Global throttling för Shopify Admin API (request-KÖ + 429-retry)
-// Gäller alla axios-anrop mot https://{SHOP}/admin/api/...
-const ADMIN_MIN_DELAY_MS = 650; // ~1.5 rps (Shopify tillåter 2 rps; vi håller marginal)
+// ANVÄNDER befintlig sleep(...) ovan – redeklarera den inte här!
+const ADMIN_MIN_DELAY_MS = 650; // ~1.5 rps (marginal under 2 rps)
 let __adminLastAt = 0;
 const __adminQueue = [];
 let __adminDraining = false;
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function isShopAdminUrl(config) {
   const full = ((config && (config.baseURL || '')) + (config && config.url || '')) || '';
@@ -352,9 +350,9 @@ async function __drainQueue() {
   }
 }
 
-// Request-interceptor: alla Admin-requests måste vänta på sin tur
+// Request-interceptor: alla Admin-requests går via kön
 axios.interceptors.request.use(async (config) => {
-  if (!isShopAdminUrl(config)) return config; // bara throttla Admin API
+  if (!isShopAdminUrl(config)) return config; // throttla bara Admin API
   await new Promise((resolve) => {
     __adminQueue.push({ resolve });
     __drainQueue();
@@ -378,6 +376,7 @@ axios.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
 
 // Enkel in-memory store för OAuth state & (ev.) tokens per shop
 const oauthStateStore = {};   // { state: shop }
