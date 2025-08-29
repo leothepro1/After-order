@@ -842,6 +842,56 @@ async function getCustomerNameByOrder(orderId) {
   }
 }
 /* ========================== END ACTIVITY LOG =========================== */
+// === DISTRIBUTION: sätt projektstatus "Slutförd" när en fullföljd skapas/uppdateras ===
+async function markOrderAsDistributed(orderId, fulfillment) {
+  try {
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId || !Array.isArray(projects) || projects.length === 0) return;
+
+    // Plocka spårningsinfo (om finns)
+    const url     = fulfillment?.tracking_url || (Array.isArray(fulfillment?.tracking_urls) ? fulfillment.tracking_urls[0] : null) || null;
+    const company = fulfillment?.tracking_company || null;
+    const numbers = Array.isArray(fulfillment?.tracking_numbers) ? fulfillment.tracking_numbers : [];
+    const now     = nowIso();
+
+    // Sätt status/tag till Slutförd på alla icke-annullerade rader
+    const next = projects.map(p => {
+      const s = String(p.status || '').toLowerCase();
+      if (s === 'annulerad') return p;
+      return {
+        ...p,
+        status: 'Slutförd',
+        tag: 'Slutförd',
+        deliveredAt: now,
+        ...(url ? { trackingPlainUrl: url, trackingIsPlainLink: true } : {}),
+        ...(company ? { trackingCompany: company } : {}),
+        ...(numbers.length ? { trackingNumbers: numbers } : {})
+      };
+    });
+
+    await writeOrderProjects(metafieldId, next);
+
+    // Activity (best effort)
+    try {
+      const entries = next.map(p => ({
+        ts: now,
+        actor: { type: 'admin', name: 'Shopify Admin' },
+        action: 'order.distributed',
+        order_id: Number(orderId),
+        line_item_id: Number(p.lineItemId),
+        product_title: p.productTitle || '',
+        data: Object.assign(
+          { status: 'Slutförd' },
+          url ? { tracking_url: url, as_plain_link: true } : {}
+        ),
+        correlation_id: `order.distributed:${orderId}:${p.lineItemId}:${now}`
+      }));
+      await appendActivity(orderId, entries);
+    } catch {}
+  } catch (e) {
+    console.warn('markOrderAsDistributed failed:', e?.response?.data || e.message);
+  }
+}
 
 // === ACTIVITY: Läs-endpoint (påverkar inte övrig logik)
 app.get('/activity', async (req, res) => {
@@ -996,6 +1046,45 @@ const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','i
     tag:    'Väntar på korrektur',
     date: new Date().toISOString()
   };
+});
+// Fulfillment skapad → behandla som "Distribuerad"
+app.post('/webhooks/fulfillments/create', async (req, res) => {
+  if (!verifyShopifyRequest(req)) return res.sendStatus(401);
+  try {
+    const f = req.body || {};
+    await markOrderAsDistributed(f.order_id, f);
+    res.sendStatus(200);
+  } catch (e) {
+    console.error('fulfillments/create error:', e?.response?.data || e.message);
+    res.sendStatus(500);
+  }
+});
+
+// Fulfillment uppdaterad → behandla som "Distribuerad"
+app.post('/webhooks/fulfillments/update', async (req, res) => {
+  if (!verifyShopifyRequest(req)) return res.sendStatus(401);
+  try {
+    const f = req.body || {};
+    await markOrderAsDistributed(f.order_id, f);
+    res.sendStatus(200);
+  } catch (e) {
+    console.error('fulfillments/update error:', e?.response?.data || e.message);
+    res.sendStatus(500);
+  }
+});
+
+// Order fulfilled (fallback om distribuerad via annan väg)
+app.post('/webhooks/orders/fulfilled', async (req, res) => {
+  if (!verifyShopifyRequest(req)) return res.sendStatus(401);
+  try {
+    const o = req.body || {};
+    const firstFulfillment = Array.isArray(o.fulfillments) ? o.fulfillments[0] : null;
+    await markOrderAsDistributed(o.id, firstFulfillment);
+    res.sendStatus(200);
+  } catch (e) {
+    console.error('orders/fulfilled error:', e?.response?.data || e.message);
+    res.sendStatus(500);
+  }
 });
 
 
