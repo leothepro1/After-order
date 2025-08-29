@@ -40,6 +40,32 @@ function setCorsOnError(req, res) {
 }
 
 
+// ===== Global Shopify Admin API-rate limiter (2 rps, burst 2) =====
+class RateLimiter {
+  constructor({ refillEveryMs = 1000, capacity = 2 } = {}) {
+    this.capacity = capacity;
+    this.tokens = capacity;
+    this.queue = [];
+    setInterval(() => {
+      this.tokens = Math.min(this.capacity, this.tokens + this.capacity); // fyll på 2 tokens / sekund
+      this.drain();
+    }, refillEveryMs).unref();
+  }
+  drain() {
+    while (this.tokens > 0 && this.queue.length) {
+      this.tokens--;
+      const next = this.queue.shift();
+      next();
+    }
+  }
+  async take() {
+    return new Promise(res => {
+      this.queue.push(res);
+      this.drain();
+    });
+  }
+}
+const adminLimiter = new RateLimiter({ refillEveryMs: 1000, capacity: 2 });
 
 // Shopify-info från miljövariabler
 const SHOP = process.env.SHOP;
