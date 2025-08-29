@@ -90,44 +90,38 @@ async function getShopTaxConfig() {
 async function getProductDefaultTaxableMap(productIds = []) {
   const uniq = Array.from(new Set(productIds.filter(Boolean)));
   const out = Object.create(null);
-  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
-  for (const group of chunk(uniq, 5)) {
-    await Promise.all(group.map(async (pid) => {
-      try {
-        const { data } = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-        const v = (data?.product?.variants || [])[0];
-        if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
-      } catch (e) {
-        console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
-      }
-    }));
+  for (const pid of uniq) {
+    try {
+      const { data } = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const v = (data?.product?.variants || [])[0];
+      if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
+    } catch (e) {
+      console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
+    }
   }
   return out;
 }
 
-/* ====== GLOBALA TAXABLE-HELPERS (NYTT) ====== */
 async function getVariantTaxableMap(variantIds = []) {
   const uniq = Array.from(new Set(variantIds.filter(Boolean)));
   const out = Object.create(null);
-  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
-  for (const group of chunk(uniq, 8)) {
-    await Promise.all(group.map(async (vid) => {
-      try {
-        const { data } = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/variants/${vid}.json?fields=taxable,id`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-        out[vid] = !!data?.variant?.taxable;
-      } catch (e) {
-        console.warn('getVariantTaxableMap:', vid, e?.response?.data || e.message);
-      }
-    }));
+  for (const vid of uniq) {
+    try {
+      const { data } = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/variants/${vid}.json?fields=taxable,id`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      out[vid] = !!data?.variant?.taxable;
+    } catch (e) {
+      console.warn('getVariantTaxableMap:', vid, e?.response?.data || e.message);
+    }
   }
   return out;
 }
+
 
 /* ====== SLUT GLOBALA TAXABLE-HELPERS ====== */
 
@@ -328,12 +322,52 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // (Ta bort RateLimiter-klassen och adminLimiter-instansen, eller kommentera ut dem)
 
+// Global throttling för Shopify Admin API (request-KÖ + 429-retry)
+// Gäller alla axios-anrop mot https://{SHOP}/admin/api/...
+const ADMIN_MIN_DELAY_MS = 650; // ~1.5 rps (Shopify tillåter 2 rps; vi håller marginal)
+let __adminLastAt = 0;
+const __adminQueue = [];
+let __adminDraining = false;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function isShopAdminUrl(config) {
+  const full = ((config && (config.baseURL || '')) + (config && config.url || '')) || '';
+  return full.includes(SHOP_ADMIN_PATTERN);
+}
+
+async function __drainQueue() {
+  if (__adminDraining) return;
+  __adminDraining = true;
+  try {
+    while (__adminQueue.length) {
+      const next = __adminQueue.shift();
+      const wait = Math.max(0, ADMIN_MIN_DELAY_MS - (Date.now() - __adminLastAt));
+      if (wait) await sleep(wait);
+      next.resolve(); // släpp igenom requesten
+      __adminLastAt = Date.now();
+    }
+  } finally {
+    __adminDraining = false;
+  }
+}
+
+// Request-interceptor: alla Admin-requests måste vänta på sin tur
+axios.interceptors.request.use(async (config) => {
+  if (!isShopAdminUrl(config)) return config; // bara throttla Admin API
+  await new Promise((resolve) => {
+    __adminQueue.push({ resolve });
+    __drainQueue();
+  });
+  return config;
+});
+
+// Response-interceptor: mjuk retry på 429 med Retry-After
 axios.interceptors.response.use(
   (res) => res,
   async (error) => {
     const { response, config } = error || {};
-    const url = ((config && (config.baseURL || '')) + (config && config.url || '')) || '';
-    if (response && response.status === 429 && url.includes(SHOP_ADMIN_PATTERN)) {
+    if (response && response.status === 429 && isShopAdminUrl(config)) {
       config.__retryCount = (config.__retryCount || 0) + 1;
       if (config.__retryCount <= 3) {
         const ra = parseFloat(response.headers?.['retry-after']) || 1;
@@ -344,6 +378,7 @@ axios.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
 // Enkel in-memory store för OAuth state & (ev.) tokens per shop
 const oauthStateStore = {};   // { state: shop }
 const shopTokenStore = {};    // { shop: token }  // OBS: din kod använder fortfarande ACCESS_TOKEN – detta är för framtida bruk
