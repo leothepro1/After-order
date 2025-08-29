@@ -39,34 +39,6 @@ function setCorsOnError(req, res) {
   }
 }
 
-
-// ===== Global Shopify Admin API-rate limiter (2 rps, burst 2) =====
-class RateLimiter {
-  constructor({ refillEveryMs = 1000, capacity = 2 } = {}) {
-    this.capacity = capacity;
-    this.tokens = capacity;
-    this.queue = [];
-    setInterval(() => {
-      this.tokens = Math.min(this.capacity, this.tokens + this.capacity); // fyll på 2 tokens / sekund
-      this.drain();
-    }, refillEveryMs).unref();
-  }
-  drain() {
-    while (this.tokens > 0 && this.queue.length) {
-      this.tokens--;
-      const next = this.queue.shift();
-      next();
-    }
-  }
-  async take() {
-    return new Promise(res => {
-      this.queue.push(res);
-      this.drain();
-    });
-  }
-}
-const adminLimiter = new RateLimiter({ refillEveryMs: 1000, capacity: 2 });
-
 // Shopify-info från miljövariabler
 const SHOP = process.env.SHOP;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
@@ -350,24 +322,11 @@ function sliceActivityForLine(log, lineItemId){
   const cut = Math.max(0, arr.length - PROOF_SNAPSHOT_ACTIVITY_LIMIT);
   return arr.slice(cut);
 }
-/* ===== END PROOF TOKEN HELPERS ===== */
-
-
-// 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
-// 🔰 Global throttling via token bucket (2 rps, burst 2)
+// --- GLOBAL ADMIN API THROTTLE (≈1.6 rps) ---
 const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-axios.interceptors.request.use(async (config) => {
-  try {
-    const url = (config.baseURL || '') + (config.url || '');
-    if (url.includes(SHOP_ADMIN_PATTERN)) {
-      // Vänta på en token innan vi skickar anropet (global kö)
-      await adminLimiter.take();
-    }
-  } catch {}
-  return config;
-});
-
+// (Ta bort RateLimiter-klassen och adminLimiter-instansen, eller kommentera ut dem)
 
 axios.interceptors.response.use(
   (res) => res,
@@ -378,14 +337,13 @@ axios.interceptors.response.use(
       config.__retryCount = (config.__retryCount || 0) + 1;
       if (config.__retryCount <= 3) {
         const ra = parseFloat(response.headers?.['retry-after']) || 1;
-        await new Promise(r => setTimeout(r, ra * 1000));
-        return axios(config); // prova igen
+        await sleep(ra * 1000);
+        return axios(config);
       }
     }
     return Promise.reject(error);
   }
 );
-
 // Enkel in-memory store för OAuth state & (ev.) tokens per shop
 const oauthStateStore = {};   // { state: shop }
 const shopTokenStore = {};    // { shop: token }  // OBS: din kod använder fortfarande ACCESS_TOKEN – detta är för framtida bruk
@@ -1958,24 +1916,27 @@ if (scope === 'all') {
           const orders = ordersRes.data.orders || [];
 
           const out = [];
-          for (const o of orders) {
-            const mfRes = await axios.get(
-              `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
-              { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-            );
-            const mf = (mfRes.data.metafields || []).find(
-              m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
-            );
-            out.push({
-              id: o.id,
-              name: o.name,
-              processedAt: o.processed_at || o.created_at,
-              metafield: mf ? mf.value : null,
-              // håll fältnamnen kompatibla med frontend-filtret
-              fulfillmentStatus: o.fulfillment_status || null,
-              displayFulfillmentStatus: null
-            });
-          }
+          // ... efter vi hämtat orders med REST:
+for (const o of orders) {
+  const mfRes = await axios.get(
+    `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+  const mf = (mfRes.data.metafields || []).find(
+    m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+  );
+  out.push({
+    id: o.id,
+    name: o.name,
+    processedAt: o.processed_at || o.created_at,
+    metafield: mf ? mf.value : null,
+    fulfillmentStatus: o.fulfillment_status || null,
+    displayFulfillmentStatus: null
+  });
+
+  await sleep(650); // samma paus här
+}
+
 
           const filtered = out.filter(o => !isDeliveredOrderShape(o));
 
