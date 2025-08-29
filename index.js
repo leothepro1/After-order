@@ -83,6 +83,14 @@ const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 // Publik butik (för delningslänkar till Shopify-sidan)
 const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
+function adminHeaders(extra = {}) {
+  return { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json', ...extra };
+}
+async function adminGet(url, cfg={})   { return axios.get(url,   { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminPost(url, data, cfg={}) { return axios.post(url, data, { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminPut(url, data, cfg={})  { return axios.put(url, data,  { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminDel(url, cfg={})   { return axios.delete(url, { ...cfg, headers: adminHeaders(cfg.headers) }); }
+
 /* ===== REFERLINK CONFIG ===== */
 const REFER_NS  = 'referlink';
 const REFER_KEY = 'referlink';          // JSON-metafält: {{ customer.metafields.referlink.referlink }}
@@ -104,6 +112,28 @@ async function getShopTaxConfig() {
   const taxes_included = !!data?.shop?.taxes_included;
   __shopTaxCfg = { at: now, taxes_included };
   return __shopTaxCfg;
+}
+
+// Fallback: produktens första variant
+async function getProductDefaultTaxableMap(productIds = []) {
+  const uniq = Array.from(new Set(productIds.filter(Boolean)));
+  const out = Object.create(null);
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(uniq, 5)) {
+    await Promise.all(group.map(async (pid) => {
+      try {
+        const { data } = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+        const v = (data?.product?.variants || [])[0];
+        if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
+      } catch (e) {
+        console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
+      }
+    }));
+  }
+  return out;
 }
 
 /* ====== GLOBALA TAXABLE-HELPERS (NYTT) ====== */
@@ -324,23 +354,20 @@ function sliceActivityForLine(log, lineItemId){
 
 
 // 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
+// 🔰 Global throttling via token bucket (2 rps, burst 2)
 const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
-let __lastAdminCallAt = 0;
 
 axios.interceptors.request.use(async (config) => {
   try {
     const url = (config.baseURL || '') + (config.url || '');
     if (url.includes(SHOP_ADMIN_PATTERN)) {
-      const now = Date.now();
-      const wait = Math.max(0, 550 - (now - __lastAdminCallAt)); // ~2 calls/sek
-      if (wait) {
-        await new Promise(r => setTimeout(r, wait));
-      }
-      __lastAdminCallAt = Date.now();
+      // Vänta på en token innan vi skickar anropet (global kö)
+      await adminLimiter.take();
     }
   } catch {}
   return config;
 });
+
 
 axios.interceptors.response.use(
   (res) => res,
@@ -1023,31 +1050,6 @@ try {
 } catch (e) {
   console.warn('order-created enrich productHandle:', e?.response?.data || e.message);
 }
-
-// Fallback: produktens första variant
-async function getProductDefaultTaxableMap(productIds = []) {
-  const uniq = Array.from(new Set(productIds.filter(Boolean)));
-  const out = Object.create(null);
-  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
-  for (const group of chunk(uniq, 5)) {
-    await Promise.all(group.map(async (pid) => {
-      try {
-        const { data } = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-        const v = (data?.product?.variants || [])[0];
-        if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
-      } catch (e) {
-        console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
-      }
-    }));
-  }
-  return out;
-}
-
-
-
 try {
   // 1) Läs befintliga metafält
   const existing = await axios.get(
