@@ -1972,20 +1972,22 @@ app.get('/proxy/orders-meta', async (req, res) => {
     }
 
     // ===== BEFINTLIGT: Kundbundna ordrar (oförändrat beteende) =====
-    const query = `
-      query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
-        orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
-          edges {
-            node {
-              id
-              name
-              processedAt
-              metafield(namespace: $ns, key: $key) { value }
-            }
-          }
+  const query = `
+  query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
+    orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
+      edges {
+        node {
+          id
+          name
+          processedAt
+          fulfillmentStatus
+          displayFulfillmentStatus
+          metafield(namespace: $ns, key: $key) { value }
         }
       }
-    `;
+    }
+  }
+`;
     // Inkludera status:any så det matchar REST-listan (öppna/stängda)
     const q = `customer_id:${loggedInCustomerId} status:any`;
     let data = await shopifyGraphQL(query, { first: limit, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
@@ -1995,13 +1997,16 @@ app.get('/proxy/orders-meta', async (req, res) => {
       throw new Error('GraphQL error');
     }
 
-    const edges = data?.data?.orders?.edges || [];
-    const out = edges.map(e => ({
-      id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
-      name: e.node.name,
-      processedAt: e.node.processedAt,
-      metafield: e.node.metafield ? e.node.metafield.value : null
-    }));
+ const edges = data?.data?.orders?.edges || [];
+const out = edges.map(e => ({
+  id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
+  name: e.node.name,
+  processedAt: e.node.processedAt,
+  metafield: e.node.metafield ? e.node.metafield.value : null,
+  fulfillmentStatus: e.node.fulfillmentStatus || null,
+  displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
+}));
+
 
     res.setHeader('Cache-Control', 'no-store');
     return res.json({ orders: out });
@@ -2027,12 +2032,14 @@ app.get('/proxy/orders-meta', async (req, res) => {
         const mf = (mfRes.data.metafields || []).find(
           m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
         );
-        out.push({
-          id: o.id,
-          name: o.name,
-          processedAt: o.processed_at || o.created_at,
-          metafield: mf ? mf.value : null
-        });
+ out.push({
+  id: o.id,
+  name: o.name,
+  processedAt: o.processed_at || o.created_at,
+  metafield: mf ? mf.value : null,
+  fulfillmentStatus: o.fulfillment_status || null,
+  displayFulfillmentStatus: null
+});
       }
 
       res.setHeader('Cache-Control', 'no-store');
