@@ -1962,7 +1962,7 @@ app.get('/proxy/orders-meta', async (req, res) => {
     ? o.fulfillments.map(f => ({ status: String(f?.status || '').toLowerCase() }))
     : []
 });
-
+}
 
           const filtered = out.filter(o => !isDeliveredOrderShape(o));
 
