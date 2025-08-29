@@ -318,23 +318,54 @@ function sliceActivityForLine(log, lineItemId){
 
 
 // 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
+// 🔰 GLOBAL LIMITER: serieköa alla Admin API-anrop (+minsta intervall)
 const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
 let __lastAdminCallAt = 0;
+let __adminQueue = Promise.resolve(); // kedjar alla admin-anrop
 
-axios.interceptors.request.use(async (config) => {
+const MIN_INTERVAL_MS = 750; // ~1.3 anrop/s (säkrare än 2/s)
+
+axios.interceptors.request.use((config) => {
   try {
     const url = (config.baseURL || '') + (config.url || '');
     if (url.includes(SHOP_ADMIN_PATTERN)) {
-      const now = Date.now();
-      const wait = Math.max(0, 550 - (now - __lastAdminCallAt)); // ~2 calls/sek
-      if (wait) {
-        await new Promise(r => setTimeout(r, wait));
-      }
-      __lastAdminCallAt = Date.now();
+      // Köa detta request tills föregående är “klart” + min-intervallet passerat
+      return new Promise((resolve) => {
+        __adminQueue = __adminQueue.then(async () => {
+          const now = Date.now();
+          const wait = Math.max(0, MIN_INTERVAL_MS - (now - __lastAdminCallAt));
+          if (wait) await new Promise(r => setTimeout(r, wait));
+          __lastAdminCallAt = Date.now();
+          resolve(config);
+        });
+      });
     }
   } catch {}
   return config;
 });
+
+// 🔁 RETRY på 429 med exponentiell backoff + respekt för Retry-After
+axios.interceptors.response.use(
+  (res) => res,
+  async (error) => {
+    const { response, config } = error || {};
+    const url = ((config && (config.baseURL || '')) + (config && config.url || '')) || '';
+
+    if (response && response.status === 429 && url.includes(SHOP_ADMIN_PATTERN)) {
+      config.__retryCount = (config.__retryCount || 0) + 1;
+      if (config.__retryCount <= 5) {
+        const ra = parseFloat(response.headers?.['retry-after']);
+        const base = 500; // ms
+        const backoff = Math.min(10000, base * Math.pow(2, config.__retryCount - 1) + Math.floor(Math.random()*200));
+        const delay = !Number.isNaN(ra) ? Math.max(backoff, ra * 1000) : backoff;
+        await new Promise(r => setTimeout(r, delay));
+        return axios(config);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 
 axios.interceptors.response.use(
   (res) => res,
@@ -1809,7 +1840,7 @@ app.use('/proxy/orders-meta', (req, res, next) => {
     const key = `${cid}:${first}:${scope}`;
 
     const hit = ordersMetaCache.get(key);
-    if (hit && (Date.now() - hit.at) < 20000) {
+    if (hit && (Date.now() - hit.at) < 60000) {
       res.setHeader('Cache-Control', 'no-store');
       return res.json(hit.data);
     }
