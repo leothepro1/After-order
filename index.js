@@ -86,41 +86,128 @@ async function getShopTaxConfig() {
   return __shopTaxCfg;
 }
 
-// Fallback: produktens första variant
 async function getProductDefaultTaxableMap(productIds = []) {
-  const uniq = Array.from(new Set(productIds.filter(Boolean)));
+  const uniq = Array.from(new Set(productIds.filter(Boolean).map(String)));
   const out = Object.create(null);
+
+  const missing = [];
   for (const pid of uniq) {
+    const hit = __taxProdCache.get(pid);
+    if (hit && (Date.now() - hit.at) < TAX_CACHE_TTL) {
+      out[pid] = !!hit.value;
+    } else {
+      missing.push(pid);
+    }
+  }
+  if (missing.length === 0) return out;
+
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(missing, 250)) {
     try {
-      const { data } = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const v = (data?.product?.variants || [])[0];
-      if (v && typeof v.taxable === 'boolean') out[pid] = !!v.taxable;
+      const ids = group.map(id => toGid('Product', id));
+      const query = `
+        query ProductFirstVariantTaxable($ids:[ID!]!) {
+          nodes(ids:$ids) {
+            ... on Product {
+              id
+              variants(first:1) { nodes { taxable } }
+            }
+          }
+        }`;
+      const data = await shopifyGraphQL(query, { ids });
+      const nodes = data?.data?.nodes || [];
+      for (const n of nodes) {
+        if (n && n.id) {
+          const id = gidToId(n.id);
+          const v0 = (n.variants?.nodes || [])[0];
+          const val = (v0 && typeof v0.taxable === 'boolean') ? !!v0.taxable : true;
+          out[id] = val;
+          __taxProdCache.set(id, { at: Date.now(), value: val });
+        }
+      }
     } catch (e) {
-      console.warn('getProductDefaultTaxableMap:', pid, e?.response?.data || e.message);
+      await Promise.all(group.map(async (pid) => {
+        if (out[pid] !== undefined) return;
+        try {
+          const { data } = await axios.get(
+            `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=id,variants`,
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+          const v = (data?.product?.variants || [])[0];
+          const val = v && typeof v.taxable === 'boolean' ? !!v.taxable : true;
+          out[pid] = val;
+          __taxProdCache.set(pid, { at: Date.now(), value: val });
+        } catch (err) {
+          console.warn('getProductDefaultTaxableMap (fallback):', pid, err?.response?.data || err.message);
+        }
+      }));
     }
   }
   return out;
 }
 
+
+// 5 min in-memory cache för taxable
+const TAX_CACHE_TTL = 5 * 60 * 1000;
+const __taxVarCache  = new Map(); // variantId -> { at, value:boolean }
+const __taxProdCache = new Map(); // productId -> { at, value:boolean }
+
 async function getVariantTaxableMap(variantIds = []) {
-  const uniq = Array.from(new Set(variantIds.filter(Boolean)));
+  const uniq = Array.from(new Set(variantIds.filter(Boolean).map(String)));
   const out = Object.create(null);
+
+  // cache hits
+  const missing = [];
   for (const vid of uniq) {
+    const hit = __taxVarCache.get(vid);
+    if (hit && (Date.now() - hit.at) < TAX_CACHE_TTL) {
+      out[vid] = !!hit.value;
+    } else {
+      missing.push(vid);
+    }
+  }
+  if (missing.length === 0) return out;
+
+  // GraphQL batch
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(missing, 250)) {
     try {
-      const { data } = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/variants/${vid}.json?fields=taxable,id`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      out[vid] = !!data?.variant?.taxable;
+      const ids = group.map(id => toGid('ProductVariant', id));
+      const query = `
+        query VariantTaxable($ids:[ID!]!) {
+          nodes(ids:$ids) { ... on ProductVariant { id taxable } }
+        }`;
+      const data = await shopifyGraphQL(query, { ids });
+      const nodes = data?.data?.nodes || [];
+      for (const n of nodes) {
+        if (n && n.id) {
+          const id = gidToId(n.id);
+          const val = !!n.taxable;
+          out[id] = val;
+          __taxVarCache.set(id, { at: Date.now(), value: val });
+        }
+      }
     } catch (e) {
-      console.warn('getVariantTaxableMap:', vid, e?.response?.data || e.message);
+      // REST-fallback per id om GraphQL skulle fela
+      await Promise.all(group.map(async (vid) => {
+        if (out[vid] !== undefined) return;
+        try {
+          const { data } = await axios.get(
+            `https://${SHOP}/admin/api/2025-07/variants/${vid}.json?fields=taxable,id`,
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+          const val = !!data?.variant?.taxable;
+          out[vid] = val;
+          __taxVarCache.set(vid, { at: Date.now(), value: val });
+        } catch (err) {
+          console.warn('getVariantTaxableMap (fallback):', vid, err?.response?.data || err.message);
+        }
+      }));
     }
   }
   return out;
 }
+
 
 
 /* ====== SLUT GLOBALA TAXABLE-HELPERS ====== */
@@ -324,7 +411,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Global throttling för Shopify Admin API (request-KÖ + 429-retry)
 // ANVÄNDER befintlig sleep(...) ovan – redeklarera den inte här!
-const ADMIN_MIN_DELAY_MS = 650; // ~1.5 rps (marginal under 2 rps)
+const ADMIN_MIN_DELAY_MS = 550; // ~1.8 rps (fortfarande under 2 rps)
 let __adminLastAt = 0;
 const __adminQueue = [];
 let __adminDraining = false;
@@ -1124,46 +1211,45 @@ app.get('/pages/korrektur', async (req, res) => {
   if (!customerId) return res.status(400).json({ error: 'customerId krävs' });
 
   try {
-    const ordersRes = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${customerId}`,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-    );
+    const q = `customer_id:${customerId} status:any`;
+    const query = `
+      query OrdersWithProof($first:Int!,$q:String!,$ns:String!,$key:String!){
+        orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
+          edges{
+            node{
+              id
+              name
+              processedAt
+              metafield(namespace:$ns, key:$key){ value }
+            }
+          }
+        }
+      }`;
+    const data = await shopifyGraphQL(query, { first: 50, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+    if (data.errors) throw new Error('GraphQL error');
 
-    const orders = ordersRes.data.orders || [];
+    const edges = data?.data?.orders?.edges || [];
     const results = [];
-
-    for (const order of orders) {
-      const metafieldsRes = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/orders/${order.id}/metafields.json`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-
- const proofMetafield = metafieldsRes.data.metafields.find(mf =>
-  mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY
-);
-      if (!proofMetafield) continue;
-
-      const projects = JSON.parse(proofMetafield.value || '[]');
-      const enriched = projects.map(p => ({ ...p, orderId: order.id }));
-      const awaiting = enriched.filter(p => p.status === 'Korrektur redo');
-
+    for (const e of edges) {
+      const orderId = Number(gidToId(e.node.id));
+      let arr = [];
+      try { arr = e.node.metafield?.value ? JSON.parse(e.node.metafield.value) : []; } catch { arr = []; }
+      const awaiting = (arr || [])
+        .filter(p => String(p?.status) === 'Korrektur redo')
+        .map(p => ({ ...p, orderId }));
       results.push(...awaiting);
     }
 
     if (results.length === 0) {
       return res.json({ message: 'Just nu har du ingenting att godkänna', projects: [] });
     }
-
-    res.json({ message: 'Godkänn korrektur', projects: results });
+    return res.json({ message: 'Godkänn korrektur', projects: results });
   } catch (err) {
-    console.error('❌ Fel vid hämtning av korrektur:', err?.response?.data || err.message);
-    res.status(500).json({ error: 'Internt serverfel' });
+    console.error('❌ Fel vid hämtning av korrektur (GraphQL):', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'Internt serverfel' });
   }
 });
 
-// Uppdatera korrektur-status (när du laddar upp korrekturbild)
-// Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
-// Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT
 // Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT (inkluderar senaste eventet)
 app.post('/proof/upload', async (req, res) => {
   const { orderId, lineItemId, previewUrl, proofNote } = req.body;
@@ -1778,26 +1864,67 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
 });
 
 // 🔹 Hjälp: hämta product.handle för en lista av product_id (unik, liten volym per order)
-async function getProductHandlesById(productIds = []) {
-  const uniq = Array.from(new Set((productIds || []).filter(Boolean)));
-  const map = Object.create(null);
+const HANDLE_CACHE_TTL = 5 * 60 * 1000;
+const __productHandleCache = new Map(); // productId -> { at, value:string }
 
+async function getProductHandlesById(productIds = []) {
+  const uniq = Array.from(new Set((productIds || []).filter(Boolean).map(String)));
+  const out = Object.create(null);
+
+  const missing = [];
   for (const pid of uniq) {
-    try {
-      // Minimalt fältuttag (handle); REST duger bra här pga din throttling
-      const { data } = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=handle`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const handle = data?.product?.handle;
-      if (handle) map[pid] = handle;
-    } catch (e) {
-      // Rör inte flödet om lookup failar; vi fortsätter utan handle
-      console.warn('getProductHandlesById:', pid, e?.response?.data || e.message);
+    const hit = __productHandleCache.get(pid);
+    if (hit && (Date.now() - hit.at) < HANDLE_CACHE_TTL) {
+      if (hit.value) out[pid] = hit.value;
+    } else {
+      missing.push(pid);
     }
   }
-  return map; // { [productId]: handle }
+  if (missing.length === 0) return out;
+
+  const chunk = (arr, n) => arr.reduce((a, _, i) => (i % n ? a : [...a, arr.slice(i, i+n)]), []);
+  for (const group of chunk(missing, 250)) {
+    try {
+      const ids = group.map(id => toGid('Product', id));
+      const query = `
+        query ProductHandles($ids:[ID!]!) {
+          nodes(ids:$ids) { ... on Product { id handle } }
+        }`;
+      const data = await shopifyGraphQL(query, { ids });
+      const nodes = data?.data?.nodes || [];
+      for (const n of nodes) {
+        if (n && n.id) {
+          const id = gidToId(n.id);
+          const handle = n.handle || null;
+          if (handle) {
+            out[id] = handle;
+            __productHandleCache.set(id, { at: Date.now(), value: handle });
+          }
+        }
+      }
+    } catch (e) {
+      // Fallback: REST för det som saknas
+      await Promise.all(group.map(async (pid) => {
+        if (out[pid] !== undefined) return;
+        try {
+          const { data } = await axios.get(
+            `https://${SHOP}/admin/api/2025-07/products/${pid}.json?fields=handle`,
+            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+          );
+          const handle = data?.product?.handle || null;
+          if (handle) {
+            out[pid] = handle;
+            __productHandleCache.set(pid, { at: Date.now(), value: handle });
+          }
+        } catch (err) {
+          console.warn('getProductHandlesById (fallback):', pid, err?.response?.data || err.message);
+        }
+      }));
+    }
+  }
+  return out;
 }
+
 
 
 
@@ -1844,6 +1971,10 @@ async function shopifyGraphQL(query, variables) {
 function gidToId(gid) {
   try { return gid.split('/').pop(); } catch { return gid; }
 }
+function toGid(kind, id) {
+  return `gid://shopify/${kind}/${String(id)}`;
+}
+
 
 // 🔹 NYTT: Admin-kontroll via kundtaggar
 async function isAdminCustomer(customerId) {
