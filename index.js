@@ -318,54 +318,23 @@ function sliceActivityForLine(log, lineItemId){
 
 
 // 🔰 NYTT: Global throttling/retry för Shopify Admin API (utan att ändra dina handlers)
-// 🔰 GLOBAL LIMITER: serieköa alla Admin API-anrop (+minsta intervall)
 const SHOP_ADMIN_PATTERN = SHOP ? `${SHOP}/admin/api/` : '/admin/api/';
 let __lastAdminCallAt = 0;
-let __adminQueue = Promise.resolve(); // kedjar alla admin-anrop
 
-const MIN_INTERVAL_MS = 750; // ~1.3 anrop/s (säkrare än 2/s)
-
-axios.interceptors.request.use((config) => {
+axios.interceptors.request.use(async (config) => {
   try {
     const url = (config.baseURL || '') + (config.url || '');
     if (url.includes(SHOP_ADMIN_PATTERN)) {
-      // Köa detta request tills föregående är “klart” + min-intervallet passerat
-      return new Promise((resolve) => {
-        __adminQueue = __adminQueue.then(async () => {
-          const now = Date.now();
-          const wait = Math.max(0, MIN_INTERVAL_MS - (now - __lastAdminCallAt));
-          if (wait) await new Promise(r => setTimeout(r, wait));
-          __lastAdminCallAt = Date.now();
-          resolve(config);
-        });
-      });
+      const now = Date.now();
+      const wait = Math.max(0, 550 - (now - __lastAdminCallAt)); // ~2 calls/sek
+      if (wait) {
+        await new Promise(r => setTimeout(r, wait));
+      }
+      __lastAdminCallAt = Date.now();
     }
   } catch {}
   return config;
 });
-
-// 🔁 RETRY på 429 med exponentiell backoff + respekt för Retry-After
-axios.interceptors.response.use(
-  (res) => res,
-  async (error) => {
-    const { response, config } = error || {};
-    const url = ((config && (config.baseURL || '')) + (config && config.url || '')) || '';
-
-    if (response && response.status === 429 && url.includes(SHOP_ADMIN_PATTERN)) {
-      config.__retryCount = (config.__retryCount || 0) + 1;
-      if (config.__retryCount <= 5) {
-        const ra = parseFloat(response.headers?.['retry-after']);
-        const base = 500; // ms
-        const backoff = Math.min(10000, base * Math.pow(2, config.__retryCount - 1) + Math.floor(Math.random()*200));
-        const delay = !Number.isNaN(ra) ? Math.max(backoff, ra * 1000) : backoff;
-        await new Promise(r => setTimeout(r, delay));
-        return axios(config);
-      }
-    }
-    return Promise.reject(error);
-  }
-);
-
 
 axios.interceptors.response.use(
   (res) => res,
@@ -1840,7 +1809,7 @@ app.use('/proxy/orders-meta', (req, res, next) => {
     const key = `${cid}:${first}:${scope}`;
 
     const hit = ordersMetaCache.get(key);
-    if (hit && (Date.now() - hit.at) < 60000) {
+    if (hit && (Date.now() - hit.at) < 20000) {
       res.setHeader('Cache-Control', 'no-store');
       return res.json(hit.data);
     }
@@ -2003,22 +1972,20 @@ app.get('/proxy/orders-meta', async (req, res) => {
     }
 
     // ===== BEFINTLIGT: Kundbundna ordrar (oförändrat beteende) =====
-  const query = `
-  query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
-    orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
-      edges {
-        node {
-          id
-          name
-          processedAt
-          fulfillmentStatus
-          displayFulfillmentStatus
-          metafield(namespace: $ns, key: $key) { value }
+    const query = `
+      query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
+        orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
+          edges {
+            node {
+              id
+              name
+              processedAt
+              metafield(namespace: $ns, key: $key) { value }
+            }
+          }
         }
       }
-    }
-  }
-`;
+    `;
     // Inkludera status:any så det matchar REST-listan (öppna/stängda)
     const q = `customer_id:${loggedInCustomerId} status:any`;
     let data = await shopifyGraphQL(query, { first: limit, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
@@ -2028,16 +1995,13 @@ app.get('/proxy/orders-meta', async (req, res) => {
       throw new Error('GraphQL error');
     }
 
- const edges = data?.data?.orders?.edges || [];
-const out = edges.map(e => ({
-  id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
-  name: e.node.name,
-  processedAt: e.node.processedAt,
-  metafield: e.node.metafield ? e.node.metafield.value : null,
-  fulfillmentStatus: e.node.fulfillmentStatus || null,
-  displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
-}));
-
+    const edges = data?.data?.orders?.edges || [];
+    const out = edges.map(e => ({
+      id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
+      name: e.node.name,
+      processedAt: e.node.processedAt,
+      metafield: e.node.metafield ? e.node.metafield.value : null
+    }));
 
     res.setHeader('Cache-Control', 'no-store');
     return res.json({ orders: out });
@@ -2063,14 +2027,12 @@ const out = edges.map(e => ({
         const mf = (mfRes.data.metafields || []).find(
           m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
         );
- out.push({
-  id: o.id,
-  name: o.name,
-  processedAt: o.processed_at || o.created_at,
-  metafield: mf ? mf.value : null,
-  fulfillmentStatus: o.fulfillment_status || null,
-  displayFulfillmentStatus: null
-});
+        out.push({
+          id: o.id,
+          name: o.name,
+          processedAt: o.processed_at || o.created_at,
+          metafield: mf ? mf.value : null
+        });
       }
 
       res.setHeader('Cache-Control', 'no-store');
@@ -2746,10 +2708,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
-
-
-
-
-
-
-
