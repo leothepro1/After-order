@@ -1898,22 +1898,22 @@ app.get('/proxy/orders-meta', async (req, res) => {
 
       // Först: GraphQL
       try {
-        const query = `
-          query AllOrdersWithMetafield($first: Int!, $ns: String!, $key: String!) {
-            orders(first: $first, query: "status:any", sortKey: CREATED_AT, reverse: true) {
-              edges {
-                node {
-                  id
-                  name
-                  processedAt
-                  fulfillmentStatus
-                  displayFulfillmentStatus
-                  metafield(namespace: $ns, key: $key) { value }
-                }
-              }
-            }
-          }
-        `;
+ // BYT UT hela query-strängen i kund-scope till:
+const query = `
+  query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
+    orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
+      edges {
+        node {
+          id
+          name
+          processedAt
+          fulfillmentStatus
+          metafield(namespace: $ns, key: $key) { value }
+        }
+      }
+    }
+  }
+`;
         const data = await shopifyGraphQL(query, { first: limit, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
         if (data.errors) throw new Error('GraphQL error');
 
@@ -2004,7 +2004,7 @@ const out = edges.map(e => ({
   processedAt: e.node.processedAt,
   metafield: e.node.metafield ? e.node.metafield.value : null,
   fulfillmentStatus: e.node.fulfillmentStatus || null,
-  displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
+  displayFulfillmentStatus: null
 }));
 
     res.setHeader('Cache-Control', 'no-store');
