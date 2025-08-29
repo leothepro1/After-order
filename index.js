@@ -1948,16 +1948,21 @@ app.get('/proxy/orders-meta', async (req, res) => {
             const mf = (mfRes.data.metafields || []).find(
               m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
             );
-            out.push({
-              id: o.id,
-              name: o.name,
-              processedAt: o.processed_at || o.created_at,
-              metafield: mf ? mf.value : null,
-              // håll fältnamnen kompatibla med frontend-filtret
-              fulfillmentStatus: o.fulfillment_status || null,
-              displayFulfillmentStatus: null
-            });
-          }
+ out.push({
+  id: o.id,
+  name: o.name,
+  processedAt: o.processed_at || o.created_at,
+  metafield: mf ? mf.value : null,
+
+  fulfillmentStatus: o.fulfillment_status || null,            
+  displayFulfillmentStatus: o.fulfillment_status
+    ? String(o.fulfillment_status).toUpperCase()               
+    : null,
+  fulfillments: Array.isArray(o.fulfillments)
+    ? o.fulfillments.map(f => ({ status: String(f?.status || '').toLowerCase() }))
+    : []
+});
+
 
           const filtered = out.filter(o => !isDeliveredOrderShape(o));
 
