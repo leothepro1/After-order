@@ -6,7 +6,7 @@
   "options": [
     {
       "id": "size",
-      "label": "Storlekw",
+      "label": "Storlek",
       "type": "select",
       "default": 1,
       "choices": [
