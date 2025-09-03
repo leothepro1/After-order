@@ -780,7 +780,7 @@ payloadToShopify = {
 }
 
 // 4) Montera alla endpoints som frontend testar → samma handler
-[
+const DRAFT_ROUTES = [
   '/draft-order/create',
   '/api/draft-order/create',
   '/draft/create',
@@ -790,7 +790,10 @@ payloadToShopify = {
   '/invoice/create',
   '/api/invoice/create',
   '/draft-order/create-upload-only'
-].forEach(p => app.post(p, handleDraftCreate));
+];
+DRAFT_ROUTES.forEach(p => app.post(p, handleDraftCreate));
+
+
 
 /* ========= SLUT PRESSIFY DRAFT ORDER ========= */
 // ===== NY ROUTE (DIN) – placerad direkt efter "SLUT PRESSIFY DRAFT ORDER" =====
