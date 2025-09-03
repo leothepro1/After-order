@@ -792,6 +792,19 @@ payloadToShopify = {
 ].forEach(p => app.post(p, handleDraftCreate));
 
 /* ========= SLUT PRESSIFY DRAFT ORDER ========= */
+// ===== NY ROUTE (DIN) – placerad direkt efter "SLUT PRESSIFY DRAFT ORDER" =====
+app.all('/din/nya/route', async (req, res) => {
+  try {
+    // Din helt fristående logik här
+    return res.json({ ok: true });
+  } catch (e) {
+    // behåll samma felmönster
+    console.error('/din/nya/route error:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+// ===== SLUT NY ROUTE (DIN) =====
 
 
 // Starta installationen: /auth?shop=xxxx.myshopify.com
@@ -2846,6 +2859,12 @@ app.post('/admin/referlink/backfill', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+// ===== NY ROUTE (DIN) – placerad strax före globala felhanteraren =====
+app.get('/din/health/ping', (req, res) => {
+  // fullständigt frikopplad, påverkar inget
+  res.json({ pong: true, at: new Date().toISOString() });
+});
+// ===== SLUT NY ROUTE (DIN) =====
 
 // Global felhanterare – sist i filen (före app.listen), men vi lägger en TIDIG också:
 app.use((err, req, res, next) => {
