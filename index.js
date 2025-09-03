@@ -789,6 +789,7 @@ payloadToShopify = {
   '/api/shopify/draft-order/create',
   '/invoice/create',
   '/api/invoice/create'
+  '/draft-order/create-upload-only'
 ].forEach(p => app.post(p, handleDraftCreate));
 
 /* ========= SLUT PRESSIFY DRAFT ORDER ========= */
