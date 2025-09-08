@@ -6,7 +6,7 @@
   "options": [
     {
       "id": "size",
-      "label": "Storlek",
+      "label": "Storlek (B x H)",
       "type": "select",
       "default": 1,
       "choices": [
