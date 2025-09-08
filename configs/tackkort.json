@@ -6,14 +6,14 @@
     "options": [
         {
             "id": "size",
-            "label": "Storlek",
+            "label": "Storlek (B x H)",
             "type": "select",
             "default": 1,
             "choices": [
                 {
                     "value": 1,
                     "code": "A6",
-                    "label": "A6 | 105 × 148 mm",
+                    "label": "105 × 148 mm",
                     "w_cm": 10.5,
                     "h_cm": 14.8,
                     "area_cm2": 155.4
@@ -21,7 +21,7 @@
                 {
                     "value": 2,
                     "code": "KV148",
-                    "label": "Kvadratiskt | 148 × 148 mm",
+                    "label": "148 × 148 mm",
                     "w_cm": 14.8,
                     "h_cm": 14.8,
                     "area_cm2": 219.04
@@ -29,7 +29,7 @@
                 {
                     "value": 3,
                     "code": "A5",
-                    "label": "A5 | 148 × 210 mm",
+                    "label": "148 × 210 mm",
                     "w_cm": 14.8,
                     "h_cm": 21,
                     "area_cm2": 310.8
@@ -37,7 +37,7 @@
                 {
                     "value": 4,
                     "code": "RACK",
-                    "label": "Rackkort | 105 × 210 mm",
+                    "label": "105 × 210 mm",
                     "w_cm": 10.5,
                     "h_cm": 21,
                     "area_cm2": 220.5
