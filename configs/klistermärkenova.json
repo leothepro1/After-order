@@ -59,6 +59,7 @@
         { "value": 5000, "label": "5 000" }
       ],
       "customChoices": [
+        { "value": 100,  "label": "200" },
         { "value": 200,  "label": "200" },
         { "value": 300,  "label": "300" },
         { "value": 500,  "label": "500" },
@@ -126,7 +127,7 @@
   },
 "formulas": {
   "tier": "size === 'custom' ? resolveTierByArea(size_w_cm, size_h_cm, 'size.customTierRules') : size",
-"unit_price": "((size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 300 ? 0.68 : qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * ((variant_cards*1) || 1)) * 1.2",
+"unit_price": "((size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 200 ? 0.80 : qty === 300 ? 0.68 : qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * ((variant_cards*1) || 1)) * 1.2",
   "total_price": "unit * qty"
   },
   "export": ["size", "variant_cards", "qty", "size_w_cm", "size_h_cm"]
