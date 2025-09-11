@@ -12,84 +12,6 @@ const compression = require('compression');
 const bodyParser = require('body-parser');
 const fs = require('fs');         
 const path = require('path');  
-// ===== Pressify Artwork Index (storewide metafield) =====
-const ART_NS  = 'pressify';
-const ART_KEY = 'artwork_index_v1'; // JSON: { [alias]: { orderId, lineItemId, at } }
-const ART_MAX_ENTRIES = 1000;       // LRU-cap, justera vid behov
-
-function rid() { return Math.random().toString(36).slice(2); }
-function slog(id, ...a){ console.log('[ARTINDEX]['+id+']', ...a); }
-function serr(id, ...a){ console.error('[ARTINDEX]['+id+'][ERR]', ...a); }
-
-// Shopify Admin GraphQL helper
-async function shopGQL(query, variables) {
-  const r = await adminPost('/graphql.json', { query, variables });
-  if (r.status !== 200) throw new Error('shopGQL status ' + r.status);
-  const data = r.data;
-  if (data.errors) throw new Error('shopGQL errors ' + JSON.stringify(data.errors));
-  return data.data;
-}
-
-// Hämta hela indexet (JSON)
-async function readArtworkIndex(rid_) {
-  const id = rid_ || rid();
-  const q = `
-    query {
-      shop {
-        metafield(namespace: "${ART_NS}", key: "${ART_KEY}") {
-          id
-          value
-        }
-      }
-    }`;
-  const data = await shopGQL(q, {});
-  const raw = data?.shop?.metafield?.value || '{}';
-  let obj = {};
-  try { obj = JSON.parse(raw); } catch { obj = {}; }
-  slog(id, 'read index size', Object.keys(obj).length);
-  return { id, obj, mfid: data?.shop?.metafield?.id || null };
-}
-
-// Skriv hela indexet (JSON)
-async function writeArtworkIndex(id, obj, mfid=null) {
-  // Trim LRU om stor
-  const keys = Object.keys(obj);
-  if (keys.length > ART_MAX_ENTRIES) {
-    const sorted = keys
-      .map(k => [k, obj[k]?.at || 0])
-      .sort((a,b)=>a[1]-b[1]); // äldst först
-    const toDelete = sorted.slice(0, keys.length - ART_MAX_ENTRIES).map(x => x[0]);
-    for (const k of toDelete) delete obj[k];
-    slog(id, 'trimmed index by', toDelete.length);
-  }
-
-  const mutation = `
-    mutation upsertArtworkIndex($ns: String!, $key: String!, $val: String!, $id: ID) {
-      metafieldsSet(metafields: [
-        { ${mfid ? 'id: $id,' : ''} namespace: $ns, key: $key, type: "json", value: $val }
-      ]) { userErrors { field message } }
-    }`;
-  const variables = {
-    ns: ART_NS,
-    key: ART_KEY,
-    val: JSON.stringify(obj),
-    ...(mfid ? { id: mfid } : {})
-  };
-  const resp = await shopGQL(mutation, variables);
-  const errs = resp?.metafieldsSet?.userErrors || [];
-  if (errs.length) throw new Error('metafieldsSet ' + JSON.stringify(errs));
-  slog(id, 'wrote index size', Object.keys(obj).length);
-  return true;
-}
-
-// Upsert en alias-post
-async function upsertAliasIndex({ alias, orderId, lineItemId }, rid_) {
-  if (!alias || !orderId || !lineItemId) return false;
-  const { id, obj, mfid } = await readArtworkIndex(rid_);
-  obj[alias] = { orderId: String(orderId), lineItemId: String(lineItemId), at: Date.now() };
-  await writeArtworkIndex(id, obj, mfid);
-  return true;
-}
 
 const app = express(); // ✅ Skapa app INNAN du använder den
 
@@ -637,141 +559,48 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-// ---- Helpers för att hämta preview + filnamn ur order.metafields ----
-// Läser ut preview/fil från projekt-objektet du redan sparar under ordern
-async function extractPreviewAndFileFromProject(proj) {
-  if (!proj) return { preview: null, fileName: '' };
-  const preview = proj.previewUrl || proj.preview_img || null;
-  let fileName = '';
-  try {
-    fileName =
-      (proj.properties || [])
-        .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
-        ?.value || '';
-  } catch {}
-  return { preview, fileName };
-}
-
-// A) signerad token -> hämta projekt via orderId/lineItemId (du har readOrderProjects)
-async function lookupArtworkMeta(payload) {
-  const { orderId, lineItemId } = payload || {};
-  if (!orderId || !lineItemId) return null;
-  const { projects } = await readOrderProjects(orderId);
-  const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
-  if (!proj) return null;
-  const { preview, fileName } = await extractPreviewAndFileFromProject(proj);
-  return preview ? { preview, fileName } : null;
-}
-
-// B) alias -> kolla index och hämta projekt därefter
-async function lookupArtworkByAlias(alias, rid_) {
-  const id = rid_ || rid();
-  const { obj } = await readArtworkIndex(id);
-  const hit = obj[alias];
-  if (!hit) { slog(id, 'alias miss', alias); return null; }
-  slog(id, 'alias hit', alias, hit);
-  return await lookupArtworkMeta(hit);
-}
-
-
+// === PUBLIC ARTWORK TOKEN RESOLVER (NO APP PROXY REQUIRED) ===
 app.get('/public/printed/artwork-token', async (req, res) => {
-  const q = (req.query.artwork || '').trim();
-  const id = rid();
-  const log = (...a)=>slog(id, ...a);
-  const err = (...a)=>serr(id, ...a);
-
-  if (!q) return res.status(400).json({ error: 'missing_artwork' });
-
   try {
-    // 1) signerad token
-    let payload = null;
-    try { payload = verifyAndParseToken(q); } catch {}
-    if (payload) {
-      log('signed token OK', { orderId: payload.orderId, lineItemId: payload.lineItemId });
-      const meta = await lookupArtworkMeta(payload);
-      if (meta?.preview) return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
-      log('signed token not_found');
-      return res.status(404).json({ error: 'not_found' });
+    const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
+    if (!raw) return res.status(400).json({ error: 'missing_token' });
+
+    const payload = verifyAndParseToken(raw);
+    if (!payload) return res.status(401).json({ error: 'invalid_token' });
+    if (payload.kind && payload.kind !== 'artwork') {
+      return res.status(401).json({ error: 'wrong_token_kind' });
     }
 
-    // 2) legacy alias (32-hex) via index
-    if (/^[a-f0-9]{32}$/i.test(q)) {
-      log('legacy alias try', q);
-      const meta = await lookupArtworkByAlias(q, id);
-      if (meta?.preview) return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
-      log('alias invalid (no index match)');
-      return res.status(401).json({ error: 'invalid_alias' });
-    }
-
-    // 3) annat skräp
-    log('invalid format');
-    return res.status(401).json({ error: 'invalid_token' });
-  } catch (e) {
-    err('resolver crash', e?.message || e);
-    return res.status(500).json({ error: 'server_error' });
-  }
-});
-
-
-// Skapa signerad token när du vet orderId + lineItemId
-app.post('/public/printed/mint', express.json(), async (req, res) => {
-  const id = rid();
-  try {
-    const { orderId, lineItemId, alias } = req.body || {};
-    if (!orderId || !lineItemId) return res.status(400).json({ error: 'missing_ids' });
+    const { orderId, lineItemId } = payload;
+    if (!orderId || !lineItemId) return res.status(400).json({ error: 'bad_payload' });
 
     const { projects } = await readOrderProjects(orderId);
     const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
     if (!proj) return res.status(404).json({ error: 'not_found' });
 
-    // Mint token
-    const { token } = generateArtworkToken(orderId, lineItemId);
+    const preview = proj.previewUrl || proj.preview_img || null;
 
-    // Om klienten skickar alias (32-hex), lägg in i index direkt
-    if (alias && /^[a-f0-9]{32}$/i.test(alias)) {
-      await upsertAliasIndex({ alias, orderId, lineItemId }, id);
-    }
+    let fileName = '';
+    try {
+      fileName =
+        (proj.properties || [])
+          .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
+          ?.value || '';
+    } catch {}
 
-    return res.json({ token });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      preview,
+      tryckfil: fileName,
+      filename: fileName,
+      name: fileName
+    });
   } catch (e) {
-    serr(id, 'mint error', e?.response?.data || e?.message || e);
-    return res.status(500).json({ error: 'server_error' });
+    console.error('/public/printed/artwork-token error:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ error: 'internal' });
   }
 });
-
-// Kör manuellt: POST /admin/printed/alias-backfill { orderIds: [..] }
-app.post('/admin/printed/alias-backfill', express.json(), async (req, res) => {
-  const id = rid();
-  try {
-    const { orderIds } = req.body || {};
-    if (!Array.isArray(orderIds) || !orderIds.length) {
-      return res.status(400).json({ error: 'missing_orderIds' });
-    }
-
-    const { obj, mfid } = await readArtworkIndex(id);
-    let added = 0;
-
-    for (const orderId of orderIds) {
-      const { projects } = await readOrderProjects(orderId);
-      for (const p of (projects || [])) {
-        const alias =
-          p.token_hash || p.alias || p.tid || p.preview_md5 || null;
-        const lineItemId = p.lineItemId || p.itemId || null;
-        if (!alias || !/^[a-f0-9]{32}$/i.test(alias) || !lineItemId) continue;
-
-        obj[alias] = { orderId: String(orderId), lineItemId: String(lineItemId), at: Date.now() };
-        added++;
-      }
-    }
-
-    await writeArtworkIndex(id, obj, mfid);
-    return res.json({ ok: true, added, size: Object.keys(obj).length });
-  } catch (e) {
-    serr(id, 'backfill error', e?.message || e);
-    return res.status(500).json({ error: 'server_error' });
-  }
-});
-
 
 // Alias/forwards så alla dina frontend-fallbacks träffar samma handler
 app.get('/apps/printed/artwork-token', forward('/public/printed/artwork-token'));
@@ -902,7 +731,6 @@ async function buildCustomLinesFromGeneric(items){
       quantity: qty,
       price: normalizePrice(unitCustom),
       taxable, // ⬅️ viktigt
-      requires_shipping: true,
       properties: sanitizeProps(propsArr)
     });
   }
@@ -969,8 +797,7 @@ const cleanLines = incoming.line_items.map(li => {
       title: String(li.title || 'Trycksak'),
       quantity: qty,
       price: normalizePrice(li.price),
-      taxable: inferredTaxable,    
-      requires_shipping: true,
+      taxable: inferredTaxable,          // ⬅️ lägg på taxable
       properties: props
     };
   }
@@ -996,8 +823,7 @@ const cleanLines = incoming.line_items.map(li => {
       title: String(li.title || 'Trycksak'),
       quantity: qty,
       price: normalizePrice(0),
-      taxable: inferredTaxable,   
-      requires_shipping: true,
+      taxable: inferredTaxable,          // ⬅️ även här
       properties: props
     };
   }
