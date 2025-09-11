@@ -559,48 +559,98 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-// === PUBLIC ARTWORK TOKEN RESOLVER (NO APP PROXY REQUIRED) ===
-// --- /public/printed/artwork-token (DROP-IN REPLACE) ---
+// ---- Helpers för att hämta preview + filnamn ur order.metafields ----
+async function extractPreviewAndFileFromProject(proj) {
+  if (!proj) return { preview: null, fileName: '' };
+  const preview = proj.previewUrl || proj.preview_img || null;
+  let fileName = '';
+  try {
+    fileName =
+      (proj.properties || [])
+        .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
+        ?.value || '';
+  } catch {}
+  return { preview, fileName };
+}
+
+// a) Verifierad token (orderId + lineItemId) -> hämta projekt
+async function lookupArtworkMeta(payload) {
+  const { orderId, lineItemId } = payload || {};
+  if (!orderId || !lineItemId) return null;
+  const { projects } = await readOrderProjects(orderId); // <– finns redan
+  const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+  if (!proj) return null;
+  const { preview, fileName } = await extractPreviewAndFileFromProject(proj);
+  return preview ? { preview, fileName } : null;
+}
+
+// b) Legacy alias (32-hex) -> försök hitta i samma order-created-projektstruktur
+//    OBS: vi kan inte söka i "alla ordrar" billigt, så vi stöder alias som
+//    redan finns sparat i projektet (t.ex. proj.token_hash/proj.alias/proj.tid)
+async function lookupArtworkByAlias(alias) {
+  // Här kan du (om du redan sparar alias i ordern) hitta igen projektet med hjälp av en
+  // *känd* orderId. Har du INTE orderId här, är bästa vägen att sluta dela alias och
+  // istället dela signerade tokens. Vi försöker ändå vara toleranta:
+  try {
+    // Om du i dina projekt sparar alias på fält:
+    // token_hash | alias | tid | preview_md5 – kolla alla.
+    // Du behöver då veta vilka orderId som är relevanta.
+    // Minimal defensiv implementation: returnera null (ger 401 i responsen).
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 app.get('/public/printed/artwork-token', async (req, res) => {
   const q = (req.query.artwork || '').trim();
-  const rid = Math.random().toString(36).slice(2);
-  const log = (...a)=>console.log('[ARTWORK-TOKEN]['+rid+']', ...a);
 
   if (!q) return res.status(400).json({ error: 'missing_artwork' });
 
   try {
-    // 1) Försök som signerad token
+    // 1) signerad token
     let payload = null;
     try { payload = verifyAndParseToken(q); } catch {}
     if (payload) {
-      log('signed token OK', { orderId: payload.orderId, lineItemId: payload.lineItemId });
-      const meta = await lookupArtworkMeta(payload); // <- du har redan en funktion som läser order/metafält
+      const meta = await lookupArtworkMeta(payload); // <-- NU FINNS DEN
       if (meta?.preview) {
-        return res.json({ preview: meta.preview, tryckfil: meta.fileName || meta.name || '' });
+        return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
       }
-      log('signed token meta not found');
       return res.status(404).json({ error: 'not_found' });
     }
 
-    // 2) Legacy alias: 32-hex (typ df73d3...)
+    // 2) legacy alias (32-hex)
     if (/^[a-f0-9]{32}$/i.test(q)) {
-      log('legacy alias, trying resolve', q);
-      // Implementera denna lookup en gång på serversidan:
-      // Den ska hitta orderrad/metafält där alias==q och returnera preview/filnamn
-      const meta = await lookupArtworkByAlias(q);
+      const meta = await lookupArtworkByAlias(q); // <-- NU FINNS DEN (returnerar ev. null)
       if (meta?.preview) {
-        log('alias resolved');
-        return res.json({ preview: meta.preview, tryckfil: meta.fileName || meta.name || '' });
+        return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
       }
-      log('alias not found');
       return res.status(401).json({ error: 'invalid_alias' });
     }
 
-    // 3) Varken giltig token eller alias
-    log('neither token nor alias');
+    // 3) felaktigt format
     return res.status(401).json({ error: 'invalid_token' });
   } catch (e) {
     console.error('[ARTWORK-TOKEN][ERR]', e);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// Skapa signerad token när du vet orderId + lineItemId
+app.post('/public/printed/mint', async (req, res) => {
+  try {
+    const { orderId, lineItemId } = req.body || {};
+    if (!orderId || !lineItemId) return res.status(400).json({ error: 'missing_ids' });
+
+    // validera att projektet finns
+    const { projects } = await readOrderProjects(orderId);
+    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+    if (!proj) return res.status(404).json({ error: 'not_found' });
+
+    const { token } = generateArtworkToken(orderId, lineItemId); // redan definierad
+    return res.json({ token });
+  } catch (e) {
+    console.error('/public/printed/mint error:', e?.response?.data || e.message);
     return res.status(500).json({ error: 'server_error' });
   }
 });
