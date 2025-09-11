@@ -731,6 +731,7 @@ async function buildCustomLinesFromGeneric(items){
       quantity: qty,
       price: normalizePrice(unitCustom),
       taxable, // ⬅️ viktigt
+      requires_shipping: true,
       properties: sanitizeProps(propsArr)
     });
   }
@@ -797,7 +798,8 @@ const cleanLines = incoming.line_items.map(li => {
       title: String(li.title || 'Trycksak'),
       quantity: qty,
       price: normalizePrice(li.price),
-      taxable: inferredTaxable,          // ⬅️ lägg på taxable
+      taxable: inferredTaxable,    
+      requires_shipping: true,
       properties: props
     };
   }
@@ -823,7 +825,8 @@ const cleanLines = incoming.line_items.map(li => {
       title: String(li.title || 'Trycksak'),
       quantity: qty,
       price: normalizePrice(0),
-      taxable: inferredTaxable,          // ⬅️ även här
+      taxable: inferredTaxable,   
+      requires_shipping: true,
       properties: props
     };
   }
