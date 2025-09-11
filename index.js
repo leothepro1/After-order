@@ -12,6 +12,84 @@ const compression = require('compression');
 const bodyParser = require('body-parser');
 const fs = require('fs');         
 const path = require('path');  
+// ===== Pressify Artwork Index (storewide metafield) =====
+const ART_NS  = 'pressify';
+const ART_KEY = 'artwork_index_v1'; // JSON: { [alias]: { orderId, lineItemId, at } }
+const ART_MAX_ENTRIES = 1000;       // LRU-cap, justera vid behov
+
+function rid() { return Math.random().toString(36).slice(2); }
+function slog(id, ...a){ console.log('[ARTINDEX]['+id+']', ...a); }
+function serr(id, ...a){ console.error('[ARTINDEX]['+id+'][ERR]', ...a); }
+
+// Shopify Admin GraphQL helper
+async function shopGQL(query, variables) {
+  const r = await adminPost('/graphql.json', { query, variables });
+  if (r.status !== 200) throw new Error('shopGQL status ' + r.status);
+  const data = r.data;
+  if (data.errors) throw new Error('shopGQL errors ' + JSON.stringify(data.errors));
+  return data.data;
+}
+
+// Hämta hela indexet (JSON)
+async function readArtworkIndex(rid_) {
+  const id = rid_ || rid();
+  const q = `
+    query {
+      shop {
+        metafield(namespace: "${ART_NS}", key: "${ART_KEY}") {
+          id
+          value
+        }
+      }
+    }`;
+  const data = await shopGQL(q, {});
+  const raw = data?.shop?.metafield?.value || '{}';
+  let obj = {};
+  try { obj = JSON.parse(raw); } catch { obj = {}; }
+  slog(id, 'read index size', Object.keys(obj).length);
+  return { id, obj, mfid: data?.shop?.metafield?.id || null };
+}
+
+// Skriv hela indexet (JSON)
+async function writeArtworkIndex(id, obj, mfid=null) {
+  // Trim LRU om stor
+  const keys = Object.keys(obj);
+  if (keys.length > ART_MAX_ENTRIES) {
+    const sorted = keys
+      .map(k => [k, obj[k]?.at || 0])
+      .sort((a,b)=>a[1]-b[1]); // äldst först
+    const toDelete = sorted.slice(0, keys.length - ART_MAX_ENTRIES).map(x => x[0]);
+    for (const k of toDelete) delete obj[k];
+    slog(id, 'trimmed index by', toDelete.length);
+  }
+
+  const mutation = `
+    mutation upsertArtworkIndex($ns: String!, $key: String!, $val: String!, $id: ID) {
+      metafieldsSet(metafields: [
+        { ${mfid ? 'id: $id,' : ''} namespace: $ns, key: $key, type: "json", value: $val }
+      ]) { userErrors { field message } }
+    }`;
+  const variables = {
+    ns: ART_NS,
+    key: ART_KEY,
+    val: JSON.stringify(obj),
+    ...(mfid ? { id: mfid } : {})
+  };
+  const resp = await shopGQL(mutation, variables);
+  const errs = resp?.metafieldsSet?.userErrors || [];
+  if (errs.length) throw new Error('metafieldsSet ' + JSON.stringify(errs));
+  slog(id, 'wrote index size', Object.keys(obj).length);
+  return true;
+}
+
+// Upsert en alias-post
+async function upsertAliasIndex({ alias, orderId, lineItemId }, rid_) {
+  if (!alias || !orderId || !lineItemId) return false;
+  const { id, obj, mfid } = await readArtworkIndex(rid_);
+  obj[alias] = { orderId: String(orderId), lineItemId: String(lineItemId), at: Date.now() };
+  await writeArtworkIndex(id, obj, mfid);
+  return true;
+}
 
 const app = express(); // ✅ Skapa app INNAN du använder den
 
@@ -560,6 +638,7 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
   }
 });
 // ---- Helpers för att hämta preview + filnamn ur order.metafields ----
+// Läser ut preview/fil från projekt-objektet du redan sparar under ordern
 async function extractPreviewAndFileFromProject(proj) {
   if (!proj) return { preview: null, fileName: '' };
   const preview = proj.previewUrl || proj.preview_img || null;
@@ -573,37 +652,33 @@ async function extractPreviewAndFileFromProject(proj) {
   return { preview, fileName };
 }
 
-// a) Verifierad token (orderId + lineItemId) -> hämta projekt
+// A) signerad token -> hämta projekt via orderId/lineItemId (du har readOrderProjects)
 async function lookupArtworkMeta(payload) {
   const { orderId, lineItemId } = payload || {};
   if (!orderId || !lineItemId) return null;
-  const { projects } = await readOrderProjects(orderId); // <– finns redan
+  const { projects } = await readOrderProjects(orderId);
   const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
   if (!proj) return null;
   const { preview, fileName } = await extractPreviewAndFileFromProject(proj);
   return preview ? { preview, fileName } : null;
 }
 
-// b) Legacy alias (32-hex) -> försök hitta i samma order-created-projektstruktur
-//    OBS: vi kan inte söka i "alla ordrar" billigt, så vi stöder alias som
-//    redan finns sparat i projektet (t.ex. proj.token_hash/proj.alias/proj.tid)
-async function lookupArtworkByAlias(alias) {
-  // Här kan du (om du redan sparar alias i ordern) hitta igen projektet med hjälp av en
-  // *känd* orderId. Har du INTE orderId här, är bästa vägen att sluta dela alias och
-  // istället dela signerade tokens. Vi försöker ändå vara toleranta:
-  try {
-    // Om du i dina projekt sparar alias på fält:
-    // token_hash | alias | tid | preview_md5 – kolla alla.
-    // Du behöver då veta vilka orderId som är relevanta.
-    // Minimal defensiv implementation: returnera null (ger 401 i responsen).
-    return null;
-  } catch {
-    return null;
-  }
+// B) alias -> kolla index och hämta projekt därefter
+async function lookupArtworkByAlias(alias, rid_) {
+  const id = rid_ || rid();
+  const { obj } = await readArtworkIndex(id);
+  const hit = obj[alias];
+  if (!hit) { slog(id, 'alias miss', alias); return null; }
+  slog(id, 'alias hit', alias, hit);
+  return await lookupArtworkMeta(hit);
 }
+
 
 app.get('/public/printed/artwork-token', async (req, res) => {
   const q = (req.query.artwork || '').trim();
+  const id = rid();
+  const log = (...a)=>slog(id, ...a);
+  const err = (...a)=>serr(id, ...a);
 
   if (!q) return res.status(400).json({ error: 'missing_artwork' });
 
@@ -612,45 +687,87 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     let payload = null;
     try { payload = verifyAndParseToken(q); } catch {}
     if (payload) {
-      const meta = await lookupArtworkMeta(payload); // <-- NU FINNS DEN
-      if (meta?.preview) {
-        return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
-      }
+      log('signed token OK', { orderId: payload.orderId, lineItemId: payload.lineItemId });
+      const meta = await lookupArtworkMeta(payload);
+      if (meta?.preview) return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
+      log('signed token not_found');
       return res.status(404).json({ error: 'not_found' });
     }
 
-    // 2) legacy alias (32-hex)
+    // 2) legacy alias (32-hex) via index
     if (/^[a-f0-9]{32}$/i.test(q)) {
-      const meta = await lookupArtworkByAlias(q); // <-- NU FINNS DEN (returnerar ev. null)
-      if (meta?.preview) {
-        return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
-      }
+      log('legacy alias try', q);
+      const meta = await lookupArtworkByAlias(q, id);
+      if (meta?.preview) return res.json({ preview: meta.preview, tryckfil: meta.fileName || '' });
+      log('alias invalid (no index match)');
       return res.status(401).json({ error: 'invalid_alias' });
     }
 
-    // 3) felaktigt format
+    // 3) annat skräp
+    log('invalid format');
     return res.status(401).json({ error: 'invalid_token' });
   } catch (e) {
-    console.error('[ARTWORK-TOKEN][ERR]', e);
+    err('resolver crash', e?.message || e);
     return res.status(500).json({ error: 'server_error' });
   }
 });
 
+
 // Skapa signerad token när du vet orderId + lineItemId
-app.post('/public/printed/mint', async (req, res) => {
+app.post('/public/printed/mint', express.json(), async (req, res) => {
+  const id = rid();
   try {
-    const { orderId, lineItemId } = req.body || {};
+    const { orderId, lineItemId, alias } = req.body || {};
     if (!orderId || !lineItemId) return res.status(400).json({ error: 'missing_ids' });
 
-    // validera att projektet finns
     const { projects } = await readOrderProjects(orderId);
     const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
     if (!proj) return res.status(404).json({ error: 'not_found' });
 
-    const { token } = generateArtworkToken(orderId, lineItemId); // redan definierad
+    // Mint token
+    const { token } = generateArtworkToken(orderId, lineItemId);
+
+    // Om klienten skickar alias (32-hex), lägg in i index direkt
+    if (alias && /^[a-f0-9]{32}$/i.test(alias)) {
+      await upsertAliasIndex({ alias, orderId, lineItemId }, id);
+    }
+
     return res.json({ token });
   } catch (e) {
-    console.error('/public/printed/mint error:', e?.response?.data || e.message);
+    serr(id, 'mint error', e?.response?.data || e?.message || e);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// Kör manuellt: POST /admin/printed/alias-backfill { orderIds: [..] }
+app.post('/admin/printed/alias-backfill', express.json(), async (req, res) => {
+  const id = rid();
+  try {
+    const { orderIds } = req.body || {};
+    if (!Array.isArray(orderIds) || !orderIds.length) {
+      return res.status(400).json({ error: 'missing_orderIds' });
+    }
+
+    const { obj, mfid } = await readArtworkIndex(id);
+    let added = 0;
+
+    for (const orderId of orderIds) {
+      const { projects } = await readOrderProjects(orderId);
+      for (const p of (projects || [])) {
+        const alias =
+          p.token_hash || p.alias || p.tid || p.preview_md5 || null;
+        const lineItemId = p.lineItemId || p.itemId || null;
+        if (!alias || !/^[a-f0-9]{32}$/i.test(alias) || !lineItemId) continue;
+
+        obj[alias] = { orderId: String(orderId), lineItemId: String(lineItemId), at: Date.now() };
+        added++;
+      }
+    }
+
+    await writeArtworkIndex(id, obj, mfid);
+    return res.json({ ok: true, added, size: Object.keys(obj).length });
+  } catch (e) {
+    serr(id, 'backfill error', e?.message || e);
     return res.status(500).json({ error: 'server_error' });
   }
 });
