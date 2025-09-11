@@ -559,13 +559,56 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+// === PUBLIC ARTWORK TOKEN RESOLVER (NO APP PROXY REQUIRED) ===
+app.get('/public/printed/artwork-token', async (req, res) => {
+  try {
+    const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
+    if (!raw) return res.status(400).json({ error: 'missing_token' });
+
+    const payload = verifyAndParseToken(raw);
+    if (!payload) return res.status(401).json({ error: 'invalid_token' });
+    if (payload.kind && payload.kind !== 'artwork') {
+      return res.status(401).json({ error: 'wrong_token_kind' });
+    }
+
+    const { orderId, lineItemId } = payload;
+    if (!orderId || !lineItemId) return res.status(400).json({ error: 'bad_payload' });
+
+    const { projects } = await readOrderProjects(orderId);
+    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+    if (!proj) return res.status(404).json({ error: 'not_found' });
+
+    const preview = proj.previewUrl || proj.preview_img || null;
+
+    let fileName = '';
+    try {
+      fileName =
+        (proj.properties || [])
+          .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
+          ?.value || '';
+    } catch {}
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      preview,
+      tryckfil: fileName,
+      filename: fileName,
+      name: fileName
+    });
+  } catch (e) {
+    console.error('/public/printed/artwork-token error:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 
 // Alias/forwards så alla dina frontend-fallbacks träffar samma handler
-app.get('/apps/printed/artwork-token', forward('/proxy/printed/artwork-token'));
-app.get('/apps/printed/artwork',       forward('/proxy/printed/artwork-token'));
-app.get('/apps/pressify/artwork-token',forward('/proxy/printed/artwork-token'));
-app.get('/apps/pressify/artwork',      forward('/proxy/printed/artwork-token'));
-app.get('/apps/artwork-token',         forward('/proxy/printed/artwork-token'));
+app.get('/apps/printed/artwork-token', forward('/public/printed/artwork-token'));
+app.get('/apps/printed/artwork',       forward('/public/printed/artwork-token'));
+app.get('/apps/pressify/artwork-token',forward('/public/printed/artwork-token'));
+app.get('/apps/pressify/artwork',      forward('/public/printed/artwork-token'));
+app.get('/apps/artwork-token',         forward('/public/printed/artwork-token'));
+
 
 // Liten hälsosida så "Cannot GET /" försvinner
 app.get('/', (req, res) => res.type('text').send('OK'));
