@@ -560,47 +560,51 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
   }
 });
 // === PUBLIC ARTWORK TOKEN RESOLVER (NO APP PROXY REQUIRED) ===
+// --- /public/printed/artwork-token (DROP-IN REPLACE) ---
 app.get('/public/printed/artwork-token', async (req, res) => {
-  try {
-    const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
-    if (!raw) return res.status(400).json({ error: 'missing_token' });
+  const q = (req.query.artwork || '').trim();
+  const rid = Math.random().toString(36).slice(2);
+  const log = (...a)=>console.log('[ARTWORK-TOKEN]['+rid+']', ...a);
 
-    const payload = verifyAndParseToken(raw);
-    if (!payload) return res.status(401).json({ error: 'invalid_token' });
-    if (payload.kind && payload.kind !== 'artwork') {
-      return res.status(401).json({ error: 'wrong_token_kind' });
+  if (!q) return res.status(400).json({ error: 'missing_artwork' });
+
+  try {
+    // 1) Försök som signerad token
+    let payload = null;
+    try { payload = verifyAndParseToken(q); } catch {}
+    if (payload) {
+      log('signed token OK', { orderId: payload.orderId, lineItemId: payload.lineItemId });
+      const meta = await lookupArtworkMeta(payload); // <- du har redan en funktion som läser order/metafält
+      if (meta?.preview) {
+        return res.json({ preview: meta.preview, tryckfil: meta.fileName || meta.name || '' });
+      }
+      log('signed token meta not found');
+      return res.status(404).json({ error: 'not_found' });
     }
 
-    const { orderId, lineItemId } = payload;
-    if (!orderId || !lineItemId) return res.status(400).json({ error: 'bad_payload' });
+    // 2) Legacy alias: 32-hex (typ df73d3...)
+    if (/^[a-f0-9]{32}$/i.test(q)) {
+      log('legacy alias, trying resolve', q);
+      // Implementera denna lookup en gång på serversidan:
+      // Den ska hitta orderrad/metafält där alias==q och returnera preview/filnamn
+      const meta = await lookupArtworkByAlias(q);
+      if (meta?.preview) {
+        log('alias resolved');
+        return res.json({ preview: meta.preview, tryckfil: meta.fileName || meta.name || '' });
+      }
+      log('alias not found');
+      return res.status(401).json({ error: 'invalid_alias' });
+    }
 
-    const { projects } = await readOrderProjects(orderId);
-    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
-    if (!proj) return res.status(404).json({ error: 'not_found' });
-
-    const preview = proj.previewUrl || proj.preview_img || null;
-
-    let fileName = '';
-    try {
-      fileName =
-        (proj.properties || [])
-          .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
-          ?.value || '';
-    } catch {}
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({
-      preview,
-      tryckfil: fileName,
-      filename: fileName,
-      name: fileName
-    });
+    // 3) Varken giltig token eller alias
+    log('neither token nor alias');
+    return res.status(401).json({ error: 'invalid_token' });
   } catch (e) {
-    console.error('/public/printed/artwork-token error:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ error: 'internal' });
+    console.error('[ARTWORK-TOKEN][ERR]', e);
+    return res.status(500).json({ error: 'server_error' });
   }
 });
+
 
 // Alias/forwards så alla dina frontend-fallbacks träffar samma handler
 app.get('/apps/printed/artwork-token', forward('/public/printed/artwork-token'));
