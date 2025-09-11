@@ -327,6 +327,19 @@ function verifyAndParseToken(token){
 }
 function newTid(){ return crypto.randomBytes(8).toString('hex'); } // per-token id
 function nowIso(){ return new Date().toISOString(); }
+// === Artwork-token helper (återanvänder exakt samma format/signatur som övriga tokens)
+function generateArtworkToken(orderId, lineItemId) {
+  const tid = newTid();
+  const token = signTokenPayload({
+    kind: 'artwork',
+    orderId: Number(orderId),
+    lineItemId: Number(lineItemId),
+    tid,
+    iat: Date.now()
+  });
+  const token_hash = crypto.createHash('sha256').update(token).digest('hex');
+  return { token, tid, token_hash };
+}
 
 // Läs/skriv order-created
 async function readOrderProjects(orderId) {
@@ -1090,8 +1103,8 @@ const newProjects = lineItems.map(item => {
   const m = arrToMapByName(allClean);
 
   // C) Derivera nyckelfält
-const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','_tryckfil','fileName','filnamn']);
-const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','_instructions','Önskemål','onskemal']);
+  const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','_tryckfil','fileName','filnamn']);
+  const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','_instructions','Önskemål','onskemal']);
   const previewFromProp = pickFirstNonEmpty(m, ['preview_img','_preview_img']);
   const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
   const preview_img = previewFromProp || fallback.previewUrl || null;
@@ -1110,6 +1123,9 @@ const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','i
     properties.push({ name: 'Tryckfil', value: tryckfil });
   }
 
+  // ⭐ NYTT: generera artwork-token i exakt samma token-format
+  const { token: artworkToken } = generateArtworkToken(orderId, item.id);
+
   return {
     orderId,
     lineItemId:   item.id,
@@ -1126,9 +1142,12 @@ const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','i
     orderNumber,
     status: 'Väntar på korrektur',
     tag:    'Väntar på korrektur',
-    date: new Date().toISOString()
+    date: new Date().toISOString(),
+    // ⭐ NYTT fält – påverkar inget annat
+    artworkToken
   };
 });
+
 
 
 
@@ -2863,6 +2882,86 @@ app.post('/admin/referlink/backfill', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+// ===== ADMIN: Backfill artworkToken in order-created (säker, idempotent) =====
+// Använd samma BACKFILL_SECRET-header som referlink-backfill.
+// Två lägen:
+//  - Enstaka order: POST /admin/order-created/backfill-artwork-token { orderId }
+//  - Bulk (frivilligt): POST /admin/order-created/backfill-artwork-token?since=YYYY-MM-DD  (paginera status:any)
+app.post('/admin/order-created/backfill-artwork-token', async (req, res) => {
+  try {
+    if (!BACKFILL_SECRET || req.get('x-backfill-secret') !== BACKFILL_SECRET) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const since = (req.query.since || '').trim(); // valfritt filter för bulk
+    const singleOrderId = req.body && req.body.orderId ? String(req.body.orderId).trim() : '';
+
+    // Hjälpare: säkerställ token per projekt i en order
+    async function ensureTokensOnOrder(orderId) {
+      const { metafieldId, projects } = await readOrderProjects(orderId);
+      if (!metafieldId || !Array.isArray(projects) || projects.length === 0) return { orderId, updated: 0, skipped: true };
+
+      let changed = 0;
+      const next = projects.map(p => {
+        if (p && !p.artworkToken && p.lineItemId != null) {
+          const { token } = generateArtworkToken(orderId, p.lineItemId);
+          changed++;
+          return { ...p, artworkToken: token };
+        }
+        return p;
+      });
+
+      if (changed > 0) {
+        await writeOrderProjects(metafieldId, next);
+      }
+      return { orderId, updated: changed, skipped: false };
+    }
+
+    // Enstaka order
+    if (singleOrderId) {
+      const out = await ensureTokensOnOrder(singleOrderId);
+      return res.json({ ok: true, mode: 'single', ...out });
+    }
+
+    // Bulk: hämta ordrar via REST (status:any), ev. filtrera på created_at>=since
+    let url = `https://${SHOP}/admin/api/2025-07/orders.json?status=any&limit=250&fields=id,created_at`;
+    if (since) url += `&created_at_min=${encodeURIComponent(since)}`;
+
+    const results = { ok: true, mode: 'bulk', processed: 0, updated: 0, errors: 0 };
+    while (url) {
+      const r = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
+      const orders = r.data.orders || [];
+      for (const o of orders) {
+        try {
+          const r = await ensureTokensOnOrder(o.id);
+          results.processed++;
+          results.updated += (r.updated || 0);
+          // Liten paus för att vara snäll mot API:t
+          await sleep(150);
+        } catch (e) {
+          results.errors++;
+          console.warn('backfill artworkToken failed:', o.id, e?.response?.data || e.message);
+        }
+      }
+
+      // Paginering via Link-header
+      const link = r.headers['link'] || r.headers['Link'];
+      const next = (link || '').split(',').find(p => p.includes('rel="next"'));
+      if (next) {
+        const m = next.match(/<([^>]+)>/);
+        url = m ? m[1] : null;
+      } else {
+        url = null;
+      }
+    }
+
+    return res.json(results);
+  } catch (e) {
+    console.error('POST /admin/order-created/backfill-artwork-token:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
 // ===== NY ROUTE (DIN) – placerad strax före globala felhanteraren =====
 app.get('/din/health/ping', (req, res) => {
   // fullständigt frikopplad, påverkar inget
