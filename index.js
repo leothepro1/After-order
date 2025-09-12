@@ -386,6 +386,70 @@ async function redisCmd(commandArray) {
   }
 }
 
+// ===== PASS-BY-REFERENCE TOKEN REGISTRY (Upstash Redis) =====
+const ARTWORK_TOKEN_TTL_SECONDS = parseInt(process.env.ARTWORK_TOKEN_TTL_SECONDS || '2592000', 10); // 30 dagar
+
+function tokenHash(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+function tokenKey(hash) {
+  return `artworktoken:${hash}:v1`;
+}
+async function registerTokenInRedis(token, payload /* { kind, orderId, lineItemId, iat, tid } */) {
+  try {
+    if (!token) return false;
+    const h = tokenHash(token);
+    const key = tokenKey(h);
+
+    const kind = String(payload?.kind || 'artwork');
+    const orderId = String(payload?.orderId ?? '');
+    const lineItemId = String(payload?.lineItemId ?? '');
+    if (!orderId || !lineItemId) return false;
+
+    const iat = String(payload?.iat || Date.now());
+    const tid = String(payload?.tid || (typeof newTid === 'function' ? newTid() : ''));
+    const ver = 'v1'; // schema-version om du vill kunna migrera senare
+
+    const flat = [
+      'token_hash', h,
+      'kind', kind,
+      'orderId', orderId,
+      'lineItemId', lineItemId,
+      'iat', iat,
+      'tid', tid,
+      'ver', ver
+    ];
+
+    await redisCmd(['HSET', key, ...flat]);
+
+    const ttl = Number(ARTWORK_TOKEN_TTL_SECONDS);
+    if (Number.isFinite(ttl) && ttl > 0) {
+      await redisCmd(['EXPIRE', key, String(ttl)]);
+    }
+
+    return true;
+  } catch (e) {
+    console.error('registerTokenInRedis failed:', e?.message || e);
+    return false;
+  }
+}
+
+async function resolveTokenFromRedis(rawToken) {
+  try {
+    const h = tokenHash(rawToken);
+    const key = tokenKey(h);
+    const r = await redisCmd(['HGETALL', key]);
+    const kv = r?.result || r;
+    if (!kv || typeof kv !== 'object' || !kv.orderId || !kv.lineItemId) return null;
+    return {
+      kind: kv.kind || 'artwork',
+      orderId: Number(kv.orderId),
+      lineItemId: Number(kv.lineItemId),
+      iat: Number(kv.iat || 0) || Date.now(),
+      tid: kv.tid || ''
+    };
+  } catch { return null; }
+}
 
 // Cachea hela projects-arrayen under key: order:{orderId}:projects:v1
 async function cacheOrderProjects(orderId, projects) {
@@ -697,14 +761,22 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-// === PUBLIC ARTWORK TOKEN RESOLVER (NO APP PROXY REQUIRED) ===
+// === PUBLIC ARTWORK TOKEN RESOLVER (PASS-BY-REFERENCE via Redis, fallback till HMAC) ===
+// === PUBLIC ARTWORK TOKEN RESOLVER (PASS-BY-REFERENCE via Redis, fallback till HMAC) ===
 app.get('/public/printed/artwork-token', async (req, res) => {
   try {
     const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
     if (!raw) return res.status(400).json({ error: 'missing_token' });
 
-    const payload = verifyAndParseToken(raw);
-    if (!payload) return res.status(401).json({ error: 'invalid_token' });
+    // 1) Försök pass-by-reference via Redis
+    let payload = await resolveTokenFromRedis(raw);
+
+    // 2) Fallback: verifiera HMAC-signaturen (legacy/om ej i Redis)
+    if (!payload) {
+      payload = verifyAndParseToken(raw);
+      if (!payload) return res.status(401).json({ error: 'invalid_token' });
+    }
+
     if (payload.kind && payload.kind !== 'artwork') {
       return res.status(401).json({ error: 'wrong_token_kind' });
     }
@@ -712,18 +784,17 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     const { orderId, lineItemId } = payload;
     if (!orderId || !lineItemId) return res.status(400).json({ error: 'bad_payload' });
 
+    // Läs projektet och returnera preview + filnamn
     const { projects } = await readOrderProjects(orderId);
     const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
     if (!proj) return res.status(404).json({ error: 'not_found' });
 
     const preview = proj.previewUrl || proj.preview_img || null;
-
     let fileName = '';
     try {
-      fileName =
-        (proj.properties || [])
-          .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
-          ?.value || '';
+      fileName = (proj.properties || [])
+        .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
+        ?.value || '';
     } catch {}
 
     res.setHeader('Cache-Control', 'no-store');
@@ -739,6 +810,8 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
+
 
 // Alias/forwards så alla dina frontend-fallbacks träffar samma handler
 app.get('/apps/printed/artwork-token', forward('/public/printed/artwork-token'));
@@ -1367,7 +1440,16 @@ const newProjects = lineItems.map(item => {
   }
 
   // ⭐ NYTT: generera artwork-token i exakt samma token-format
-  const { token: artworkToken } = generateArtworkToken(orderId, item.id);
+  const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
+await registerTokenInRedis(artworkToken, {
+  kind: 'artwork',
+  orderId: Number(orderId),
+  lineItemId: Number(item.id),
+  iat: Date.now(),
+  tid
+});
+
+
 
   return {
     orderId,
@@ -3185,30 +3267,44 @@ app.post('/admin/order-created/backfill-artwork-token', async (req, res) => {
 
     // Hjälpare: säkerställ token per projekt i en order
     async function ensureTokensOnOrder(orderId) {
-      const { metafieldId, projects } = await readOrderProjects(orderId);
-      if (!metafieldId || !Array.isArray(projects) || projects.length === 0) return { orderId, updated: 0, skipped: true };
+  const { metafieldId, projects } = await readOrderProjects(orderId);
+  if (!metafieldId || !Array.isArray(projects) || projects.length === 0) {
+    return { orderId, updated: 0, skipped: true };
+  }
 
-      let changed = 0;
-      const next = projects.map(p => {
-        if (p && !p.artworkToken && p.lineItemId != null) {
-          const { token } = generateArtworkToken(orderId, p.lineItemId);
-          changed++;
-          return { ...p, artworkToken: token };
-        }
-        return p;
+  let changed = 0;
+  const next = [];
+  for (const p of (projects || [])) {
+    if (p && !p.artworkToken && p.lineItemId != null) {
+      const { token, tid } = generateArtworkToken(orderId, p.lineItemId);
+      // registrera i Redis för pass-by-reference
+      await registerTokenInRedis(token, {
+        kind: 'artwork',
+        orderId: Number(orderId),
+        lineItemId: Number(p.lineItemId),
+        iat: Date.now(),
+        tid
       });
-
-      if (changed > 0) {
-        await writeOrderProjects(metafieldId, next);
-      }
-      return { orderId, updated: changed, skipped: false };
+      changed++;
+      next.push({ ...p, artworkToken: token });
+    } else {
+      next.push(p);
     }
+  }
 
-    // Enstaka order
-    if (singleOrderId) {
-      const out = await ensureTokensOnOrder(singleOrderId);
-      return res.json({ ok: true, mode: 'single', ...out });
-    }
+  if (changed > 0) {
+    await writeOrderProjects(metafieldId, next);
+  }
+  return { orderId, updated: changed, skipped: false };
+}
+
+// ...
+
+if (singleOrderId) {
+  const out = await ensureTokensOnOrder(singleOrderId);
+  return res.json({ ok: true, mode: 'single', out });
+}
+
 
     // Bulk: hämta ordrar via REST (status:any), ev. filtrera på created_at>=since
     let url = `https://${SHOP}/admin/api/2025-07/orders.json?status=any&limit=250&fields=id,created_at`;
