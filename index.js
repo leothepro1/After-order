@@ -370,8 +370,14 @@ async function redisCmd(commandArray) {
   try {
     const r = await axios.post(
       UPSTASH_REDIS_REST_URL,
-      { command: commandArray },
-      { headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` }, timeout: 2000 }
+      commandArray, // ⬅️ Viktigt: skicka själva arrayen, inte { command: [...] }
+      {
+        headers: {
+          Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 2000
+      }
     );
     return r.data;
   } catch (e) {
@@ -379,6 +385,7 @@ async function redisCmd(commandArray) {
     return null;
   }
 }
+
 
 // Cachea hela projects-arrayen under key: order:{orderId}:projects:v1
 async function cacheOrderProjects(orderId, projects) {
