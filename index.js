@@ -409,8 +409,11 @@ function epochMs(iso) {
 async function zaddCustomerOrder(customerId, orderId, processedAt) {
   const zkey = `cust:${customerId}:orders`;
   const score = String(epochMs(processedAt));
-  return await redisCmd(["ZADD", zkey, score, String(orderId), "EX", String(ORDER_PROJECTS_TTL_SECONDS)]);
+  await redisCmd(["ZADD", zkey, score, String(orderId)]);
+  await redisCmd(["EXPIRE", zkey, String(ORDER_PROJECTS_TTL_SECONDS)]);
+  return true;
 }
+
 
 async function hsetOrderSummary(orderId, summaryObj) {
   const hkey = `order:${orderId}:summary`;
@@ -1607,6 +1610,15 @@ app.post('/proof/upload', async (req, res) => {
     await writeOrderProjects(metafieldId, rotated);
     // +++ NYTT: cache till Redis (10 dagar) +++
     try { await cacheOrderProjects(orderId, rotated); } catch {}
+// ---- NYTT: uppdatera order-sammanfattning i Redis ----
+try {
+  const projForCid = rotated.find(p => String(p.lineItemId) === String(lineItemId));
+  const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
+  await touchOrderSummary(customerIdForIndex, Number(orderId), {
+    processedAt: new Date().toISOString(),
+    metafield: JSON.stringify(rotated || [])
+  });
+} catch {}
 
     // 9) Svara med token + URL
     const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
@@ -1753,8 +1765,20 @@ app.post('/proof/request-changes', async (req, res) => {
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
-        // +++ NYTT: cache till Redis (10 dagar) +++
-    try { await cacheOrderProjects(orderId, projects); } catch {}
+// +++ NYTT: cache till Redis (10 dagar) +++
+try { await cacheOrderProjects(orderId, projects); } catch {}
+
+// ---- NYTT: uppdatera order-sammanfattning i Redis ----
+try {
+  const projForCid = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+  const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
+  await touchOrderSummary(customerIdForIndex, Number(orderId), {
+    processedAt: new Date().toISOString(),
+    metafield: JSON.stringify(projects || [])
+  });
+} catch {}
+
+    
     console.log('✅ Shopify response for request-changes:', putRes.status);
 
     /* ==== ACTIVITY LOG: Kund begärde ändringar ==== */
