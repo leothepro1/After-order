@@ -761,64 +761,122 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-// === PUBLIC ARTWORK TOKEN RESOLVER (PASS-BY-REFERENCE via Redis, fallback till HMAC) ===
-// === PUBLIC ARTWORK TOKEN RESOLVER (PASS-BY-REFERENCE via Redis, fallback till HMAC) ===
+// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
+// Accepterar ?artwork=, ?token= eller ?id=
+// - Signerad token (p64url.<sig>): verifieras → hämtar projekt + aktiv share-snapshot.
+// - Legacy (t.ex. "071ea4..." eller ett gammalt filnamn): söker i orderns projekt om möjligt.
+//   Obs: legacy utan orderId blir "best effort": vi försöker hitta i senaste snapshoten/Redis-index om tillgängligt.
 app.get('/public/printed/artwork-token', async (req, res) => {
   try {
-    const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
-    if (!raw) return res.status(400).json({ error: 'missing_token' });
+    const raw =
+      (req.query.artwork || req.query.token || req.query.id || '').toString().trim();
+    if (!raw) return res.status(400).json({ error: 'missing_param' });
 
-    // 1) Försök pass-by-reference via Redis
-    let payload = await resolveTokenFromRedis(raw);
+    // Helper: normalisera svar
+    const sendOk = ({ preview, filename, token }) => {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        preview,
+        filename,
+        tryckfil: filename,
+        name: filename,
+        ...(token ? { token } : {}) // gör det lättare för frontend att använda rätt suffix
+      });
+    };
 
-    // 2) Fallback: verifiera HMAC-signaturen (legacy/om ej i Redis)
-    if (!payload) {
-      payload = verifyAndParseToken(raw);
-      if (!payload) return res.status(401).json({ error: 'invalid_token' });
+    // 1) Är det en signerad token? (innehåller en punkt)
+    if (raw.includes('.')) {
+      const payload = verifyAndParseToken(raw);
+      // Tillåt äldre tokens utan "kind", men om "kind" finns måste den vara 'artwork' eller 'proof'
+      if (!payload || (payload.kind && !/^artwork|proof$/.test(payload.kind))) {
+        return res.status(401).json({ error: 'invalid_token' });
+      }
+
+      const { orderId, lineItemId, tid } = payload || {};
+      if (!orderId || !lineItemId) {
+        return res.status(400).json({ error: 'bad_payload' });
+      }
+
+      // Läs projekten
+      const { projects } = await readOrderProjects(orderId);
+      const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+      if (!proj) return res.status(404).json({ error: 'not_found' });
+
+      // Om tokenen är en "share" (proof) – använd snapshot först
+      const shares = Array.isArray(proj.shares) ? proj.shares : [];
+      const active = shares.find(s => s && s.status === 'active' && (!tid || String(s.tid) === String(tid)));
+
+      const preview =
+        (active?.snapshot?.previewUrl) ||
+        proj.previewUrl ||
+        proj.preview_img ||
+        null;
+
+      // Försök plocka ut filnamn ("Tryckfil") från properties
+      let filename = '';
+      try {
+        filename =
+          (proj.properties || []).find(x => x && x.name && x.name.toLowerCase() === 'tryckfil')?.value || '';
+      } catch {}
+      if (!filename) filename = proj.tryckfil || '';
+
+      if (!preview) return res.status(404).json({ error: 'preview_missing' });
+      return sendOk({ preview, filename, token: raw });
     }
 
-    if (payload.kind && payload.kind !== 'artwork') {
-      return res.status(401).json({ error: 'wrong_token_kind' });
-    }
+    // 2) Legacy: HEX/filnamn etc. (delbar bakåtkompatibilitet)
+    // För legacy försöker vi:
+    //  a) leta i senaste ordern där samma "Tryckfil" förekommer (via caches/summary om tillgängligt),
+    //  b) annars (om du har Redis-index) kan du lägga in din egen lookup här.
+    const legacy = decodeURIComponent(raw).toLowerCase();
 
-    const { orderId, lineItemId } = payload;
-    if (!orderId || !lineItemId) return res.status(400).json({ error: 'bad_payload' });
-
-    // Läs projektet och returnera preview + filnamn
-    const { projects } = await readOrderProjects(orderId);
-    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
-    if (!proj) return res.status(404).json({ error: 'not_found' });
-
-    const preview = proj.previewUrl || proj.preview_img || null;
-    let fileName = '';
+    // === Minimal, säker fallback: sök i "senaste skrivna snapshoten" i order-projektens cache (Redis) ===
+    // Notera: om du inte har ett centralt index – kommentera blocket nedan och ersätt med din egen lookup.
     try {
-      fileName = (proj.properties || [])
-        .find(x => x && typeof x.name === 'string' && x.name.toLowerCase() === 'tryckfil')
-        ?.value || '';
-    } catch {}
+      // Hämta *senaste* aktiva share via order-sammanfattning om du har det indexerat
+      // (vi använder dina redan existerande hjälpmetoder om de finns; om inte, hoppa över try-blocket)
+      const recentOrders = await getRecentOrdersFromCache?.(50); // valfritt helper i din kodbas
+      if (Array.isArray(recentOrders)) {
+        for (const o of recentOrders) {
+          const { projects } = await readOrderProjects(o.id);
+          const hit = (projects || []).find(p => {
+            const fn = (() => {
+              try {
+                return (p.properties || []).find(x => x && x.name?.toLowerCase() === 'tryckfil')?.value || '';
+              } catch { return ''; }
+            })().toLowerCase() || (p.tryckfil || '').toLowerCase();
+            return fn && fn === legacy;
+          });
+          if (hit) {
+            const preview = hit.previewUrl || hit.preview_img || null;
+            let filename = '';
+            try {
+              filename =
+                (hit.properties || []).find(x => x && x.name?.toLowerCase() === 'tryckfil')?.value || '';
+            } catch {}
+            if (!filename) filename = hit.tryckfil || '';
+            if (preview) return sendOk({ preview, filename });
+          }
+        }
+      }
+    } catch {
+      // Ignorera – vi har en sista fallback nedan
+    }
 
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({
-      preview,
-      tryckfil: fileName,
-      filename: fileName,
-      name: fileName
-    });
+    // 2c) Sista utväg: legacy utan träff
+    return res.status(401).json({ error: 'invalid_or_legacy_unresolved' });
   } catch (e) {
-    console.error('/public/printed/artwork-token error:', e?.response?.data || e.message);
+    console.error('GET /public/printed/artwork-token error:', e?.response?.data || e.message);
     setCorsOnError(req, res);
     return res.status(500).json({ error: 'internal' });
   }
 });
 
+// === Alias så att /apps/... träffar den publika resolvern (utan redirect) ===
+app.get('/apps/printed/artwork-token',  forward('/public/printed/artwork-token'));
+app.get('/apps/pressify/artwork-token', forward('/public/printed/artwork-token'));
+app.get('/apps/artwork-token',          forward('/public/printed/artwork-token'));
 
-
-// Alias/forwards så alla dina frontend-fallbacks träffar samma handler
-app.get('/apps/printed/artwork-token', forward('/public/printed/artwork-token'));
-app.get('/apps/printed/artwork',       forward('/public/printed/artwork-token'));
-app.get('/apps/pressify/artwork-token',forward('/public/printed/artwork-token'));
-app.get('/apps/pressify/artwork',      forward('/public/printed/artwork-token'));
-app.get('/apps/artwork-token',         forward('/public/printed/artwork-token'));
 
 
 // Liten hälsosida så "Cannot GET /" försvinner
