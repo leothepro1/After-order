@@ -871,11 +871,60 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+// === PUBLIC REGISTER: /public/printed/artwork-register ==================
+// Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
+app.post('/public/printed/artwork-register', async (req, res) => {
+  try {
+    const { kind, orderId, lineItemId, preview, tryckfil } = req.body || {};
+    if (!orderId || !lineItemId) {
+      return res.status(400).json({ ok:false, error:'missing_params' });
+    }
+
+    // Endast artwork tillåts här (proof har egen flow)
+    const k = String(kind || 'artwork').toLowerCase();
+    if (k !== 'artwork') return res.status(400).json({ ok:false, error:'invalid_kind' });
+
+    // Skapa signerad token (DELNINGSBAR)
+    const tid = newTid();
+    const token = signTokenPayload({
+      kind: 'artwork',
+      orderId: Number(orderId),
+      lineItemId: Number(lineItemId),
+      tid,
+      iat: Date.now()
+    });
+
+    // Valfritt: registrera i Redis så resolvern kan “pass-by-reference”
+    try {
+      await registerTokenInRedis(token, {
+        kind: 'artwork',
+        orderId: Number(orderId),
+        lineItemId: Number(lineItemId),
+        iat: Date.now(),
+        tid,
+        // små hjälpfält för snabb client-preview
+        preview: preview || null,
+        tryckfil: tryckfil || ''
+      });
+    } catch {}
+
+    const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok:true, token, url });
+  } catch (e) {
+    console.error('POST /public/printed/artwork-register:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok:false, error:'internal' });
+  }
+});
 
 // === Alias så att /apps/... träffar den publika resolvern (utan redirect) ===
 app.get('/apps/printed/artwork-token',  forward('/public/printed/artwork-token'));
 app.get('/apps/pressify/artwork-token', forward('/public/printed/artwork-token'));
 app.get('/apps/artwork-token',          forward('/public/printed/artwork-token'));
+app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-register'));
+app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
+app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
 
 
 
