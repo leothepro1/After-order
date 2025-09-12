@@ -1173,11 +1173,11 @@ async function writeActivityLog(orderId, metafieldId, logArray) {
   try {
     if (metafieldId) {
       // PUT
-      await axios.put(
-        `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
-        { metafield: { id: metafieldId, ...payload.metafield, namespace: ACTIVITY_NS, key: ACTIVITY_KEY } },
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
+await axios.put(
+  `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
+  { metafield: { id: metafieldId, ...payload.metafield } },
+  { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+);
     } else {
       // POST
       await axios.post(
