@@ -398,6 +398,99 @@ async function cacheOrderProjects(orderId, projects) {
     console.warn('[cacheOrderProjects] err:', e?.response?.data || e.message);
   }
 }
+// ---- Redis order-sammanfattningar (lista/snabb-läsning) ----
+// ZSET index per kund:  key = `cust:{customerId}:orders`  score = processedAt (epoch ms)
+// HASH per order:       key = `order:{orderId}:summary`   fält: id,name,processedAt,metafield,fulfillmentStatus,preview
+
+function epochMs(iso) {
+  try { return new Date(iso).getTime() || Date.now(); } catch { return Date.now(); }
+}
+
+async function zaddCustomerOrder(customerId, orderId, processedAt) {
+  const zkey = `cust:${customerId}:orders`;
+  const score = String(epochMs(processedAt));
+  return await redisCmd(["ZADD", zkey, score, String(orderId), "EX", String(ORDER_PROJECTS_TTL_SECONDS)]);
+}
+
+async function hsetOrderSummary(orderId, summaryObj) {
+  const hkey = `order:${orderId}:summary`;
+  const flat = [];
+  for (const [k,v] of Object.entries(summaryObj)) {
+    flat.push(k, typeof v === 'string' ? v : JSON.stringify(v));
+  }
+  // HSET + samma TTL som projekten
+  await redisCmd(["HSET", hkey, ...flat]);
+  await redisCmd(["EXPIRE", hkey, String(ORDER_PROJECTS_TTL_SECONDS)]);
+}
+
+async function tryReadOrdersFromRedis(customerId, first) {
+  // Läs topp N orderIds från ZSET och sen HGETALL per order
+  const zkey = `cust:${customerId}:orders`;
+  const zres = await redisCmd(["ZREVRANGE", zkey, "0", String(Math.max(0, first - 1))]);
+  const orderIds = Array.isArray(zres?.result || zres) ? zres.result || zres : [];
+  if (!orderIds.length) return [];
+
+  const out = [];
+  for (const oid of orderIds) {
+    const h = await redisCmd(["HGETALL", `order:${oid}:summary`]);
+    const kv = h?.result || h;
+    if (kv && typeof kv === 'object' && Object.keys(kv).length) {
+      out.push({
+        id: Number(kv.id || oid),
+        name: kv.name || null,
+        processedAt: kv.processedAt || null,
+        metafield: kv.metafield || null, // lagrat som sträng
+        fulfillmentStatus: kv.fulfillmentStatus || null,
+        displayFulfillmentStatus: null
+      });
+    }
+  }
+  return out;
+}
+
+function firstPreviewFromMeta(metafieldValue) {
+  try {
+    const arr = JSON.parse(metafieldValue || '[]');
+    const p = Array.isArray(arr) && arr.length ? arr[0] : null;
+    return p ? (p.previewUrl || p.preview_img || null) : null;
+  } catch { return null; }
+}
+
+async function seedOrdersToRedis(customerId, items /* array av {id,name,processedAt,metafield,fulfillmentStatus} */) {
+  try {
+    for (const o of items) {
+      await zaddCustomerOrder(customerId, o.id, o.processedAt);
+      await hsetOrderSummary(o.id, {
+        id: String(o.id),
+        name: o.name || '',
+        processedAt: o.processedAt || '',
+        metafield: typeof o.metafield === 'string' ? o.metafield : (o.metafield ? JSON.stringify(o.metafield) : 'null'),
+        fulfillmentStatus: o.fulfillmentStatus || '',
+        preview: firstPreviewFromMeta(o.metafield)
+      });
+    }
+  } catch (e) {
+    console.warn('[seedOrdersToRedis] err:', e?.response?.data || e.message);
+  }
+}
+
+// Hjälpare att “toucha/uppdatera” sammanfattning efter ändringar (t.ex. rename/proof/etc)
+async function touchOrderSummary(customerId, orderId, { name, processedAt, metafield, fulfillmentStatus } = {}) {
+  try {
+    if (customerId) await zaddCustomerOrder(customerId, orderId, processedAt || new Date().toISOString());
+    await hsetOrderSummary(orderId, {
+      id: String(orderId),
+      name: name || '',
+      processedAt: processedAt || new Date().toISOString(),
+      metafield: typeof metafield === 'string' ? metafield : (metafield ? JSON.stringify(metafield) : 'null'),
+      fulfillmentStatus: fulfillmentStatus || ''
+    });
+  } catch (e) {
+    console.warn('[touchOrderSummary] err:', e?.response?.data || e.message);
+  }
+}
+// ---- END Redis order-sammanfattningar ----
+
 // ===== END UPSTASH REDIS =====
 
 /* ===== REVIEWS: produkt-metafält helpers (NYTT) ===== */
@@ -1915,6 +2008,20 @@ function forward(toPath) {
   };
 }
 
+// ---- NYTT: cache-first från Redis för orderlistan ----
+const first = Math.min(parseInt(req.query.first || '25', 10), 50);
+if (WRITE_ORDERS_TO_REDIS) {
+  try {
+    const cached = await tryReadOrdersFromRedis(cidNum, first);
+    if (cached && cached.length) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ orders: cached });
+    }
+  } catch (e) {
+    console.warn('[orders-meta cache-first] misslyckades, faller tillbaka:', e?.response?.data || e.message);
+  }
+}
+// ---- /NYTT ----
 
 // 1) /link  → /proxy/link
 app.get('/link', forward('/proxy/link'));
@@ -2339,6 +2446,13 @@ const out = edges.map(e => ({
   fulfillmentStatus: e.node.fulfillmentStatus || null,
   displayFulfillmentStatus: null
 }));
+// ---- NYTT: seeda Redis med färska order-sammanfattningar ----
+try {
+  if (WRITE_ORDERS_TO_REDIS) {
+    await seedOrdersToRedis(cidNum, out);
+  }
+} catch {}
+// ---- /NYTT ----
 
     res.setHeader('Cache-Control', 'no-store');
     return res.json({ orders: out });
@@ -2893,6 +3007,15 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
 
     await writeOrderProjects(metafieldId, nextProjects);
 try { await cacheOrderProjects(orderId, nextProjects); } catch {}
+    // ---- NYTT: uppdatera order-sammanfattning i Redis ----
+try {
+  const metaStr = JSON.stringify(nextProjects || []);
+  await touchOrderSummary(cidNum, Number(orderId), {
+    processedAt: new Date().toISOString(),
+    metafield: metaStr
+  });
+} catch {}
+
     // 5) Activity-logg (kund agerade)
     try {
       const cust = await getCustomerNameByOrder(orderId);
