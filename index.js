@@ -1407,7 +1407,7 @@ app.post('/webhooks/order-created', async (req, res) => {
 
 
   // Mappa varje radpost till ett projekt – SPARA ALLA PROPERTIES (pretty först)
-const newProjects = lineItems.map(item => {
+const newProjects = await Promise.all(lineItems.map(async (item) => {
   // A) Läs ALLA properties från raden och normalisera (behåll allt icke-tomt)
   const rawProps = Array.isArray(item.properties) ? item.properties : [];
   const allClean = rawProps
@@ -1441,15 +1441,13 @@ const newProjects = lineItems.map(item => {
 
   // ⭐ NYTT: generera artwork-token i exakt samma token-format
   const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
-await registerTokenInRedis(artworkToken, {
-  kind: 'artwork',
-  orderId: Number(orderId),
-  lineItemId: Number(item.id),
-  iat: Date.now(),
-  tid
-});
-
-
+  await registerTokenInRedis(artworkToken, {
+    kind: 'artwork',
+    orderId: Number(orderId),
+    lineItemId: Number(item.id),
+    iat: Date.now(),
+    tid
+  });
 
   return {
     orderId,
@@ -1459,7 +1457,7 @@ await registerTokenInRedis(artworkToken, {
     variantId:    item.variant_id,
     variantTitle: item.variant_title,
     quantity:     item.quantity,
-    properties,              // ⬅️ nu ALLA props (pretty först)
+    properties,
     preview_img,
     cloudinaryPublicId,
     instructions: instructionsProp ?? null,
@@ -1468,10 +1466,10 @@ await registerTokenInRedis(artworkToken, {
     status: 'Väntar på korrektur',
     tag:    'Väntar på korrektur',
     date: new Date().toISOString(),
-    // ⭐ NYTT fält – påverkar inget annat
     artworkToken
   };
-});
+}));
+
 
 
 
