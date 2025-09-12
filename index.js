@@ -2008,20 +2008,6 @@ function forward(toPath) {
   };
 }
 
-// ---- NYTT: cache-first från Redis för orderlistan ----
-const first = Math.min(parseInt(req.query.first || '25', 10), 50);
-if (WRITE_ORDERS_TO_REDIS) {
-  try {
-    const cached = await tryReadOrdersFromRedis(cidNum, first);
-    if (cached && cached.length) {
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ orders: cached });
-    }
-  } catch (e) {
-    console.warn('[orders-meta cache-first] misslyckades, faller tillbaka:', e?.response?.data || e.message);
-  }
-}
-// ---- /NYTT ----
 
 // 1) /link  → /proxy/link
 app.get('/link', forward('/proxy/link'));
