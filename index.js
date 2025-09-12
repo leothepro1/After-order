@@ -359,6 +359,39 @@ async function writeOrderProjects(metafieldId, projects) {
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 }
+// ===== UPSTASH REDIS (WRITE-THROUGH CACHE) =====
+const WRITE_ORDERS_TO_REDIS = String(process.env.WRITE_ORDERS_TO_REDIS || 'true') === 'true';
+const ORDER_PROJECTS_TTL_SECONDS = parseInt(process.env.ORDER_PROJECTS_TTL_SECONDS || '864000', 10); // 10 dagar
+const UPSTASH_REDIS_REST_URL   = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+async function redisCmd(commandArray) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
+  try {
+    const r = await axios.post(
+      UPSTASH_REDIS_REST_URL,
+      { command: commandArray },
+      { headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` }, timeout: 2000 }
+    );
+    return r.data;
+  } catch (e) {
+    console.warn('[redisCmd] err:', e?.response?.data || e.message);
+    return null;
+  }
+}
+
+// Cachea hela projects-arrayen under key: order:{orderId}:projects:v1
+async function cacheOrderProjects(orderId, projects) {
+  if (!WRITE_ORDERS_TO_REDIS) return;
+  try {
+    const key = `order:${orderId}:projects:v1`;
+    const payload = JSON.stringify({ projects, updatedAt: new Date().toISOString() });
+    await redisCmd(["SET", key, payload, "EX", String(ORDER_PROJECTS_TTL_SECONDS)]);
+  } catch (e) {
+    console.warn('[cacheOrderProjects] err:', e?.response?.data || e.message);
+  }
+}
+// ===== END UPSTASH REDIS =====
 
 /* ===== REVIEWS: produkt-metafält helpers (NYTT) ===== */
 const PRODUCT_REVIEW_NS = 'review';
@@ -399,6 +432,8 @@ async function writeProductReviews(productId, metafieldId, reviewsArray) {
     console.warn('writeProductReviews():', e?.response?.data || e.message);
   }
 }
+
+
 /* ===== END REVIEWS helpers ===== */
 
 // Snapshot helpers
@@ -1310,6 +1345,7 @@ try {
   }
 
   console.log('✅ Metafält sparat!');
+  try { await cacheOrderProjects(orderId, combined); } catch {}
 
   // 4) Activity-log använder samma combined (som nu innehåller productHandle)
   try {
@@ -1469,6 +1505,8 @@ app.post('/proof/upload', async (req, res) => {
 
     // 8) Spara tillbaka i SAMMA metafält
     await writeOrderProjects(metafieldId, rotated);
+    // +++ NYTT: cache till Redis (10 dagar) +++
+    try { await cacheOrderProjects(orderId, rotated); } catch {}
 
     // 9) Svara med token + URL
     const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
@@ -1551,12 +1589,13 @@ projects = projects.map(p => {
           const p = prj2[idx];
           const shares = Array.isArray(p.shares) ? p.shares : [];
           const activeIdx = shares.findIndex(s => s && s.status === 'active');
-          if (activeIdx >= 0) {
-            const snap = { ...(shares[activeIdx].snapshot || {}) };
-            shares[activeIdx] = { ...shares[activeIdx], snapshot: { ...snap, hideActivity: true } };
-            prj2[idx] = { ...p, shares };
-            await writeOrderProjects(metafieldId, prj2);
-          }
+if (activeIdx >= 0) {
+  const snap = { ...(shares[activeIdx].snapshot || {}) };
+  shares[activeIdx] = { ...shares[activeIdx], snapshot: { ...snap, hideActivity: true } };
+  prj2[idx] = { ...p, shares };
+  await writeOrderProjects(metafieldId, prj2);
+  try { await cacheOrderProjects(orderId, prj2); } catch {}
+}
         }
       }
     } catch (e) {
@@ -1614,6 +1653,8 @@ app.post('/proof/request-changes', async (req, res) => {
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
+        // +++ NYTT: cache till Redis (10 dagar) +++
+    try { await cacheOrderProjects(orderId, projects); } catch {}
     console.log('✅ Shopify response for request-changes:', putRes.status);
 
     /* ==== ACTIVITY LOG: Kund begärde ändringar ==== */
@@ -2744,6 +2785,7 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
       cancelledAt: now
     }));
     await writeOrderProjects(metafieldId, next);
+    try { await cacheOrderProjects(orderId, next); } catch {}
 
     // 8) (valfritt) enkel activity-logg
     try {
@@ -2843,7 +2885,7 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
     nextProjects[idx] = nextProj;
 
     await writeOrderProjects(metafieldId, nextProjects);
-
+try { await cacheOrderProjects(orderId, nextProjects); } catch {}
     // 5) Activity-logg (kund agerade)
     try {
       const cust = await getCustomerNameByOrder(orderId);
