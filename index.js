@@ -3661,16 +3661,13 @@ for (const cfg of cleaned) {
 }
 
 // Fallback endast om ingen produkt hade giltiga metafält
+// Fallback endast om ingen produkt hade giltiga metafält
 if (!std) std = PRESSIFY_DEFAULT_STD;
 if (!exp) exp = PRESSIFY_DEFAULT_EXP;
-    }
 
-    // Fallback endast om ingen produkt hade giltiga metafält
-    if (!std) std = PRESSIFY_DEFAULT_STD;
-    if (!exp) exp = PRESSIFY_DEFAULT_EXP;
+// Datum från "nu" i arbetsdagar (mån–fre) enligt metafälten
+const now = new Date();
 
-    // Datum från "nu" i arbetsdagar (mån–fre) enligt metafälten
-    const now = new Date();
     const stdFrom = pressifyAddBusinessDays(now, std.minDays);
     const stdTo   = pressifyAddBusinessDays(now, std.maxDays);
     const expFrom = pressifyAddBusinessDays(now, exp.minDays);
