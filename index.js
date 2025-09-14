@@ -3480,15 +3480,33 @@ function pressifyFmtDateUTC(d) {
   const SS = String(d.getUTCSeconds()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS} +0000`;
 }
+function pressifySvShortRange(from, to) {
+  const fmt = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Europe/Stockholm',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short'
+  });
+  const a = fmt.format(from);
+  const b = fmt.format(to);
+  return (a === b) ? a : `${a} - ${b}`;
+}
+
 function pressifyMergeWindow(agg, next) {
   if (!next) return agg;
   const ok = v => Number.isInteger(v) && v >= 0;
-  const nmin = ok(next.minDays) ? next.minDays : null;
-  const nmax = ok(next.maxDays) ? next.maxDays : null;
+  let nmin = ok(next.minDays) ? next.minDays : null;
+  let nmax = ok(next.maxDays) ? next.maxDays : null;
   if (nmin === null || nmax === null) return agg;
+  // Normalisera om någon råkat vända på dem (t.ex. 5/4)
+  if (nmin > nmax) [nmin, nmax] = [nmax, nmin];
   if (!agg) return { minDays: nmin, maxDays: nmax };
-  return { minDays: Math.min(agg.minDays, nmin), maxDays: Math.max(agg.maxDays, nmax) };
+  return {
+    minDays: Math.min(agg.minDays, nmin),
+    maxDays: Math.max(agg.maxDays, nmax)
+  };
 }
+
 async function pressifyFetchShippingMeta(productId) {
   try {
     const url = `https://${SHOP}/admin/api/2025-07/products/${productId}/metafields.json`;
@@ -3534,44 +3552,30 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
     const expFrom = new Date(now + exp.minDays * PRESSIFY_MS_PER_DAY);
     const expTo   = new Date(now + exp.maxDays * PRESSIFY_MS_PER_DAY);
 
-    // Svenska datumsträngar (Stockholm)
-    const svFmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Stockholm', day: 'numeric', month: 'long' });
-    const stdFromStr = svFmt.format(stdFrom);
-    const stdToStr   = svFmt.format(stdTo);
-    const expFromStr = svFmt.format(expFrom);
-    const expToStr   = svFmt.format(expTo);
+   // Beskrivningar i SV kortformat från produktmetafält (ex: "tis 23 sep - ons 24 sep")
+const stdDesc = pressifySvShortRange(stdFrom, stdTo);
+const expDesc = pressifySvShortRange(expFrom, expTo);
 
-    const stdTitle = (stdFromStr === stdToStr)
-      ? `Standard frakt — ${stdFromStr} — 0 kr`
-      : `Standard frakt — ${stdFromStr} – ${stdToStr} — 0 kr`;
+// Alltid returnera två rater (utan min/max_delivery_date för att dölja "1 till 3 arbetsdagar")
+const rates = [
+  {
+    service_name: 'Standard frakt',
+    service_code: 'STANDARD',
+    total_price: String(PRESSIFY_STANDARD_ORE),
+    currency: PRESSIFY_CURRENCY,
+    description: stdDesc,
+    phone_required: false
+  },
+  {
+    service_name: 'Expressfrakt',
+    service_code: 'EXPRESS',
+    total_price: String(PRESSIFY_EXPRESS_ORE),
+    currency: PRESSIFY_CURRENCY,
+    description: expDesc,
+    phone_required: false
+  }
+];
 
-    const expTitle = (expFromStr === expToStr)
-      ? `Expressfrakt — ${expFromStr} — 249 kr`
-      : `Expressfrakt — ${expFromStr} – ${expToStr} — 249 kr`;
-
-    // Alltid returnera två rater
-    const rates = [
-      {
-        service_name: stdTitle,
-        service_code: 'STANDARD',
-        total_price: String(PRESSIFY_STANDARD_ORE),
-        currency: PRESSIFY_CURRENCY,
-        description: 'Standardleverans (produktbaserat datumintervall)',
-        min_delivery_date: pressifyFmtDateUTC(stdFrom),
-        max_delivery_date: pressifyFmtDateUTC(stdTo),
-        phone_required: false
-      },
-      {
-        service_name: expTitle,
-        service_code: 'EXPRESS',
-        total_price: String(PRESSIFY_EXPRESS_ORE),
-        currency: PRESSIFY_CURRENCY,
-        description: 'Expressleverans (produktbaserat datumintervall)',
-        min_delivery_date: pressifyFmtDateUTC(expFrom),
-        max_delivery_date: pressifyFmtDateUTC(expTo),
-        phone_required: false
-      }
-    ];
 
     return res.json({ rates });
   } catch (e) {
@@ -3582,43 +3586,30 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
       const dfStdTo   = new Date(now + PRESSIFY_DEFAULT_STD.maxDays * PRESSIFY_MS_PER_DAY);
       const dfExpFrom = new Date(now + PRESSIFY_DEFAULT_EXP.minDays * PRESSIFY_MS_PER_DAY);
       const dfExpTo   = new Date(now + PRESSIFY_DEFAULT_EXP.maxDays * PRESSIFY_MS_PER_DAY);
-      const svFmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Stockholm', day: 'numeric', month: 'long' });
-      const stdFromStr = svFmt.format(dfStdFrom);
-      const stdToStr   = svFmt.format(dfStdTo);
-      const expFromStr = svFmt.format(dfExpFrom);
-      const expToStr   = svFmt.format(dfExpTo);
+    const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
+const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
 
-      const stdTitle = (stdFromStr === stdToStr)
-        ? `Standard frakt — ${stdFromStr} — 0 kr`
-        : `Standard frakt — ${stdFromStr} – ${stdToStr} — 0 kr`;
-      const expTitle = (expFromStr === expToStr)
-        ? `Expressfrakt — ${expFromStr} — 249 kr`
-        : `Expressfrakt — ${expFromStr} – ${dfExpTo} — 249 kr`;
+return res.json({
+  rates: [
+    {
+      service_name: 'Standard frakt',
+      service_code: 'STANDARD',
+      total_price: String(PRESSIFY_STANDARD_ORE),
+      currency: PRESSIFY_CURRENCY,
+      description: stdDesc,
+      phone_required: false
+    },
+    {
+      service_name: 'Expressfrakt',
+      service_code: 'EXPRESS',
+      total_price: String(PRESSIFY_EXPRESS_ORE),
+      currency: PRESSIFY_CURRENCY,
+      description: expDesc,
+      phone_required: false
+    }
+  ]
+});
 
-      return res.json({
-        rates: [
-          {
-            service_name: stdTitle,
-            service_code: 'STANDARD',
-            total_price: String(PRESSIFY_STANDARD_ORE),
-            currency: PRESSIFY_CURRENCY,
-            description: 'Standardleverans (failsafe defaults)',
-            min_delivery_date: pressifyFmtDateUTC(dfStdFrom),
-            max_delivery_date: pressifyFmtDateUTC(dfStdTo),
-            phone_required: false
-          },
-          {
-            service_name: expTitle,
-            service_code: 'EXPRESS',
-            total_price: String(PRESSIFY_EXPRESS_ORE),
-            currency: PRESSIFY_CURRENCY,
-            description: 'Expressleverans (failsafe defaults)',
-            min_delivery_date: pressifyFmtDateUTC(dfExpFrom),
-            max_delivery_date: pressifyFmtDateUTC(dfExpTo),
-            phone_required: false
-          }
-        ]
-      });
     } catch {
       return res.json({ rates: [] });
     }
