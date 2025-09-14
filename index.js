@@ -3520,34 +3520,33 @@ async function pressifyVariantToProductId(variantId) {
     return null;
   }
 }
-// Filtrera till rader som ska fraktas
-const shipItems = items.filter(it => it?.requires_shipping !== false);
+  try {
+    const rateReq = req.body?.rate;
+    const items = Array.isArray(rateReq?.items) ? rateReq.items : [];
 
-// Ta direkta product_id där de finns
-const directProductIds = shipItems
-  .filter(it => it.product_id)
-  .map(it => it.product_id);
+    // 1) Samla product_id (mappar variant_id -> product_id där det behövs)
+    const shipItems = items.filter(it => it?.requires_shipping !== false);
 
-// Mappa variant_id → product_id där product_id saknas
-const variantIds = [...new Set(
-  shipItems.filter(it => !it.product_id && it.variant_id).map(it => it.variant_id)
-)];
+    const directProductIds = shipItems
+      .filter(it => it.product_id)
+      .map(it => it.product_id);
 
-let mappedProductIds = [];
-if (variantIds.length > 0) {
-  mappedProductIds = await Promise.all(variantIds.map(pressifyVariantToProductId));
-}
+    const variantIds = [...new Set(
+      shipItems.filter(it => !it.product_id && it.variant_id).map(it => it.variant_id)
+    )];
 
-// Slå ihop och deduplicera
-const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(Boolean)])];
+    let mappedProductIds = [];
+    if (variantIds.length > 0) {
+      mappedProductIds = await Promise.all(variantIds.map(pressifyVariantToProductId));
+    }
 
+    const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(Boolean)])];
 
-
-    // Hämta metafält (bara de som finns, inga defaults)
+    // 2) Hämta metafält ENDAST för de produkt-IDs vi nu har
     const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
     const present = metas.filter(m => m && (m.standard || m.express));
 
-    // Mergar fönster ENDAST om det finns minst ett metafält
+    // 3) Mergar fönster ENDAST om minst ett mf finns (annars inga datum)
     let stdWin = null, expWin = null;
     if (present.length > 0) {
       for (const cfg of present) {
@@ -3556,23 +3555,20 @@ const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(
       }
     }
 
-    // Titlar: aldrig pris/datum i titeln
+    // 4) Titlar (utan pris/datum), datum som description om mf fanns
     const stdTitle = 'Standard frakt';
     const expTitle = 'Expressfrakt';
 
-    // Bygg datumtexten för description, kort sv-format: "tis 23 sep - ons 24 sep"
     const svShort = new Intl.DateTimeFormat('sv-SE', {
       timeZone: 'Europe/Stockholm',
       weekday: 'short',
       day: 'numeric',
       month: 'short',
     });
-    const fmt = (d) => svShort.format(d).replace(/\.$/, ''); // ta bort ev. punkt i månad (t.ex. "sep.")
+    const fmt = (d) => svShort.format(d).replace(/\.$/, '');
 
     let stdDesc = '';
     let expDesc = '';
-
-    // Vi skickar min/max till Shopify bara om vi faktiskt har metafält
     let stdMinISO, stdMaxISO, expMinISO, expMaxISO;
 
     const now = Date.now();
@@ -3593,13 +3589,13 @@ const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(
       expMaxISO = pressifyFmtDateUTC(expTo);
     }
 
-    // Bygg rater – description = datumrad (om vi har metafält); annars tom.
+    // 5) Returnera ALLTID exakt två rater; datum bara om mf fanns
     const stdRate = {
       service_name: stdTitle,
       service_code: 'STANDARD',
       total_price: String(PRESSIFY_STANDARD_ORE),
       currency: PRESSIFY_CURRENCY,
-      description: stdDesc, // ← datum på raden under titeln (eller tom sträng)
+      description: stdDesc,
       phone_required: false,
     };
     if (stdMinISO && stdMaxISO) {
@@ -3612,7 +3608,7 @@ const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(
       service_code: 'EXPRESS',
       total_price: String(PRESSIFY_EXPRESS_ORE),
       currency: PRESSIFY_CURRENCY,
-      description: expDesc, // ← datum på raden under titeln (eller tom sträng)
+      description: expDesc,
       phone_required: false,
     };
     if (expMinISO && expMaxISO) {
@@ -3622,32 +3618,15 @@ const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(
 
     return res.json({ rates: [stdRate, expRate] });
   } catch (e) {
-    // HÅRD FAILSAFE: om något kastar fel returnerar vi fortfarande 2 rater utan datum
+    // Failsafe: 2 rater utan datum om något går fel
     return res.json({
       rates: [
-        {
-          service_name: 'Standard frakt',
-          service_code: 'STANDARD',
-          total_price: String(PRESSIFY_STANDARD_ORE),
-          currency: PRESSIFY_CURRENCY,
-          description: '',
-          phone_required: false,
-        },
-        {
-          service_name: 'Expressfrakt',
-          service_code: 'EXPRESS',
-          total_price: String(PRESSIFY_EXPRESS_ORE),
-          currency: PRESSIFY_CURRENCY,
-          description: '',
-          phone_required: false,
-        }
+        { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(PRESSIFY_STANDARD_ORE), currency: PRESSIFY_CURRENCY, description: '', phone_required: false },
+        { service_name: 'Expressfrakt',   service_code: 'EXPRESS',  total_price: String(PRESSIFY_EXPRESS_ORE),  currency: PRESSIFY_CURRENCY, description: '', phone_required: false }
       ]
     });
   }
-});
 
-
-// ====== REGISTER (engångs) – skapar/uppdaterar CarrierService i butiken
 // Anropa:  POST https://DIN-RENDER-DOMÄN/carrier/pressify/register?token=SHOPIFY_WEBHOOK_SECRET
 app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
   try {
