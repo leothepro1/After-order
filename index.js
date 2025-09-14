@@ -3834,6 +3834,7 @@ const variants = [...new Set((items || [])
 
   const pWin = Object.create(null); // productId -> window JSON
   const vWin = Object.create(null); // variantId -> window JSON
+  const v2p  = Object.create(null); // variantId -> productId
 
  for (const n of nodes) {
   const gid = String(n?.id || '');
@@ -3844,9 +3845,19 @@ const variants = [...new Set((items || [])
   let cfg = null;
   try { cfg = n?.metafield?.value ? JSON.parse(n.metafield.value) : null; } catch {}
 
-  if (type === 'Product' && id)        pWin[id] = cfg;
-  else if (type === 'ProductVariant' && id) vWin[id] = cfg;
+  if (type === 'Product' && id) {
+    pWin[id] = cfg;
+  } else if (type === 'ProductVariant' && id) {
+    vWin[id] = cfg;
+    // ⚠️ Spara kopplingen variant → produkt om GraphQL gav den
+    const pGid = n?.product?.id;
+    if (pGid) {
+      const pid = pGid.split('/').pop();
+      if (pid) v2p[id] = pid;
+    }
+  }
 }
+
 
 const toInt = (v) => {
   const n = Number(String(v ?? '').replace(',', '.'));
@@ -3869,24 +3880,43 @@ const coerce = (win) => {
   const dbgUse = [];
 
   for (const it of (items || [])) {
-    if (it?.requires_shipping === false) continue;
-    const vid = it?.variant_id ? String(it.variant_id) : null;
-    const pid = it?.product_id ? String(it.product_id) : null;
+  if (it?.requires_shipping === false) continue;
 
-    const vCfg = vid ? vWin[vid] : null;
-    const pCfg = pid ? pWin[pid] : null;
-    const src  = vCfg ? 'variant' : (pCfg ? 'product' : 'none');
-    const cfg  = vCfg || pCfg;
+  // Hämta variant_id / product_id från radfält ELLER dolda properties, och normalisera till plain-id
+  const vidRaw = it?.variant_id ?? pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']);
+  const pidRaw = it?.product_id ?? pickIdFromItemProps(it, ['_product_id','product_id','productId']);
+  const vid = vidRaw ? toPlainId(vidRaw) : null;
 
-    const cStd = coerce(cfg?.standard);
-    const cExp = coerce(cfg?.express);
-
-    if (cStd && cExp) {
-      std = pressifyMergeWindow(std, cStd);
-      exp = pressifyMergeWindow(exp, cExp);
-      dbgUse.push({ line: String(it?.variant_id || it?.product_id || '?'), src, std: cStd, exp: cExp });
-    }
+  // 1) direkt product_id; 2) via v2p från GraphQL; 3) via cache från resolve-funktionen
+  let pid = pidRaw ? toPlainId(pidRaw) : null;
+  if (!pid && vid) {
+    pid = v2p[vid] || __variantToProductCache.get(vid) || null;
   }
+
+  const vCfg = vid ? vWin[vid] : null;
+  const pCfg = pid ? pWin[pid] : null;
+  const src  = vCfg ? 'variant' : (pCfg ? 'product' : 'none');
+  const cfg  = vCfg || pCfg;
+
+  const cStd = coerce(cfg?.standard);
+  const cExp = coerce(cfg?.express);
+
+  // ⬇️ Mergar oberoende – även om bara standard ELLER express finns
+  if (cStd) std = pressifyMergeWindow(std, cStd);
+  if (cExp) exp = pressifyMergeWindow(exp, cExp);
+
+  if (cStd || cExp) {
+    // Lägg in resolvedPid i debuggen så du ser kopplingen
+    dbgUse.push({
+      line: String(vid || pid || '?'),
+      src,
+      std: cStd || null,
+      exp: cExp || null,
+      resolvedPid: pid || null
+    });
+  }
+}
+
 
   return { std, exp, dbg: { used: dbgUse, products, variants } };
 }
