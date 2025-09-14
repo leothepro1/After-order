@@ -3509,20 +3509,38 @@ async function pressifyFetchShippingMeta(productId) {
     return null;
   }
 }
-
-// ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
-// ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
-app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
+// Hämta product_id från variant_id när product_id saknas
+async function pressifyVariantToProductId(variantId) {
   try {
-    const rateReq = req.body?.rate;
-    const items = Array.isArray(rateReq?.items) ? rateReq.items : [];
+    const url = `https://${SHOP}/admin/api/2025-07/variants/${variantId}.json`;
+    const resp = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
+    return resp.data?.variant?.product_id || null;
+  } catch (e) {
+    console.error('pressifyVariantToProductId error', variantId, e?.response?.data || e.message);
+    return null;
+  }
+}
 
-    // Unika product_id som kräver frakt
-    const productIds = [...new Set(
-      items
-        .filter(it => it?.requires_shipping !== false && it?.product_id)
-        .map(it => it.product_id)
-    )];
+// ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
+// Filtrera till rader som ska fraktas
+const shipItems = items.filter(it => it?.requires_shipping !== false);
+
+// Ta direkta product_id där de finns
+const directProductIds = shipItems
+  .filter(it => it.product_id)
+  .map(it => it.product_id);
+
+// Mappa variant_id → product_id där product_id saknas
+const variantIds = [...new Set(
+  shipItems.filter(it => !it.product_id && it.variant_id).map(it => it.variant_id)
+)];
+const mappedProductIds = variantIds.length
+  ? await Promise.all(variantIds.map(pressifyVariantToProductId))
+  : [];
+
+// Slå ihop och deduplicera
+const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(Boolean)])];
+
 
     // Hämta metafält (bara de som finns, inga defaults)
     const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
