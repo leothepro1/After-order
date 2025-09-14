@@ -3626,52 +3626,23 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
     const items = Array.isArray(rateReq?.items) ? rateReq.items : [];
 
 // Unika product_id som kräver frakt (fallback via variant → produkt)
-const productIds = await pressifyResolveProductIdsFromItems(items);
-console.log('[pressify rates] productIds', productIds);
+// Samla fönster från VARIANT eller PRODUCT (variant har företräde)
+const { std, exp, dbg } = await pressifyComputeWindowsFromCart(items);
+console.log('[pressify rates] dbg', JSON.stringify(dbg));
 
-// Hämta metafält (batch via GraphQL)
-const metas = await pressifyFetchShippingMetaBatch(productIds);
-console.log('[pressify rates] metas(sample)', metas.slice(0, 2));
-
-// Mergar fönster enbart från produkter som verkligen har shipping-metat
-function pressifyCoerceWindow(win) {
-  if (!win) return null;
-  const toInt = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
-  };
-  let min = toInt(win.minDays);
-  let max = toInt(win.maxDays);
-  if (min === null || max === null) return null;
-  if (min > max) [min, max] = [max, min];
-  return { minDays: min, maxDays: max };
-}
-
-let std = null, exp = null;
-const cleaned = metas
-  .map(cfg => cfg ? ({
-    standard: pressifyCoerceWindow(cfg.standard),
-    express:  pressifyCoerceWindow(cfg.express)
-  }) : null)
-  .filter(cfg => cfg && cfg.standard && cfg.express);
-
-for (const cfg of cleaned) {
-  std = pressifyMergeWindow(std, cfg.standard);
-  exp = pressifyMergeWindow(exp, cfg.express);
-}
-
-// Fallback endast om ingen produkt hade giltiga metafält
-// Fallback endast om ingen produkt hade giltiga metafält
-if (!std) std = PRESSIFY_DEFAULT_STD;
-if (!exp) exp = PRESSIFY_DEFAULT_EXP;
+// Fallback endast om ingen rad hade giltiga metafält
+let useStd = std || null;
+let useExp = exp || null;
+if (!useStd) useStd = PRESSIFY_DEFAULT_STD;
+if (!useExp) useExp = PRESSIFY_DEFAULT_EXP;
 
 // Datum från "nu" i arbetsdagar (mån–fre) enligt metafälten
 const now = new Date();
+const stdFrom = pressifyAddBusinessDays(now, useStd.minDays);
+const stdTo   = pressifyAddBusinessDays(now, useStd.maxDays);
+const expFrom = pressifyAddBusinessDays(now, useExp.minDays);
+const expTo   = pressifyAddBusinessDays(now, useExp.maxDays);
 
-    const stdFrom = pressifyAddBusinessDays(now, std.minDays);
-    const stdTo   = pressifyAddBusinessDays(now, std.maxDays);
-    const expFrom = pressifyAddBusinessDays(now, exp.minDays);
-    const expTo   = pressifyAddBusinessDays(now, exp.maxDays);
 
     // Beskrivningsrad i kassan (ex: "tis 23 sep - ons 24 sep")
     const stdDesc = pressifySvShortRange(stdFrom, stdTo);
@@ -3759,8 +3730,96 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
     console.error('pressify carrier register error:', e?.response?.data || e.message);
     return res.status(500).json({ error: 'register failed' });
   }
-});
+});pressifyFetchShippingMetaBatch
 // ===== /Pressify Carrier Service =====
+// Samla fönster (standard/express) från cart-items:
+// - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
+// - Merga över alla rader (min av min, max av max)
+async function pressifyComputeWindowsFromCart(items = []) {
+  const variants = [...new Set((items || [])
+    .map(it => it?.variant_id)
+    .filter(Boolean)
+    .map(String))];
+
+  const products = await pressifyResolveProductIdsFromItems(items);
+
+  if (variants.length === 0 && products.length === 0) {
+    return { std: null, exp: null, dbg: { reason: 'no_ids' } };
+  }
+
+  const ids = [
+    ...products.map(id => `gid://shopify/Product/${id}`),
+    ...variants.map(id => `gid://shopify/ProductVariant/${id}`)
+  ];
+
+  const query = `
+    query ShipMeta($ids:[ID!]!) {
+      nodes(ids:$ids) {
+        id
+        ... on Product {
+          metafield(namespace:"custom", key:"shipping"){ value }
+        }
+        ... on ProductVariant {
+          metafield(namespace:"custom", key:"shipping"){ value }
+          product { id }
+        }
+      }
+    }`;
+
+  const data = await shopifyGraphQL(query, { ids });
+  const nodes = data?.data?.nodes || [];
+
+  const pWin = Object.create(null); // productId -> window JSON
+  const vWin = Object.create(null); // variantId -> window JSON
+
+  for (const n of nodes) {
+    const gid = String(n?.id || '');
+    const [ , type, rawId ] = gid.split('/');
+    const id = rawId || '';
+    let cfg = null;
+    try { cfg = n?.metafield?.value ? JSON.parse(n.metafield.value) : null; } catch {}
+    if (type === 'Product' && id) pWin[id] = cfg;
+    if (type === 'ProductVariant' && id) vWin[id] = cfg;
+  }
+
+  const toInt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  };
+  const coerce = (win) => {
+    if (!win) return null;
+    let min = toInt(win.minDays);
+    let max = toInt(win.maxDays);
+    if (min === null || max === null) return null;
+    if (min > max) [min, max] = [max, min];
+    return { minDays: min, maxDays: max };
+  };
+
+  let std = null, exp = null;
+  const dbgUse = [];
+
+  for (const it of (items || [])) {
+    if (it?.requires_shipping === false) continue;
+    const vid = it?.variant_id ? String(it.variant_id) : null;
+    const pid = it?.product_id ? String(it.product_id) : null;
+
+    const vCfg = vid ? vWin[vid] : null;
+    const pCfg = pid ? pWin[pid] : null;
+    const src  = vCfg ? 'variant' : (pCfg ? 'product' : 'none');
+    const cfg  = vCfg || pCfg;
+
+    const cStd = coerce(cfg?.standard);
+    const cExp = coerce(cfg?.express);
+
+    if (cStd && cExp) {
+      std = pressifyMergeWindow(std, cStd);
+      exp = pressifyMergeWindow(exp, cExp);
+      dbgUse.push({ line: String(it?.variant_id || it?.product_id || '?'), src, std: cStd, exp: cExp });
+    }
+  }
+
+  return { std, exp, dbg: { used: dbgUse, products, variants } };
+}
 
 // Global felhanterare – sist i filen (före app.listen), men vi lägger en TIDIG också:
 app.use((err, req, res, next) => {
