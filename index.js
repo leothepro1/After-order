@@ -3580,6 +3580,42 @@ async function pressifyResolveProductIdsFromItems(items) {
 
   return [...pids];
 }
+// Batch: hämta custom.shipping för en lista av products via Admin GraphQL
+async function pressifyFetchShippingMetaBatch(productIds = []) {
+  const ids = [...new Set((productIds || []).filter(Boolean).map(String))];
+  if (ids.length === 0) return [];
+
+  const gids = ids.map(id => `gid://shopify/Product/${id}`);
+  const query = `
+    query ShippingMeta($ids:[ID!]!) {
+      nodes(ids:$ids) {
+        ... on Product {
+          id
+          metafield(namespace:"custom", key:"shipping") { value }
+        }
+      }
+    }`;
+  try {
+    const data = await shopifyGraphQL(query, { ids: gids });
+    const nodes = data?.data?.nodes || [];
+
+    // Bygg en map productId -> parsed JSON (eller null)
+    const byId = Object.create(null);
+    for (const n of nodes) {
+      const pid = (n?.id || '').split('/').pop();
+      let cfg = null;
+      if (n?.metafield?.value) {
+        try { cfg = JSON.parse(n.metafield.value); } catch { cfg = null; }
+      }
+      byId[pid] = cfg;
+    }
+    // Returnera i samma ordning som inkom
+    return ids.map(id => byId[id] ?? null);
+  } catch (e) {
+    console.error('pressifyFetchShippingMetaBatch error:', e?.response?.data || e.message);
+    return ids.map(() => null);
+  }
+}
 
 
 // ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
@@ -3591,36 +3627,42 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
 
 // Unika product_id som kräver frakt (fallback via variant → produkt)
 const productIds = await pressifyResolveProductIdsFromItems(items);
+console.log('[pressify rates] productIds', productIds);
 
+// Hämta metafält (batch via GraphQL)
+const metas = await pressifyFetchShippingMetaBatch(productIds);
+console.log('[pressify rates] metas(sample)', metas.slice(0, 2));
 
-    // Hämta metafält parallellt
-    const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
+// Mergar fönster enbart från produkter som verkligen har shipping-metat
+function pressifyCoerceWindow(win) {
+  if (!win) return null;
+  const toInt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  };
+  let min = toInt(win.minDays);
+  let max = toInt(win.maxDays);
+  if (min === null || max === null) return null;
+  if (min > max) [min, max] = [max, min];
+  return { minDays: min, maxDays: max };
+}
 
-    function pressifyCoerceWindow(win) {
-      if (!win) return null;
-      const toInt = (v) => {
-        const n = Number(v);
-        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
-      };
-      let min = toInt(win.minDays);
-      let max = toInt(win.maxDays);
-      if (min === null || max === null) return null;
-      if (min > max) [min, max] = [max, min];
-      return { minDays: min, maxDays: max };
-    }
+let std = null, exp = null;
+const cleaned = metas
+  .map(cfg => cfg ? ({
+    standard: pressifyCoerceWindow(cfg.standard),
+    express:  pressifyCoerceWindow(cfg.express)
+  }) : null)
+  .filter(cfg => cfg && cfg.standard && cfg.express);
 
-    // Mergar fönster enbart från produkter som verkligen har shipping-metat
-    let std = null, exp = null;
-    const cleaned = metas
-      .map(cfg => cfg ? {
-        standard: pressifyCoerceWindow(cfg.standard),
-        express:  pressifyCoerceWindow(cfg.express)
-      } : null)
-      .filter(cfg => cfg && cfg.standard && cfg.express);
+for (const cfg of cleaned) {
+  std = pressifyMergeWindow(std, cfg.standard);
+  exp = pressifyMergeWindow(exp, cfg.express);
+}
 
-    for (const cfg of cleaned) {
-      std = pressifyMergeWindow(std, cfg.standard);
-      exp = pressifyMergeWindow(exp, cfg.express);
+// Fallback endast om ingen produkt hade giltiga metafält
+if (!std) std = PRESSIFY_DEFAULT_STD;
+if (!exp) exp = PRESSIFY_DEFAULT_EXP;
     }
 
     // Fallback endast om ingen produkt hade giltiga metafält
