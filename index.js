@@ -3505,8 +3505,9 @@ function pressifySvShortRange(from, to) {
     day: 'numeric',
     month: 'short'
   });
-  const a = fmt.format(from);
-  const b = fmt.format(to);
+  const clean = s => String(s).replace(/\./g, ''); // "sep." -> "sep"
+  const a = clean(fmt.format(from));
+  const b = clean(fmt.format(to));
   return (a === b) ? a : `${a} - ${b}`;
 }
 
@@ -3545,11 +3546,12 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
     const rateReq = req.body?.rate;
     const items = Array.isArray(rateReq?.items) ? rateReq.items : [];
 
-    // Unika product_id som kräver frakt
-    const productIds = [...new Set(
-      items.filter(it => it?.requires_shipping !== false && it?.product_id)
-           .map(it => it.product_id)
-    )];
+// Unika product_id som kräver frakt
+const productIds = [...new Set(
+  items
+    .filter(it => it?.requires_shipping !== false && it?.product_id)
+    .map(it => it.product_id)
+)];
 
     // Hämta metafält parallellt
     const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
