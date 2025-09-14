@@ -3539,14 +3539,19 @@ function pressifyMergeWindow(agg, next) {
   const ok = v => Number.isInteger(v) && v >= 0;
   let nmin = ok(next.minDays) ? next.minDays : null;
   let nmax = ok(next.maxDays) ? next.maxDays : null;
-  if (nmin === null || nmax === null) return agg;
-  if (nmin > nmax) [nmin, nmax] = [nmax, nmin]; // normalisera 8/6 -> 6/8
+  if (nmin === null && nmax === null) return agg;
+  if (nmin === null) nmin = nmax;
+  if (nmax === null) nmax = nmin;
+  if (nmin > nmax) [nmin, nmax] = [nmax, nmin];
+
   if (!agg) return { minDays: nmin, maxDays: nmax };
+  // Viktigt: låt långsammaste rad styra start → max av minDays
   return {
-    minDays: Math.min(agg.minDays, nmin),
+    minDays: Math.max(agg.minDays, nmin),
     maxDays: Math.max(agg.maxDays, nmax)
   };
 }
+
 
 
 async function pressifyFetchShippingMeta(productId) {
@@ -3843,18 +3848,22 @@ const variants = [...new Set((items || [])
   else if (type === 'ProductVariant' && id) vWin[id] = cfg;
 }
 
-  const toInt = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
-  };
-  const coerce = (win) => {
-    if (!win) return null;
-    let min = toInt(win.minDays);
-    let max = toInt(win.maxDays);
-    if (min === null || max === null) return null;
-    if (min > max) [min, max] = [max, min];
-    return { minDays: min, maxDays: max };
-  };
+const toInt = (v) => {
+  const n = Number(String(v ?? '').replace(',', '.'));
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+};
+const coerce = (win) => {
+  if (!win || typeof win !== 'object') return null;
+  // stöder minDays/maxDays och alias min/max/min_days/max_days samt "3" (sträng)
+  let min = toInt(win.minDays ?? win.min ?? win.min_days);
+  let max = toInt(win.maxDays ?? win.max ?? win.max_days);
+  if (min === null && max === null) return null;
+  if (min === null) min = max;
+  if (max === null) max = min;
+  if (min > max) [min, max] = [max, min];
+  return { minDays: min, maxDays: max };
+};
+
 
   let std = null, exp = null;
   const dbgUse = [];
