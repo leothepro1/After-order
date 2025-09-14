@@ -3456,6 +3456,213 @@ app.get('/din/health/ping', (req, res) => {
   res.json({ pong: true, at: new Date().toISOString() });
 });
 // ===== SLUT NY ROUTE (DIN) =====
+// ===== Pressify Carrier Service: DATUM I FRAKTALTERNATIV (utan Plus) =====
+// Denna kod lägger till EN rate-callback och EN register-endpoint.
+// Den påverkar INGET annat i din app. Alltid två rater, alltid ett svar (failsafe).
+
+const PRESSIFY_CARRIER_ROUTE = '/carrier/pressify/rates';
+const PRESSIFY_REGISTER_ROUTE = '/carrier/pressify/register';
+
+const PRESSIFY_CARRIER_NAME   = 'Pressify Delivery Dates'; // visas i Admin
+const PRESSIFY_CURRENCY       = 'SEK';
+const PRESSIFY_EXPRESS_ORE    = 24900; // 249 kr i öre
+const PRESSIFY_STANDARD_ORE   = 0;     // 0 kr
+const PRESSIFY_DEFAULT_STD    = { minDays: 2, maxDays: 4 };
+const PRESSIFY_DEFAULT_EXP    = { minDays: 0, maxDays: 1 };
+const PRESSIFY_MS_PER_DAY     = 86_400_000;
+
+function pressifyFmtDateUTC(d) {
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const HH = String(d.getUTCHours()).padStart(2, '0');
+  const MM = String(d.getUTCMinutes()).padStart(2, '0');
+  const SS = String(d.getUTCSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS} +0000`;
+}
+function pressifyMergeWindow(agg, next) {
+  if (!next) return agg;
+  const ok = v => Number.isInteger(v) && v >= 0;
+  const nmin = ok(next.minDays) ? next.minDays : null;
+  const nmax = ok(next.maxDays) ? next.maxDays : null;
+  if (nmin === null || nmax === null) return agg;
+  if (!agg) return { minDays: nmin, maxDays: nmax };
+  return { minDays: Math.min(agg.minDays, nmin), maxDays: Math.max(agg.maxDays, nmax) };
+}
+async function pressifyFetchShippingMeta(productId) {
+  try {
+    const url = `https://${SHOP}/admin/api/2025-07/products/${productId}/metafields.json`;
+    const resp = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
+    const mfs = resp.data?.metafields || [];
+    const mf = mfs.find(m => m.namespace === 'custom' && m.key === 'shipping');
+    if (!mf?.value) return null;
+    try { return JSON.parse(mf.value); } catch { return null; }
+  } catch (e) {
+    console.error('pressifyFetchShippingMeta error', productId, e?.response?.data || e.message);
+    return null;
+  }
+}
+
+// ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
+app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
+  try {
+    const rateReq = req.body?.rate;
+    const items = Array.isArray(rateReq?.items) ? rateReq.items : [];
+
+    // Unika product_id som kräver frakt
+    const productIds = [...new Set(
+      items.filter(it => it?.requires_shipping !== false && it?.product_id)
+           .map(it => it.product_id)
+    )];
+
+    // Hämta metafält parallellt
+    const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
+
+    // Mergar fönster (min av min, max av max)
+    let std = null, exp = null;
+    for (const cfg of metas) {
+      std = pressifyMergeWindow(std, cfg?.standard ?? PRESSIFY_DEFAULT_STD);
+      exp = pressifyMergeWindow(exp, cfg?.express  ?? PRESSIFY_DEFAULT_EXP);
+    }
+    if (!std) std = PRESSIFY_DEFAULT_STD;
+    if (!exp) exp = PRESSIFY_DEFAULT_EXP;
+
+    // Datum från "nu"
+    const now = Date.now();
+    const stdFrom = new Date(now + std.minDays * PRESSIFY_MS_PER_DAY);
+    const stdTo   = new Date(now + std.maxDays * PRESSIFY_MS_PER_DAY);
+    const expFrom = new Date(now + exp.minDays * PRESSIFY_MS_PER_DAY);
+    const expTo   = new Date(now + exp.maxDays * PRESSIFY_MS_PER_DAY);
+
+    // Svenska datumsträngar (Stockholm)
+    const svFmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Stockholm', day: 'numeric', month: 'long' });
+    const stdFromStr = svFmt.format(stdFrom);
+    const stdToStr   = svFmt.format(stdTo);
+    const expFromStr = svFmt.format(expFrom);
+    const expToStr   = svFmt.format(expTo);
+
+    const stdTitle = (stdFromStr === stdToStr)
+      ? `Standard frakt — ${stdFromStr} — 0 kr`
+      : `Standard frakt — ${stdFromStr} – ${stdToStr} — 0 kr`;
+
+    const expTitle = (expFromStr === expToStr)
+      ? `Expressfrakt — ${expFromStr} — 249 kr`
+      : `Expressfrakt — ${expFromStr} – ${expToStr} — 249 kr`;
+
+    // Alltid returnera två rater
+    const rates = [
+      {
+        service_name: stdTitle,
+        service_code: 'STANDARD',
+        total_price: String(PRESSIFY_STANDARD_ORE),
+        currency: PRESSIFY_CURRENCY,
+        description: 'Standardleverans (produktbaserat datumintervall)',
+        min_delivery_date: pressifyFmtDateUTC(stdFrom),
+        max_delivery_date: pressifyFmtDateUTC(stdTo),
+        phone_required: false
+      },
+      {
+        service_name: expTitle,
+        service_code: 'EXPRESS',
+        total_price: String(PRESSIFY_EXPRESS_ORE),
+        currency: PRESSIFY_CURRENCY,
+        description: 'Expressleverans (produktbaserat datumintervall)',
+        min_delivery_date: pressifyFmtDateUTC(expFrom),
+        max_delivery_date: pressifyFmtDateUTC(expTo),
+        phone_required: false
+      }
+    ];
+
+    return res.json({ rates });
+  } catch (e) {
+    // Failsafe: svara ändå med defaults om något går fel
+    try {
+      const now = Date.now();
+      const dfStdFrom = new Date(now + PRESSIFY_DEFAULT_STD.minDays * PRESSIFY_MS_PER_DAY);
+      const dfStdTo   = new Date(now + PRESSIFY_DEFAULT_STD.maxDays * PRESSIFY_MS_PER_DAY);
+      const dfExpFrom = new Date(now + PRESSIFY_DEFAULT_EXP.minDays * PRESSIFY_MS_PER_DAY);
+      const dfExpTo   = new Date(now + PRESSIFY_DEFAULT_EXP.maxDays * PRESSIFY_MS_PER_DAY);
+      const svFmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Stockholm', day: 'numeric', month: 'long' });
+      const stdFromStr = svFmt.format(dfStdFrom);
+      const stdToStr   = svFmt.format(dfStdTo);
+      const expFromStr = svFmt.format(dfExpFrom);
+      const expToStr   = svFmt.format(dfExpTo);
+
+      const stdTitle = (stdFromStr === stdToStr)
+        ? `Standard frakt — ${stdFromStr} — 0 kr`
+        : `Standard frakt — ${stdFromStr} – ${stdToStr} — 0 kr`;
+      const expTitle = (expFromStr === expToStr)
+        ? `Expressfrakt — ${expFromStr} — 249 kr`
+        : `Expressfrakt — ${expFromStr} – ${dfExpTo} — 249 kr`;
+
+      return res.json({
+        rates: [
+          {
+            service_name: stdTitle,
+            service_code: 'STANDARD',
+            total_price: String(PRESSIFY_STANDARD_ORE),
+            currency: PRESSIFY_CURRENCY,
+            description: 'Standardleverans (failsafe defaults)',
+            min_delivery_date: pressifyFmtDateUTC(dfStdFrom),
+            max_delivery_date: pressifyFmtDateUTC(dfStdTo),
+            phone_required: false
+          },
+          {
+            service_name: expTitle,
+            service_code: 'EXPRESS',
+            total_price: String(PRESSIFY_EXPRESS_ORE),
+            currency: PRESSIFY_CURRENCY,
+            description: 'Expressleverans (failsafe defaults)',
+            min_delivery_date: pressifyFmtDateUTC(dfExpFrom),
+            max_delivery_date: pressifyFmtDateUTC(dfExpTo),
+            phone_required: false
+          }
+        ]
+      });
+    } catch {
+      return res.json({ rates: [] });
+    }
+  }
+});
+
+// ====== REGISTER (engångs) – skapar/uppdaterar CarrierService i butiken
+// Anropa:  POST https://DIN-RENDER-DOMÄN/carrier/pressify/register?token=SHOPIFY_WEBHOOK_SECRET
+app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
+  try {
+    if (!req.query || req.query.token !== SHOPIFY_WEBHOOK_SECRET) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const callbackUrl = `${(HOST || '').replace(/\/$/, '')}${PRESSIFY_CARRIER_ROUTE}`;
+    const headers = { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' };
+    const listUrl = `https://${SHOP}/admin/api/2025-07/carrier_services.json`;
+
+    // Finns redan?
+    const existing = await axios.get(listUrl, { headers })
+      .then(r => r.data?.carrier_services || [])
+      .catch(() => []);
+    const current = existing.find(svc =>
+      (svc.callback_url || '').replace(/\/$/, '') === callbackUrl.replace(/\/$/, '')
+      || svc.name === PRESSIFY_CARRIER_NAME
+    );
+
+    if (current) {
+      const updUrl = `https://${SHOP}/admin/api/2025-07/carrier_services/${current.id}.json`;
+      await axios.put(updUrl, {
+        carrier_service: { name: PRESSIFY_CARRIER_NAME, callback_url: callbackUrl, service_discovery: true }
+      }, { headers });
+    } else {
+      await axios.post(listUrl, {
+        carrier_service: { name: PRESSIFY_CARRIER_NAME, callback_url: callbackUrl, service_discovery: true }
+      }, { headers });
+    }
+
+    return res.json({ ok: true, name: PRESSIFY_CARRIER_NAME, callback_url: callbackUrl });
+  } catch (e) {
+    console.error('pressify carrier register error:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'register failed' });
+  }
+});
+// ===== /Pressify Carrier Service =====
 
 // Global felhanterare – sist i filen (före app.listen), men vi lägger en TIDIG också:
 app.use((err, req, res, next) => {
