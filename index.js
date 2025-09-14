@@ -3581,6 +3581,8 @@ async function pressifyResolveProductIdsFromItems(items) {
   return [...pids];
 }
 
+
+// ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
 // ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
 app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
   try {
@@ -3593,108 +3595,94 @@ const productIds = await pressifyResolveProductIdsFromItems(items);
 
     // Hämta metafält parallellt
     const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
-function pressifyCoerceWindow(win) {
-  if (!win) return null;
-  const toInt = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
-  };
-  let min = toInt(win.minDays);
-  let max = toInt(win.maxDays);
-  if (min === null || max === null) return null;
-  if (min > max) [min, max] = [max, min];
-  return { minDays: min, maxDays: max };
-}
 
-// Mergar fönster enbart från produkter som verkligen har shipping-metat
-let std = null, exp = null;
-const cleaned = metas
-  .map(cfg => cfg ? {
-    standard: pressifyCoerceWindow(cfg.standard),
-    express:  pressifyCoerceWindow(cfg.express)
-  } : null)
-  .filter(cfg => cfg && cfg.standard && cfg.express);
+    function pressifyCoerceWindow(win) {
+      if (!win) return null;
+      const toInt = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+      };
+      let min = toInt(win.minDays);
+      let max = toInt(win.maxDays);
+      if (min === null || max === null) return null;
+      if (min > max) [min, max] = [max, min];
+      return { minDays: min, maxDays: max };
+    }
 
-for (const cfg of cleaned) {
-  std = pressifyMergeWindow(std, cfg.standard);
-  exp = pressifyMergeWindow(exp, cfg.express);
-}
+    // Mergar fönster enbart från produkter som verkligen har shipping-metat
+    let std = null, exp = null;
+    const cleaned = metas
+      .map(cfg => cfg ? {
+        standard: pressifyCoerceWindow(cfg.standard),
+        express:  pressifyCoerceWindow(cfg.express)
+      } : null)
+      .filter(cfg => cfg && cfg.standard && cfg.express);
 
-// Fallback endast om ingen produkt hade giltiga metafält
-if (!std) std = PRESSIFY_DEFAULT_STD;
-if (!exp) exp = PRESSIFY_DEFAULT_EXP;
+    for (const cfg of cleaned) {
+      std = pressifyMergeWindow(std, cfg.standard);
+      exp = pressifyMergeWindow(exp, cfg.express);
+    }
 
+    // Fallback endast om ingen produkt hade giltiga metafält
+    if (!std) std = PRESSIFY_DEFAULT_STD;
+    if (!exp) exp = PRESSIFY_DEFAULT_EXP;
 
-// Datum från "nu" i ARBETSDAGAR (mån–fre) enligt metafälten
-const now = new Date();
-const stdFrom = pressifyAddBusinessDays(now, std.minDays);
-const stdTo   = pressifyAddBusinessDays(now, std.maxDays);
-const expFrom = pressifyAddBusinessDays(now, exp.minDays);
-const expTo   = pressifyAddBusinessDays(now, exp.maxDays);
+    // Datum från "nu" i arbetsdagar (mån–fre) enligt metafälten
+    const now = new Date();
+    const stdFrom = pressifyAddBusinessDays(now, std.minDays);
+    const stdTo   = pressifyAddBusinessDays(now, std.maxDays);
+    const expFrom = pressifyAddBusinessDays(now, exp.minDays);
+    const expTo   = pressifyAddBusinessDays(now, exp.maxDays);
 
-   // Beskrivningar i SV kortformat från produktmetafält (ex: "tis 23 sep - ons 24 sep")
-const stdDesc = pressifySvShortRange(stdFrom, stdTo);
-const expDesc = pressifySvShortRange(expFrom, expTo);
+    // Beskrivningsrad i kassan (ex: "tis 23 sep - ons 24 sep")
+    const stdDesc = pressifySvShortRange(stdFrom, stdTo);
+    const expDesc = pressifySvShortRange(expFrom, expTo);
 
-// Alltid returnera två rater (utan min/max_delivery_date för att dölja "1 till 3 arbetsdagar")
-const rates = [
-  {
-    service_name: 'Standard frakt',
-    service_code: 'STANDARD',
-    total_price: String(PRESSIFY_STANDARD_ORE),
-    currency: PRESSIFY_CURRENCY,
-    description: stdDesc,
-    phone_required: false
-  },
-  {
-    service_name: 'Expressfrakt',
-    service_code: 'EXPRESS',
-    total_price: String(PRESSIFY_EXPRESS_ORE),
-    currency: PRESSIFY_CURRENCY,
-    description: expDesc,
-    phone_required: false
-  }
-];
-
+    // Exakt två rater, titlar utan datum – och utan min/max_delivery_date
+    const rates = [
+      {
+        service_name: 'Standard frakt',
+        service_code: 'STANDARD',
+        total_price: String(PRESSIFY_STANDARD_ORE),
+        currency: PRESSIFY_CURRENCY,
+        description: stdDesc,
+        phone_required: false
+      },
+      {
+        service_name: 'Expressfrakt',
+        service_code: 'EXPRESS',
+        total_price: String(PRESSIFY_EXPRESS_ORE),
+        currency: PRESSIFY_CURRENCY,
+        description: expDesc,
+        phone_required: false
+      }
+    ];
 
     return res.json({ rates });
   } catch (e) {
-    // Failsafe: svara ändå med defaults om något går fel
+    // Failsafe: defaults i arbetsdagar
     try {
-    const now = new Date();
-const dfStdFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_STD.minDays);
-const dfStdTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_STD.maxDays);
-const dfExpFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.minDays);
-const dfExpTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.maxDays);
+      const now = new Date();
+      const dfStdFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_STD.minDays);
+      const dfStdTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_STD.maxDays);
+      const dfExpFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.minDays);
+      const dfExpTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.maxDays);
 
-const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
-const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
+      const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
+      const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
 
-return res.json({
-  rates: [
-    {
-      service_name: 'Standard frakt',
-      service_code: 'STANDARD',
-      total_price: String(PRESSIFY_STANDARD_ORE),
-      currency: PRESSIFY_CURRENCY,
-      description: stdDesc,
-      phone_required: false
-    },
-    {
-      service_name: 'Expressfrakt',
-      service_code: 'EXPRESS',
-      total_price: String(PRESSIFY_EXPRESS_ORE),
-      currency: PRESSIFY_CURRENCY,
-      description: expDesc,
-      phone_required: false
-    }
-  ]
-});
+      return res.json({
+        rates: [
+          { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(PRESSIFY_STANDARD_ORE), currency: PRESSIFY_CURRENCY, description: stdDesc, phone_required: false },
+          { service_name: 'Expressfrakt',  service_code: 'EXPRESS',  total_price: String(PRESSIFY_EXPRESS_ORE), currency: PRESSIFY_CURRENCY, description: expDesc, phone_required: false }
+        ]
+      });
     } catch {
       return res.json({ rates: [] });
     }
   }
 });
+
 
 // ====== REGISTER (engångs) – skapar/uppdaterar CarrierService i butiken
 // Anropa:  POST https://DIN-RENDER-DOMÄN/carrier/pressify/register?token=SHOPIFY_WEBHOOK_SECRET
