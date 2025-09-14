@@ -3511,6 +3511,7 @@ async function pressifyFetchShippingMeta(productId) {
 }
 // Hämta product_id från variant_id när product_id saknas
 async function pressifyVariantToProductId(variantId) {
+  app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
   try {
     const url = `https://${SHOP}/admin/api/2025-07/variants/${variantId}.json`;
     const resp = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
@@ -3663,6 +3664,7 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
     return res.status(500).json({ error: 'register failed' });
   }
 });
+  });
 // ===== /Pressify Carrier Service =====
 
 // Starta servern
