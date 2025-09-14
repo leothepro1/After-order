@@ -987,6 +987,15 @@ function propsObjToArray(obj){
   }
   return out;
 }
+// --- hidden property for internal linking (döljs i checkout) ---
+const HIDDEN_PRODUCT_ID_KEY = '_product_id';
+function appendHiddenProp(props, name, value) {
+  const arr = Array.isArray(props) ? props : [];
+  const val = value == null ? '' : String(value).trim();
+  if (!val) return arr;
+  const exists = arr.some(p => String(p?.name || '').toLowerCase() === String(name).toLowerCase());
+  return exists ? arr : [...arr, { name, value: val }];
+}
 
 // Array/Obj → sanerad array
 function sanitizeProps(props){
@@ -1036,6 +1045,8 @@ async function buildCustomLinesFromGeneric(items){
     // Bestäm taxable
     const vid = it.variantId || it.variant_id;
     const pid = it.productId  || it.product_id;
+    const cleanProps = sanitizeProps(propsArr);
+    const propsWithPid = appendHiddenProp(cleanProps, HIDDEN_PRODUCT_ID_KEY, pid);
     let taxable = true; // default moms = på
     if (vid && typeof vTaxMap[vid] === 'boolean') {
       taxable = vTaxMap[vid];
@@ -1050,7 +1061,7 @@ async function buildCustomLinesFromGeneric(items){
       price: normalizePrice(unitCustom),
       taxable, // ⬅️ viktigt
       requires_shipping: true,
-      properties: sanitizeProps(propsArr)
+      properties: propsWithPid
     });
   }
   return lines;
@@ -1118,7 +1129,7 @@ const cleanLines = incoming.line_items.map(li => {
       price: normalizePrice(li.price),
       taxable: inferredTaxable,          // ⬅️ lägg på taxable
       requires_shipping: true,
-      properties: props
+      properties: propsWithPid 
     };
   }
 
@@ -1145,7 +1156,7 @@ const cleanLines = incoming.line_items.map(li => {
       price: normalizePrice(0),
       taxable: inferredTaxable,          // ⬅️ även här
       requires_shipping: true,
-      properties: props
+      properties: propsWithPid 
     };
   }
   return out;
