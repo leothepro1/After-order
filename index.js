@@ -3470,31 +3470,6 @@ const PRESSIFY_STANDARD_ORE   = 0;     // 0 kr
 const PRESSIFY_DEFAULT_STD    = { minDays: 2, maxDays: 4 };
 const PRESSIFY_DEFAULT_EXP    = { minDays: 0, maxDays: 1 };
 const PRESSIFY_MS_PER_DAY     = 86_400_000;
-// === Helpers för svensk datumtext (beskrivningsrad) ===
-const SV_TZ = 'Europe/Stockholm';
-const __svWeekday = new Intl.DateTimeFormat('sv-SE', { timeZone: SV_TZ, weekday: 'short' });
-const __svDayMonth = new Intl.DateTimeFormat('sv-SE', { timeZone: SV_TZ, day: 'numeric', month: 'short' });
-const __stripDots = (s) => String(s).replace(/\./g, ''); // ta bort "sep." → "sep"
-
-function svDateShort(d) {
-  const w = __stripDots(__svWeekday.format(d));     // tis
-  const dm = __stripDots(__svDayMonth.format(d));   // 23 sep
-  return `${w} ${dm}`;                               // tis 23 sep
-}
-function svRangeShort(from, to) {
-  const a = svDateShort(from), b = svDateShort(to);
-  return a === b ? a : `${a} - ${b}`;
-}
-// Normalisera fönster och rätta konstiga värden (t.ex. minDays>maxDays)
-function normalizeWindow(win, fallback) {
-  const min0 = Number.isFinite(win?.minDays) ? Math.trunc(win.minDays) : fallback.minDays;
-  const max0 = Number.isFinite(win?.maxDays) ? Math.trunc(win.maxDays) : fallback.maxDays;
-  let min = Math.max(0, min0);
-  let max = Math.max(0, max0);
-  if (max < min) { const t = min; min = max; max = t; } // swap
-  return { minDays: min, maxDays: max };
-}
-
 
 function pressifyFmtDateUTC(d) {
   const yyyy = d.getUTCFullYear();
@@ -3549,9 +3524,8 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
       std = pressifyMergeWindow(std, cfg?.standard ?? PRESSIFY_DEFAULT_STD);
       exp = pressifyMergeWindow(exp, cfg?.express  ?? PRESSIFY_DEFAULT_EXP);
     }
-std = normalizeWindow(std || PRESSIFY_DEFAULT_STD, PRESSIFY_DEFAULT_STD);
-exp = normalizeWindow(exp || PRESSIFY_DEFAULT_EXP, PRESSIFY_DEFAULT_EXP);
-    
+    if (!std) std = PRESSIFY_DEFAULT_STD;
+    if (!exp) exp = PRESSIFY_DEFAULT_EXP;
 
     // Datum från "nu"
     const now = Date.now();
@@ -3567,11 +3541,13 @@ exp = normalizeWindow(exp || PRESSIFY_DEFAULT_EXP, PRESSIFY_DEFAULT_EXP);
     const expFromStr = svFmt.format(expFrom);
     const expToStr   = svFmt.format(expTo);
 
- const stdTitle = 'Standard frakt';
-const expTitle = 'Expressfrakt';
+    const stdTitle = (stdFromStr === stdToStr)
+      ? `Standard frakt — ${stdFromStr} — 0 kr`
+      : `Standard frakt — ${stdFromStr} – ${stdToStr} — 0 kr`;
 
-const stdDesc = svRangeShort(stdFrom, stdTo); 
-const expDesc = svRangeShort(expFrom, expTo);
+    const expTitle = (expFromStr === expToStr)
+      ? `Expressfrakt — ${expFromStr} — 249 kr`
+      : `Expressfrakt — ${expFromStr} – ${expToStr} — 249 kr`;
 
     // Alltid returnera två rater
     const rates = [
@@ -3580,7 +3556,7 @@ const expDesc = svRangeShort(expFrom, expTo);
         service_code: 'STANDARD',
         total_price: String(PRESSIFY_STANDARD_ORE),
         currency: PRESSIFY_CURRENCY,
-        description: stdDesc,
+        description: 'Standardleverans (produktbaserat datumintervall)',
         min_delivery_date: pressifyFmtDateUTC(stdFrom),
         max_delivery_date: pressifyFmtDateUTC(stdTo),
         phone_required: false
@@ -3590,7 +3566,7 @@ const expDesc = svRangeShort(expFrom, expTo);
         service_code: 'EXPRESS',
         total_price: String(PRESSIFY_EXPRESS_ORE),
         currency: PRESSIFY_CURRENCY,
-        description: expDesc,
+        description: 'Expressleverans (produktbaserat datumintervall)',
         min_delivery_date: pressifyFmtDateUTC(expFrom),
         max_delivery_date: pressifyFmtDateUTC(expTo),
         phone_required: false
@@ -3611,11 +3587,6 @@ const expDesc = svRangeShort(expFrom, expTo);
       const stdToStr   = svFmt.format(dfStdTo);
       const expFromStr = svFmt.format(dfExpFrom);
       const expToStr   = svFmt.format(dfExpTo);
-      const stdTitle = 'Standard frakt';
-const expTitle = 'Expressfrakt';
-const stdDesc = svRangeShort(dfStdFrom, dfStdTo);
-const expDesc = svRangeShort(dfExpFrom, dfExpTo);
-
 
       const stdTitle = (stdFromStr === stdToStr)
         ? `Standard frakt — ${stdFromStr} — 0 kr`
@@ -3631,7 +3602,7 @@ const expDesc = svRangeShort(dfExpFrom, dfExpTo);
             service_code: 'STANDARD',
             total_price: String(PRESSIFY_STANDARD_ORE),
             currency: PRESSIFY_CURRENCY,
-            description: stdDesc,
+            description: 'Standardleverans (failsafe defaults)',
             min_delivery_date: pressifyFmtDateUTC(dfStdFrom),
             max_delivery_date: pressifyFmtDateUTC(dfStdTo),
             phone_required: false
@@ -3641,7 +3612,7 @@ const expDesc = svRangeShort(dfExpFrom, dfExpTo);
             service_code: 'EXPRESS',
             total_price: String(PRESSIFY_EXPRESS_ORE),
             currency: PRESSIFY_CURRENCY,
-            description: expDesc,
+            description: 'Expressleverans (failsafe defaults)',
             min_delivery_date: pressifyFmtDateUTC(dfExpFrom),
             max_delivery_date: pressifyFmtDateUTC(dfExpTo),
             phone_required: false
