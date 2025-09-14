@@ -996,6 +996,19 @@ function appendHiddenProp(props, name, value) {
   const exists = arr.some(p => String(p?.name || '').toLowerCase() === String(name).toLowerCase());
   return exists ? arr : [...arr, { name, value: val }];
 }
+function appendHiddenIds(props, pid, vid) {
+  const arr = Array.isArray(props) ? props.slice() : [];
+  const lower = new Set(arr.map(p => String(p?.name || '').toLowerCase()));
+  const add = (name, value) => {
+    const v = String(value ?? '').trim();
+    if (!v) return;
+    if (!lower.has(name.toLowerCase())) arr.push({ name, value: v });
+  };
+  // Dolda fält (Shopify visar inte properties som börjar med "_")
+  add('_product_id', pid);
+  add('_variant_id', vid);
+  return arr;
+}
 
 // Array/Obj → sanerad array
 function sanitizeProps(props){
@@ -1045,7 +1058,7 @@ async function buildCustomLinesFromGeneric(items){
     // Bestäm taxable
     const vid = it.variantId || it.variant_id;
     const pid = it.productId  || it.product_id;
-    const cleanProps = sanitizeProps(propsArr);
+    const propsSafe = appendHiddenIds(sanitizeProps(propsArr), pid, vid);
     const propsWithPid = appendHiddenProp(cleanProps, HIDDEN_PRODUCT_ID_KEY, pid);
     let taxable = true; // default moms = på
     if (vid && typeof vTaxMap[vid] === 'boolean') {
@@ -1112,7 +1125,7 @@ const pTaxMap = await getProductDefaultTaxableMap((incoming.line_items || []).ma
 
 const cleanLines = incoming.line_items.map(li => {
   const qty = Math.max(1, parseInt(li.quantity || 1, 10));
-  const props = sanitizeProps(li.properties || []);
+  const props = appendHiddenIds(sanitizeProps(li.properties || []), li.product_id, li.variant_id);
   const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
 
   const vid = li.variant_id;
@@ -3591,6 +3604,19 @@ async function pressifyResolveProductIdsFromItems(items) {
 
   return [...pids];
 }
+function pickIdFromItemProps(it, keys = []) {
+  try {
+    const props = Array.isArray(it?.properties) ? it.properties
+                  : (it?.properties ? propsObjToArray(it.properties) : []);
+    const map = new Map((props || []).map(p => [String(p?.name || '').toLowerCase(), String(p?.value ?? '').trim()]));
+    for (const k of keys) {
+      const v = map.get(String(k).toLowerCase());
+      if (v) return v;
+    }
+  } catch {}
+  return null;
+}
+
 // Batch: hämta custom.shipping för en lista av products via Admin GraphQL
 async function pressifyFetchShippingMetaBatch(productIds = []) {
   const ids = [...new Set((productIds || []).filter(Boolean).map(String))];
@@ -3814,6 +3840,17 @@ async function pressifyComputeWindowsFromCart(items = []) {
 
   for (const it of (items || [])) {
     if (it?.requires_shipping === false) continue;
+    // 1) Försök läsa gömda ID:n från properties på rate-item
+const pidProp = pickIdFromItemProps(it, ['_product_id','product_id','productId','pid','_pid']);
+if (pidProp) {
+  pids.add(String(pidProp));
+  continue; // vi har redan ett product_id – klart för denna rad
+}
+const vidProp = pickIdFromItemProps(it, ['_variant_id','variant_id','variantId','vid','_vid']);
+if (vidProp) {
+  toLookup.add(String(vidProp)); // kan mappas variant → produkt nedan
+  continue;
+}
     const vid = it?.variant_id ? String(it.variant_id) : null;
     const pid = it?.product_id ? String(it.product_id) : null;
 
