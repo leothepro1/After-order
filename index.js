@@ -3566,19 +3566,32 @@ const __variantToProductCache = new Map();
 
 async function pressifyResolveProductIdsFromItems(items) {
   const pids = new Set();
-  const toLookup = new Set();
+  const toLookup = new Set(); // variant→produkt-uppslag via Admin
 
   for (const it of Array.isArray(items) ? items : []) {
     if (it?.requires_shipping === false) continue;
-    if (it?.product_id) {
-      pids.add(String(it.product_id));
-    } else if (it?.variant_id) {
-      const vid = String(it.variant_id);
-      if (__variantToProductCache.has(vid)) {
-        pids.add(__variantToProductCache.get(vid));
-      } else {
-        toLookup.add(vid);
-      }
+
+    // 2a) Försök läsa PRODUCT-ID direkt (vanligt fält eller dolt property)
+    const pidRaw =
+      it?.product_id ??
+      pickIdFromItemProps(it, ['_product_id','product_id','productId']);
+    const pid = toPlainId(pidRaw);
+    if (pid) {
+      pids.add(pid);
+      continue; // klart för denna rad
+    }
+
+    // 2b) Annars: ta VARIANT-ID (vanligt fält eller dolt property) och slå upp product_id
+    const vidRaw =
+      it?.variant_id ??
+      pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']);
+    const vid = toPlainId(vidRaw);
+    if (!vid) continue;
+
+    if (__variantToProductCache.has(vid)) {
+      pids.add(__variantToProductCache.get(vid));
+    } else {
+      toLookup.add(vid);
     }
   }
 
@@ -3590,7 +3603,7 @@ async function pressifyResolveProductIdsFromItems(items) {
           `https://${SHOP}/admin/api/2025-07/variants/${vid}.json`,
           { headers }
         );
-        const pid = String(data?.variant?.product_id || '');
+        const pid = toPlainId(data?.variant?.product_id);
         if (pid) {
           __variantToProductCache.set(vid, pid);
           pids.add(pid);
@@ -3603,6 +3616,7 @@ async function pressifyResolveProductIdsFromItems(items) {
 
   return [...pids];
 }
+
 function pickIdFromItemProps(it, keys = []) {
   try {
     const props = Array.isArray(it?.properties) ? it.properties
@@ -3614,6 +3628,13 @@ function pickIdFromItemProps(it, keys = []) {
     }
   } catch {}
   return null;
+}
+function toPlainId(v){
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  // stöd både rena siffror och GID:er som "gid://shopify/Product/123456789"
+  const m = s.match(/(\d+)\s*$/);
+  return m ? m[1] : '';
 }
 
 // Batch: hämta custom.shipping för en lista av products via Admin GraphQL
@@ -3772,10 +3793,11 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
 // - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
 // - Merga över alla rader (min av min, max av max)
 async function pressifyComputeWindowsFromCart(items = []) {
-  const variants = [...new Set((items || [])
-    .map(it => it?.variant_id)
-    .filter(Boolean)
-    .map(String))];
+const variants = [...new Set((items || [])
+  .map(it => it?.variant_id ?? pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']))
+  .filter(Boolean)
+  .map(v => toPlainId(v))
+)];
 
   const products = await pressifyResolveProductIdsFromItems(items);
 
