@@ -3520,8 +3520,6 @@ async function pressifyVariantToProductId(variantId) {
     return null;
   }
 }
-
-// ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
 // Filtrera till rader som ska fraktas
 const shipItems = items.filter(it => it?.requires_shipping !== false);
 
@@ -3534,12 +3532,15 @@ const directProductIds = shipItems
 const variantIds = [...new Set(
   shipItems.filter(it => !it.product_id && it.variant_id).map(it => it.variant_id)
 )];
-const mappedProductIds = variantIds.length
-  ? await Promise.all(variantIds.map(pressifyVariantToProductId))
-  : [];
+
+let mappedProductIds = [];
+if (variantIds.length > 0) {
+  mappedProductIds = await Promise.all(variantIds.map(pressifyVariantToProductId));
+}
 
 // Slå ihop och deduplicera
 const productIds = [...new Set([...directProductIds, ...mappedProductIds.filter(Boolean)])];
+
 
 
     // Hämta metafält (bara de som finns, inga defaults)
