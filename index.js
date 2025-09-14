@@ -3730,7 +3730,7 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
     console.error('pressify carrier register error:', e?.response?.data || e.message);
     return res.status(500).json({ error: 'register failed' });
   }
-});pressifyFetchShippingMetaBatch
+});
 // ===== /Pressify Carrier Service =====
 // Samla fönster (standard/express) från cart-items:
 // - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
@@ -3772,15 +3772,18 @@ async function pressifyComputeWindowsFromCart(items = []) {
   const pWin = Object.create(null); // productId -> window JSON
   const vWin = Object.create(null); // variantId -> window JSON
 
-  for (const n of nodes) {
-    const gid = String(n?.id || '');
-    const [ , type, rawId ] = gid.split('/');
-    const id = rawId || '';
-    let cfg = null;
-    try { cfg = n?.metafield?.value ? JSON.parse(n.metafield.value) : null; } catch {}
-    if (type === 'Product' && id) pWin[id] = cfg;
-    if (type === 'ProductVariant' && id) vWin[id] = cfg;
-  }
+ for (const n of nodes) {
+  const gid = String(n?.id || '');
+  const parts = gid.split('/');
+  const type = parts[parts.length - 2] || ''; // "Product" | "ProductVariant"
+  const id   = parts[parts.length - 1] || ''; // "12345"
+
+  let cfg = null;
+  try { cfg = n?.metafield?.value ? JSON.parse(n.metafield.value) : null; } catch {}
+
+  if (type === 'Product' && id)        pWin[id] = cfg;
+  else if (type === 'ProductVariant' && id) vWin[id] = cfg;
+}
 
   const toInt = (v) => {
     const n = Number(v);
