@@ -1059,7 +1059,6 @@ async function buildCustomLinesFromGeneric(items){
     const vid = it.variantId || it.variant_id;
     const pid = it.productId  || it.product_id;
     const propsSafe = appendHiddenIds(sanitizeProps(propsArr), pid, vid);
-    const propsWithPid = appendHiddenProp(cleanProps, HIDDEN_PRODUCT_ID_KEY, pid);
     let taxable = true; // default moms = på
     if (vid && typeof vTaxMap[vid] === 'boolean') {
       taxable = vTaxMap[vid];
@@ -1074,7 +1073,7 @@ async function buildCustomLinesFromGeneric(items){
       price: normalizePrice(unitCustom),
       taxable, // ⬅️ viktigt
       requires_shipping: true,
-      properties: propsWithPid
+      properties: propsSafe
     });
   }
   return lines;
@@ -1134,7 +1133,7 @@ const cleanLines = incoming.line_items.map(li => {
     typeof vTaxMap[vid] === 'boolean' ? vTaxMap[vid] :
     (typeof pTaxMap[pid] === 'boolean' ? pTaxMap[pid] : true);
 
-  if (hasCustomPrice) {
+if (hasCustomPrice) {
     return {
       custom: true,
       title: String(li.title || 'Trycksak'),
@@ -1142,7 +1141,7 @@ const cleanLines = incoming.line_items.map(li => {
       price: normalizePrice(li.price),
       taxable: inferredTaxable,          // ⬅️ lägg på taxable
       requires_shipping: true,
-      properties: propsWithPid 
+      properties: props 
     };
   }
 
@@ -1169,7 +1168,7 @@ const cleanLines = incoming.line_items.map(li => {
       price: normalizePrice(0),
       taxable: inferredTaxable,          // ⬅️ även här
       requires_shipping: true,
-      properties: propsWithPid 
+      properties: props 
     };
   }
   return out;
@@ -3840,17 +3839,6 @@ async function pressifyComputeWindowsFromCart(items = []) {
 
   for (const it of (items || [])) {
     if (it?.requires_shipping === false) continue;
-    // 1) Försök läsa gömda ID:n från properties på rate-item
-const pidProp = pickIdFromItemProps(it, ['_product_id','product_id','productId','pid','_pid']);
-if (pidProp) {
-  pids.add(String(pidProp));
-  continue; // vi har redan ett product_id – klart för denna rad
-}
-const vidProp = pickIdFromItemProps(it, ['_variant_id','variant_id','variantId','vid','_vid']);
-if (vidProp) {
-  toLookup.add(String(vidProp)); // kan mappas variant → produkt nedan
-  continue;
-}
     const vid = it?.variant_id ? String(it.variant_id) : null;
     const pid = it?.product_id ? String(it.product_id) : null;
 
