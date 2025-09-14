@@ -3539,6 +3539,47 @@ async function pressifyFetchShippingMeta(productId) {
     return null;
   }
 }
+const __variantToProductCache = new Map();
+
+async function pressifyResolveProductIdsFromItems(items) {
+  const pids = new Set();
+  const toLookup = new Set();
+
+  for (const it of Array.isArray(items) ? items : []) {
+    if (it?.requires_shipping === false) continue;
+    if (it?.product_id) {
+      pids.add(String(it.product_id));
+    } else if (it?.variant_id) {
+      const vid = String(it.variant_id);
+      if (__variantToProductCache.has(vid)) {
+        pids.add(__variantToProductCache.get(vid));
+      } else {
+        toLookup.add(vid);
+      }
+    }
+  }
+
+  if (toLookup.size > 0) {
+    const headers = { 'X-Shopify-Access-Token': ACCESS_TOKEN };
+    await Promise.all([...toLookup].map(async (vid) => {
+      try {
+        const { data } = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/variants/${vid}.json`,
+          { headers }
+        );
+        const pid = String(data?.variant?.product_id || '');
+        if (pid) {
+          __variantToProductCache.set(vid, pid);
+          pids.add(pid);
+        }
+      } catch (e) {
+        console.error('variant→product lookup fail', vid, e?.response?.data || e.message);
+      }
+    }));
+  }
+
+  return [...pids];
+}
 
 // ====== RATE CALLBACK – Shopify kallar denna i checkout (även draft checkout)
 app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
@@ -3546,29 +3587,43 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
     const rateReq = req.body?.rate;
     const items = Array.isArray(rateReq?.items) ? rateReq.items : [];
 
-// Unika product_id som kräver frakt
-const productIds = [...new Set(
-  items
-    .filter(it => it?.requires_shipping !== false && it?.product_id)
-    .map(it => it.product_id)
-)];
+// Unika product_id som kräver frakt (fallback via variant → produkt)
+const productIds = await pressifyResolveProductIdsFromItems(items);
+
 
     // Hämta metafält parallellt
     const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
+function pressifyCoerceWindow(win) {
+  if (!win) return null;
+  const toInt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  };
+  let min = toInt(win.minDays);
+  let max = toInt(win.maxDays);
+  if (min === null || max === null) return null;
+  if (min > max) [min, max] = [max, min];
+  return { minDays: min, maxDays: max };
+}
 
-// Mergar fönster (min av min, max av max) **bara** från produkter som faktiskt har metafältet
+// Mergar fönster enbart från produkter som verkligen har shipping-metat
 let std = null, exp = null;
-const validMetas = metas.filter(cfg =>
-  cfg && Number.isInteger(cfg?.standard?.minDays) && Number.isInteger(cfg?.standard?.maxDays) &&
-  Number.isInteger(cfg?.express?.minDays)  && Number.isInteger(cfg?.express?.maxDays)
-);
-for (const cfg of validMetas) {
+const cleaned = metas
+  .map(cfg => cfg ? {
+    standard: pressifyCoerceWindow(cfg.standard),
+    express:  pressifyCoerceWindow(cfg.express)
+  } : null)
+  .filter(cfg => cfg && cfg.standard && cfg.express);
+
+for (const cfg of cleaned) {
   std = pressifyMergeWindow(std, cfg.standard);
   exp = pressifyMergeWindow(exp, cfg.express);
 }
-// Fallback endast om ingen produkt hade metafält
+
+// Fallback endast om ingen produkt hade giltiga metafält
 if (!std) std = PRESSIFY_DEFAULT_STD;
 if (!exp) exp = PRESSIFY_DEFAULT_EXP;
+
 
 // Datum från "nu" i ARBETSDAGAR (mån–fre) enligt metafälten
 const now = new Date();
