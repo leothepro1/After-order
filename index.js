@@ -3480,6 +3480,24 @@ function pressifyFmtDateUTC(d) {
   const SS = String(d.getUTCSeconds()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS} +0000`;
 }
+function pressifyAddBusinessDays(startDate, days) {
+  // Räkna i UTC-noon för att undvika DST-strul, men vi formatterar i sv-SE/Stockholm sen
+  const d = new Date(Date.UTC(
+    startDate.getUTCFullYear(),
+    startDate.getUTCMonth(),
+    startDate.getUTCDate(),
+    12, 0, 0
+  ));
+  if (!Number.isInteger(days) || days <= 0) return d;
+  let remaining = days;
+  while (remaining > 0) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const dow = d.getUTCDay(); // 0=Sun, 6=Sat
+    if (dow !== 0 && dow !== 6) remaining--;
+  }
+  return d;
+}
+
 function pressifySvShortRange(from, to) {
   const fmt = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Europe/Stockholm',
@@ -3498,14 +3516,14 @@ function pressifyMergeWindow(agg, next) {
   let nmin = ok(next.minDays) ? next.minDays : null;
   let nmax = ok(next.maxDays) ? next.maxDays : null;
   if (nmin === null || nmax === null) return agg;
-  // Normalisera om någon råkat vända på dem (t.ex. 5/4)
-  if (nmin > nmax) [nmin, nmax] = [nmax, nmin];
+  if (nmin > nmax) [nmin, nmax] = [nmax, nmin]; // normalisera 8/6 -> 6/8
   if (!agg) return { minDays: nmin, maxDays: nmax };
   return {
     minDays: Math.min(agg.minDays, nmin),
     maxDays: Math.max(agg.maxDays, nmax)
   };
 }
+
 
 async function pressifyFetchShippingMeta(productId) {
   try {
@@ -3536,21 +3554,26 @@ app.post(PRESSIFY_CARRIER_ROUTE, async (req, res) => {
     // Hämta metafält parallellt
     const metas = await Promise.all(productIds.map(pressifyFetchShippingMeta));
 
-    // Mergar fönster (min av min, max av max)
-    let std = null, exp = null;
-    for (const cfg of metas) {
-      std = pressifyMergeWindow(std, cfg?.standard ?? PRESSIFY_DEFAULT_STD);
-      exp = pressifyMergeWindow(exp, cfg?.express  ?? PRESSIFY_DEFAULT_EXP);
-    }
-    if (!std) std = PRESSIFY_DEFAULT_STD;
-    if (!exp) exp = PRESSIFY_DEFAULT_EXP;
+// Mergar fönster (min av min, max av max) **bara** från produkter som faktiskt har metafältet
+let std = null, exp = null;
+const validMetas = metas.filter(cfg =>
+  cfg && Number.isInteger(cfg?.standard?.minDays) && Number.isInteger(cfg?.standard?.maxDays) &&
+  Number.isInteger(cfg?.express?.minDays)  && Number.isInteger(cfg?.express?.maxDays)
+);
+for (const cfg of validMetas) {
+  std = pressifyMergeWindow(std, cfg.standard);
+  exp = pressifyMergeWindow(exp, cfg.express);
+}
+// Fallback endast om ingen produkt hade metafält
+if (!std) std = PRESSIFY_DEFAULT_STD;
+if (!exp) exp = PRESSIFY_DEFAULT_EXP;
 
-    // Datum från "nu"
-    const now = Date.now();
-    const stdFrom = new Date(now + std.minDays * PRESSIFY_MS_PER_DAY);
-    const stdTo   = new Date(now + std.maxDays * PRESSIFY_MS_PER_DAY);
-    const expFrom = new Date(now + exp.minDays * PRESSIFY_MS_PER_DAY);
-    const expTo   = new Date(now + exp.maxDays * PRESSIFY_MS_PER_DAY);
+// Datum från "nu" i ARBETSDAGAR (mån–fre) enligt metafälten
+const now = new Date();
+const stdFrom = pressifyAddBusinessDays(now, std.minDays);
+const stdTo   = pressifyAddBusinessDays(now, std.maxDays);
+const expFrom = pressifyAddBusinessDays(now, exp.minDays);
+const expTo   = pressifyAddBusinessDays(now, exp.maxDays);
 
    // Beskrivningar i SV kortformat från produktmetafält (ex: "tis 23 sep - ons 24 sep")
 const stdDesc = pressifySvShortRange(stdFrom, stdTo);
@@ -3581,12 +3604,13 @@ const rates = [
   } catch (e) {
     // Failsafe: svara ändå med defaults om något går fel
     try {
-      const now = Date.now();
-      const dfStdFrom = new Date(now + PRESSIFY_DEFAULT_STD.minDays * PRESSIFY_MS_PER_DAY);
-      const dfStdTo   = new Date(now + PRESSIFY_DEFAULT_STD.maxDays * PRESSIFY_MS_PER_DAY);
-      const dfExpFrom = new Date(now + PRESSIFY_DEFAULT_EXP.minDays * PRESSIFY_MS_PER_DAY);
-      const dfExpTo   = new Date(now + PRESSIFY_DEFAULT_EXP.maxDays * PRESSIFY_MS_PER_DAY);
-    const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
+    const now = new Date();
+const dfStdFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_STD.minDays);
+const dfStdTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_STD.maxDays);
+const dfExpFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.minDays);
+const dfExpTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.maxDays);
+
+const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
 const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
 
 return res.json({
@@ -3609,7 +3633,6 @@ return res.json({
     }
   ]
 });
-
     } catch {
       return res.json({ rates: [] });
     }
