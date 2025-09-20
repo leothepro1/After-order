@@ -1,0 +1,61 @@
+{
+  "id": "provpasarna",
+  "title": "påsar",
+  "version": "1.1.3",
+  "currency": "SEK",
+  "options": [
+    {
+      "id": "size",
+      "label": "Antal färger i trycket",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "1",
+      "choices": [
+        {
+          "value": "1",
+          "title": "1-färgstryck",
+          "text": "Enkel design i svart. Perfekt för budget, logotyper eller text.",
+          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_svart_tryck_hgzuil.png"
+        }
+      ],
+      "export": true
+    },
+    {
+      "id": "qty",
+      "label": "Antal",
+      "type": "select",
+      "default": 10,
+      "choices": [
+        { "value": 10, "label": "10" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    }
+  ],
+  "tables": {
+    "unit_price": {
+      "rows": [36, 72, 108, 144, 180, 216, 252, 288, 324, 360, 540],
+      "cols": [1, 2, 3],
+      "data": [
+        [31.54, 39.54, 47.65],
+        [22.28, 25.12, 28.96],
+        [19.59, 22.44, 24.84],
+        [16.75, 18.26, 20.13],
+        [15.63, 17.18, 18.51],
+        [15.04, 16.39, 17.77],
+        [14.78, 15.83, 17.06],
+        [14.33, 15.44, 16.43],
+        [14.24, 15.13, 16.19],
+        [12.02, 13.02, 14.42],
+        [11.20, 11.53, 15.52]
+      ]
+    }
+  },
+  "formulas": {
+    "tier": "size",
+    "unit_price": "table('unit_price', qty, tier) * 1.25",
+    "total_price": "unit * qty"
+  },
+  "export": ["size", "qty"]
+}
