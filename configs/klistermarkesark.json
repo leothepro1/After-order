@@ -1,0 +1,69 @@
+{
+  "id": "etiketter",
+  "title": "ark",
+  "version": "1.1.0",
+  "currency": "SEK",
+  "options": [
+    {
+      "id": "size",
+      "label": "Storlek (BxH)",
+      "type": "select",
+      "default": 1,
+      "choices": [
+        { "value": 1, "code": "14 × 21 cm",   "label": "14 × 21 cm",   "w_cm": 14,  "h_cm":21,  "area_cm2": 16 },
+        { "value": 2, "code": "21 x 29 cm",   "label": "21 x 29 cm",   "w_cm": 21,  "h_cm": 29,  "area_cm2": 36 },
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
+      "id": "variant_cards",
+      "label": "Material",
+      "type": "cards",
+      "maxVisible": 3,
+      "showMoreLabel": "Visa fler",
+      "default": "1",
+      "choices": [
+        { "value": "1", "title": "Vinyl", "text": "Perfekt för märkning av produkter och förpackningar.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291823/jpeg-optimizer_salom_9321_jxkc45.png" },
+        { "value": "1.2", "title": "Transparent", "text": "Perfekt när du vill visa produkten tydligt och elegant.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291824/jpeg-optimizer_transparent_321_eloboe.png" },
+        { "value": "0.99", "title": "Kraftpapper", "text": "Obelagd och miljömedveten med en texturerad yta.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291829/jpeg-optimizer_kraftpaper_sn8ges.png" }
+      ],
+      "export": true
+    },
+    {
+      "id": "qty",
+      "label": "Antal",
+      "type": "select",
+      "default": 3,
+      "choices": [
+        { "value": 3, "label": "3" },
+        { "value": 25, "label": "25" },
+        { "value": 50, "label": "50" },
+        { "value": 100, "label": "100" },
+        { "value": 200, "label": "200" },
+        { "value": 300, "label": "300" },
+        { "value": 500, "label": "500" },
+        { "value": 600, "label": "600" },
+        { "value": 900, "label": "900" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    }
+  ],
+  "tables": {
+    "unit_price": {
+      "rows": [3, 25, 50, 100, 200, 300, 500, 600, 900],
+      "cols": [1, 2],
+      "data": [
+        [73.67, 28.48, 21.46, 16.49, 12.98, 11.43, 9.87, 9.40, 8.51],
+[103.33, 41.40, 31.76, 24.95, 20.14, 18.00, 15.86, 15.22, 13.99]
+      ]
+    }
+  },
+  "formulas": {
+    "tier": "size",
+    "unit_price": "table('unit_price', qty, tier) * ((variant_cards*1) || 1) * 1.25",
+    "total_price": "unit * qty"
+  },
+  "export": ["size", "variant_cards", "qty", "size_w_cm", "size_h_cm"]
+}
