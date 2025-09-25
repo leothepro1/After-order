@@ -24,9 +24,9 @@
       "showMoreLabel": "Visa fler",
       "default": "1",
       "choices": [
-        { "value": "1", "title": "Vinyl", "text": "Perfekt för märkning av produkter och förpackningar.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291823/jpeg-optimizer_salom_9321_jxkc45.png" },
-        { "value": "1.2", "title": "Transparent", "text": "Perfekt när du vill visa produkten tydligt och elegant.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291824/jpeg-optimizer_transparent_321_eloboe.png" },
-        { "value": "0.99", "title": "Kraftpapper", "text": "Obelagd och miljömedveten med en texturerad yta.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291829/jpeg-optimizer_kraftpaper_sn8ges.png" }
+        { "value": "1", "title": "Vinyl", "text": "Slitstarkt plastmaterial som tål väta och sol.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291823/jpeg-optimizer_salom_9321_jxkc45.png" },
+        { "value": "1.2", "title": "Transparent", "text": "Genomskinligt material där bara trycket syns.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291824/jpeg-optimizer_transparent_321_eloboe.png" },
+        { "value": "0.99", "title": "Kraftpapper", "text": "Obelagt papper med naturlig brun ton.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291829/jpeg-optimizer_kraftpaper_sn8ges.png" }
       ],
       "export": true
     },
