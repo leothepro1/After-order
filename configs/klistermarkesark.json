@@ -11,7 +11,7 @@
       "default": 1,
       "choices": [
         { "value": 1, "code": "14 × 21 cm",   "label": "14 × 21 cm",   "w_cm": 14,  "h_cm":21,  "area_cm2": 16 },
-        { "value": 2, "code": "21 x 29 cm",   "label": "21 x 29 cm",   "w_cm": 21,  "h_cm": 29,  "area_cm2": 36 },
+        { "value": 2, "code": "21 x 29 cm",   "label": "21 x 29 cm",   "w_cm": 21,  "h_cm": 29,  "area_cm2": 36 }
       ],
       "ui": { "component": "shared-select" },
       "export": true
