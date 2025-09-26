@@ -1905,53 +1905,57 @@ app.post('/proof/approve', async (req, res) => {
         return {
           ...p,
           status: 'I produktion',
-          // 👇 Promote approved proof → bilden som visas på ordersidan
           preview_img: p.previewUrl || p.preview_img || null
         };
       }
       return p;
     });
 
-    // 3) === BLOCK C: Frys leveransdatum ===
-    try {
-      const idx = projects.findIndex(p => String(p.lineItemId) === String(lineItemId));
-      if (idx !== -1) {
-        const prj = projects[idx];
+   // 3) === BLOCK C: Frys leveransdatum (behåll MIN–MAX) ===
+try {
+  const idx = projects.findIndex(p => String(p.lineItemId) === String(lineItemId));
+  if (idx !== -1) {
+    const prj = projects[idx];
 
-        // Bara om dynamiskt fönster finns och inte redan är fryst
-        if (prj && prj.delivery && !prj.delivery.fixed && prj.delivery.window && prj.delivery.dynamicBase) {
-          const base = new Date(prj.delivery.dynamicBase.orderProcessedAt || prj.date || new Date());
-          base.setHours(0, 0, 0, 0);
+    // Bara om dynamiskt fönster finns och inte redan är fryst
+    if (prj && prj.delivery && !prj.delivery.fixed && prj.delivery.window && prj.delivery.dynamicBase) {
+      const base = new Date(prj.delivery.dynamicBase.orderProcessedAt || prj.date || new Date());
+      base.setHours(0, 0, 0, 0);
 
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
 
-          // Räkna antal passerade arbetsdagar (mån–fre)
-          let delta = 0;
-          const d = new Date(base);
-          while (d < today) {
-            d.setDate(d.getDate() + 1);
-            const wd = d.getDay(); // 0=sön, 6=lör
-            if (wd !== 0 && wd !== 6) delta++;
-          }
-
-          // Slutdatum = base + (maxDays + delta) arbetsdagar
-          const maxDays = Number(prj.delivery.window.maxDays || 0);
-          const finalDate = pressifyAddBusinessDays(base, maxDays + delta);
-
-          prj.delivery.fixed = {
-            dateISO: finalDate.toISOString().slice(0, 10),       // "YYYY-MM-DD"
-            label:   pressifySvShortRange(finalDate, finalDate),  // t.ex. "fre 10 okt"
-            fixedAt: new Date().toISOString()
-          };
-
-          projects[idx] = prj; // skriv tillbaka mutationen
-        }
+      // Räkna antal passerade arbetsdagar (mån–fre)
+      let delta = 0;
+      const d = new Date(base);
+      while (d < today) {
+        d.setDate(d.getDate() + 1);
+        const wd = d.getDay(); // 0=sön, 6=lör
+        if (wd !== 0 && wd !== 6) delta++;
       }
-    } catch (freezeErr) {
-      console.warn('BLOCK C (freeze ETA) misslyckades:', freezeErr?.response?.data || freezeErr.message);
+
+      // Frys BOTH: from = base + (minDays + delta), to = base + (maxDays + delta)
+      const minDays = Number(prj.delivery.window.minDays || 0);
+      const maxDays = Number(prj.delivery.window.maxDays || 0);
+
+      const fromDate = pressifyAddBusinessDays(base, minDays + delta);
+      const toDate   = pressifyAddBusinessDays(base, maxDays + delta);
+
+      prj.delivery.fixed = {
+        fromISO: fromDate.toISOString().slice(0, 10),  // "YYYY-MM-DD"
+        toISO:   toDate.toISOString().slice(0, 10),    // "YYYY-MM-DD"
+        label:   pressifySvShortRange(fromDate, toDate),
+        fixedAt: new Date().toISOString()
+      };
+
+      projects[idx] = prj; // skriv tillbaka mutationen
     }
-    // === SLUT BLOCK C ===
+  }
+} catch (freezeErr) {
+  console.warn('BLOCK C (freeze ETA) misslyckades:', freezeErr?.response?.data || freezeErr.message);
+}
+// === SLUT BLOCK C ===
+
 
     // 4) PUT: skriv tillbaka hela projektlistan
     await axios.put(
