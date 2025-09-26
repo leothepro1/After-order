@@ -1535,70 +1535,110 @@ app.post('/webhooks/order-created', async (req, res) => {
   const orderNumber = order.name;
   const lineItems = order.line_items || [];
 
+  // === BLOCK A: Välj fraktmetod + hämta/merga ledtider för alla rader (arbetsdagar) ===
+  const chosenMethod = (() => {
+    const sl = Array.isArray(order.shipping_lines) && order.shipping_lines[0] ? order.shipping_lines[0] : null;
+    const t = String(sl?.code || sl?.title || '').toLowerCase();
+    return /express/.test(t) ? 'express' : 'standard';
+  })();
+
+  // Beräkna sammanlagt fönster från alla rader via befintlig helper
+  const win = await pressifyComputeWindowsFromCart(lineItems);
+  const pickedWindow = chosenMethod === 'express' ? (win?.exp || null) : (win?.std || null);
+
+  // Fallback till globala defaults om inget metafält fanns på produkterna
+  const merged = pickedWindow && Number.isFinite(pickedWindow.minDays) && Number.isFinite(pickedWindow.maxDays)
+    ? { minDays: pickedWindow.minDays, maxDays: pickedWindow.maxDays }
+    : (chosenMethod === 'express' ? PRESSIFY_DEFAULT_EXP : PRESSIFY_DEFAULT_STD);
+
+  // Baslinje = processed_at eller created_at (00:00 ej nödvändigt att forceras här)
+  const baselineISO = String(order.processed_at || order.created_at || new Date().toISOString());
+  const baseDate = new Date(baselineISO);
+  const etaFrom = pressifyAddBusinessDays(baseDate, merged.minDays);
+  const etaTo   = pressifyAddBusinessDays(baseDate, merged.maxDays);
+  const etaLabel = pressifySvShortRange(etaFrom, etaTo);
+  // === SLUT BLOCK A ===
 
   // Mappa varje radpost till ett projekt – SPARA ALLA PROPERTIES (pretty först)
-const newProjects = await Promise.all(lineItems.map(async (item) => {
-  // A) Läs ALLA properties från raden och normalisera (behåll allt icke-tomt)
-  const rawProps = Array.isArray(item.properties) ? item.properties : [];
-  const allClean = rawProps
-    .filter(p => p && typeof p.name === 'string')
-    .map(p => ({ name: String(p.name), value: String(p.value ?? '') }))
-    .filter(p => p.value.trim() !== '');
+  const newProjects = await Promise.all(lineItems.map(async (item) => {
+    // A) Läs ALLA properties från raden och normalisera (behåll allt icke-tomt)
+    const rawProps = Array.isArray(item.properties) ? item.properties : [];
+    const allClean = rawProps
+      .filter(p => p && typeof p.name === 'string')
+      .map(p => ({ name: String(p.name), value: String(p.value ?? '') }))
+      .filter(p => p.value.trim() !== '');
 
-  // B) Bygg uppslagskarta på allClean (används av alias + övriga fält)
-  const m = arrToMapByName(allClean);
+    // B) Bygg uppslagskarta på allClean (används av alias + övriga fält)
+    const m = arrToMapByName(allClean);
 
-  // C) Derivera nyckelfält
-  const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','_tryckfil','fileName','filnamn']);
-  const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','_instructions','Önskemål','onskemal']);
-  const previewFromProp = pickFirstNonEmpty(m, ['preview_img','_preview_img']);
-  const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
-  const preview_img = previewFromProp || fallback.previewUrl || null;
-  const cloudinaryPublicId = fallback.cloudinaryPublicId || null;
+    // C) Derivera nyckelfält
+    const tryckfil = pickFirstNonEmpty(m, ['Tryckfil','_tryckfil','fileName','filnamn']);
+    const instructionsProp = pickFirstNonEmpty(m, ['Instruktioner','Instructions','instructions','_instructions','Önskemål','onskemal']);
+    const previewFromProp = pickFirstNonEmpty(m, ['preview_img','_preview_img']);
+    const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
+    const preview_img = previewFromProp || fallback.previewUrl || null;
+    const cloudinaryPublicId = fallback.cloudinaryPublicId || null;
 
-  // D) “Pretty” alias först …
-  const pretty = buildPrettyProperties(m);
+    // D) “Pretty” alias först …
+    const pretty = buildPrettyProperties(m);
 
-  // … följt av ALLA övriga properties utan dubbletter (namn-match, case-insensitivt)
-  const picked = new Set(pretty.map(p => p.name.toLowerCase()));
-  const rest = allClean.filter(p => !picked.has(p.name.toLowerCase()));
-  let properties = [...pretty, ...rest];
+    // … följt av ALLA övriga properties utan dubbletter (namn-match, case-insensitivt)
+    const picked = new Set(pretty.map(p => p.name.toLowerCase()));
+    const rest = allClean.filter(p => !picked.has(p.name.toLowerCase()));
+    let properties = [...pretty, ...rest];
 
-  // E) Säkerställ Tryckfil i listan om den saknas
-  if (tryckfil && !properties.some(p => p.name.toLowerCase() === 'tryckfil')) {
-    properties.push({ name: 'Tryckfil', value: tryckfil });
-  }
+    // E) Säkerställ Tryckfil i listan om den saknas
+    if (tryckfil && !properties.some(p => p.name.toLowerCase() === 'tryckfil')) {
+      properties.push({ name: 'Tryckfil', value: tryckfil });
+    }
 
-  // ⭐ NYTT: generera artwork-token i exakt samma token-format
-  const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
-  await registerTokenInRedis(artworkToken, {
-    kind: 'artwork',
-    orderId: Number(orderId),
-    lineItemId: Number(item.id),
-    iat: Date.now(),
-    tid
-  });
+    // ⭐ Artwork-token
+    const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
+    await registerTokenInRedis(artworkToken, {
+      kind: 'artwork',
+      orderId: Number(orderId),
+      lineItemId: Number(item.id),
+      iat: Date.now(),
+      tid
+    });
 
-  return {
-    orderId,
-    lineItemId:   item.id,
-    productId:    item.product_id,
-    productTitle: item.title,
-    variantId:    item.variant_id,
-    variantTitle: item.variant_title,
-    quantity:     item.quantity,
-    properties,
-    preview_img,
-    cloudinaryPublicId,
-    instructions: instructionsProp ?? null,
-    customerId,
-    orderNumber,
-    status: 'Väntar på korrektur',
-    tag:    'Väntar på korrektur',
-    date: new Date().toISOString(),
-    artworkToken
-  };
-}));
+    return {
+      orderId,
+      lineItemId:   item.id,
+      productId:    item.product_id,
+      productTitle: item.title,
+      variantId:    item.variant_id,
+      variantTitle: item.variant_title,
+      quantity:     item.quantity,
+      properties,
+      preview_img,
+      cloudinaryPublicId,
+      instructions: instructionsProp ?? null,
+      customerId,
+      orderNumber,
+      status: 'Väntar på korrektur',
+      tag:    'Väntar på korrektur',
+      date: new Date().toISOString(),
+      artworkToken,                       // ← KOMMA VIKTIGT
+      // === NYTT: dynamiskt leveransfönster (fram till godkänd korrektur)
+      delivery: {
+        v: 1,
+        chosen: chosenMethod,              // 'standard' | 'express'
+        window: {
+          minDays: merged.minDays,
+          maxDays: merged.maxDays,
+          fromISO: etaFrom.toISOString().slice(0,10),
+          toISO:   etaTo.toISOString().slice(0,10),
+          label:   etaLabel
+        },
+        dynamicBase: {
+          orderProcessedAt: baselineISO,
+          computedAt: new Date().toISOString()
+        },
+        fixed: null
+      }
+    };
+  }));
 
 
 
@@ -1845,34 +1885,80 @@ try {
 
 
 
-// Godkänn korrektur
+EFTER (samma, men med Block C som fryser leveransdatumet)
+// Godkänn korrektur (med frysning av leveransdatum)
 app.post('/proof/approve', async (req, res) => {
   const { orderId, lineItemId } = req.body;
   if (!orderId || !lineItemId) return res.status(400).json({ error: 'orderId och lineItemId krävs' });
 
   try {
+    // 1) Läs orderns projekt-metafält
     const { data } = await axios.get(
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
-const metafield = data.metafields.find(mf => mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY);
+    const metafield = (data.metafields || []).find(mf => mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY);
     if (!metafield) return res.status(404).json({ error: 'Metafält hittades inte' });
 
-let projects = JSON.parse(metafield.value || '[]');
-projects = projects.map(p => {
-  if (p.lineItemId == lineItemId) {
-    return {
-      ...p,
-      status: 'I produktion',
-      // 👇 Promote approved proof → becomes the image shown på ordersidan
-      preview_img: p.previewUrl || p.preview_img || null
-    };
-  }
-  return p;
-});
+    // 2) Uppdatera status + preview_img
+    let projects = [];
+    try { projects = JSON.parse(metafield.value || '[]'); } catch { projects = []; }
 
+    projects = projects.map(p => {
+      if (String(p.lineItemId) === String(lineItemId)) {
+        return {
+          ...p,
+          status: 'I produktion',
+          // 👇 Promote approved proof → bilden som visas på ordersidan
+          preview_img: p.previewUrl || p.preview_img || null
+        };
+      }
+      return p;
+    });
 
+    // 3) === BLOCK C: Frys leveransdatum ===
+    try {
+      const idx = projects.findIndex(p => String(p.lineItemId) === String(lineItemId));
+      if (idx !== -1) {
+        const prj = projects[idx];
+
+        // Bara om dynamiskt fönster finns och inte redan är fryst
+        if (prj && prj.delivery && !prj.delivery.fixed && prj.delivery.window && prj.delivery.dynamicBase) {
+          const base = new Date(prj.delivery.dynamicBase.orderProcessedAt || prj.date || new Date());
+          base.setHours(0, 0, 0, 0);
+
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+
+          // Räkna antal passerade arbetsdagar (mån–fre)
+          let delta = 0;
+          const d = new Date(base);
+          while (d < today) {
+            d.setDate(d.getDate() + 1);
+            const wd = d.getDay(); // 0=sön, 6=lör
+            if (wd !== 0 && wd !== 6) delta++;
+          }
+
+          // Slutdatum = base + (maxDays + delta) arbetsdagar
+          const maxDays = Number(prj.delivery.window.maxDays || 0);
+          const finalDate = pressifyAddBusinessDays(base, maxDays + delta);
+
+          prj.delivery.fixed = {
+            dateISO: finalDate.toISOString().slice(0, 10),       // "YYYY-MM-DD"
+            label:   pressifySvShortRange(finalDate, finalDate),  // t.ex. "fre 10 okt"
+            fixedAt: new Date().toISOString()
+          };
+
+          projects[idx] = prj; // skriv tillbaka mutationen
+        }
+      }
+    } catch (freezeErr) {
+      console.warn('BLOCK C (freeze ETA) misslyckades:', freezeErr?.response?.data || freezeErr.message);
+    }
+    // === SLUT BLOCK C ===
+
+    // 4) PUT: skriv tillbaka hela projektlistan
     await axios.put(
       `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
@@ -3797,12 +3883,16 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
 // Samla fönster (standard/express) från cart-items:
 // - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
 // - Merga över alla rader (min av min, max av max)
+// Samla fönster (standard/express) från cart-items:
+// - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
+// - Merga över alla rader (min av min, max av max)
 async function pressifyComputeWindowsFromCart(items = []) {
-const variants = [...new Set((items || [])
-  .map(it => it?.variant_id ?? pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']))
-  .filter(Boolean)
-  .map(v => toPlainId(v))
-)];
+  const variants = Array.from(new Set(
+    (items || [])
+      .map(it => it?.variant_id ?? pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']))
+      .filter(Boolean)
+      .map(v => toPlainId(v))
+  ));
 
   const products = await pressifyResolveProductIdsFromItems(items);
 
@@ -3836,90 +3926,74 @@ const variants = [...new Set((items || [])
   const vWin = Object.create(null); // variantId -> window JSON
   const v2p  = Object.create(null); // variantId -> productId
 
- for (const n of nodes) {
-  const gid = String(n?.id || '');
-  const parts = gid.split('/');
-  const type = parts[parts.length - 2] || ''; // "Product" | "ProductVariant"
-  const id   = parts[parts.length - 1] || ''; // "12345"
+  for (const n of nodes) {
+    const gid = String(n?.id || '');
+    const parts = gid.split('/');
+    const type = parts[parts.length - 2] || ''; // "Product" | "ProductVariant"
+    const id   = parts[parts.length - 1] || ''; // "12345"
 
-  let cfg = null;
-  try { cfg = n?.metafield?.value ? JSON.parse(n.metafield.value) : null; } catch {}
+    let cfg = null;
+    try { cfg = n?.metafield?.value ? JSON.parse(n.metafield.value) : null; } catch {}
 
-  if (type === 'Product' && id) {
-    pWin[id] = cfg;
-  } else if (type === 'ProductVariant' && id) {
-    vWin[id] = cfg;
-    // ⚠️ Spara kopplingen variant → produkt om GraphQL gav den
-    const pGid = n?.product?.id;
-    if (pGid) {
-      const pid = pGid.split('/').pop();
-      if (pid) v2p[id] = pid;
+    if (type === 'Product' && id) {
+      pWin[id] = cfg;
+    } else if (type === 'ProductVariant' && id) {
+      vWin[id] = cfg;
+      const pGid = n?.product?.id;
+      if (pGid) {
+        const pid = pGid.split('/').pop();
+        if (pid) v2p[id] = pid;
+      }
     }
   }
+
+  const toInt = (v) => {
+    const n = Number(String(v ?? '').replace(',', '.'));
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  };
+  const coerce = (win) => {
+    if (!win || typeof win !== 'object') return null;
+    // stöder minDays/maxDays och alias min/max/min_days/max_days samt "3" (sträng)
+    let min = toInt(win.minDays ?? win.min ?? win.min_days);
+    let max = toInt(win.maxDays ?? win.max ?? win.max_days);
+    if (min == null && typeof win === 'string') min = toInt(win);
+    if (max == null && typeof win === 'string') max = toInt(win);
+    if (min == null || max == null) return null;
+    return { minDays: min, maxDays: max };
+  };
+
+  // Läs variant först, annars fall tillbaka till produkt
+  const windowsPerItem = (items || []).map(it => {
+    const vid = toPlainId(it?.variant_id ?? pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']));
+    const pid = toPlainId(it?.product_id ?? pickIdFromItemProps(it, ['_product_id','product_id','productId']) ?? (vid ? v2p[vid] : null));
+    const vCfg = vid && vWin[vid] ? vWin[vid] : null;
+    const pCfg = pid && pWin[pid] ? pWin[pid] : null;
+    const src  = vCfg || pCfg || null;
+
+    return {
+      std: coerce(src?.standard || src?.std || null),
+      exp: coerce(src?.express  || src?.exp || null)
+    };
+  });
+
+  // Merga över alla rader: min av min, max av max
+  const merge = (arr, key) => {
+    let min = null, max = null;
+    for (const it of arr) {
+      const w = it[key];
+      if (!w) continue;
+      if (min == null || w.minDays < min) min = w.minDays;
+      if (max == null || w.maxDays > max) max = w.maxDays;
+    }
+    return (min != null && max != null) ? { minDays: min, maxDays: max } : null;
+  };
+
+  const std = merge(windowsPerItem, 'std');
+  const exp = merge(windowsPerItem, 'exp');
+
+  return { std, exp, dbg: { variants, products, haveStd: !!std, haveExp: !!exp } };
 }
 
-
-const toInt = (v) => {
-  const n = Number(String(v ?? '').replace(',', '.'));
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
-};
-const coerce = (win) => {
-  if (!win || typeof win !== 'object') return null;
-  // stöder minDays/maxDays och alias min/max/min_days/max_days samt "3" (sträng)
-  let min = toInt(win.minDays ?? win.min ?? win.min_days);
-  let max = toInt(win.maxDays ?? win.max ?? win.max_days);
-  if (min === null && max === null) return null;
-  if (min === null) min = max;
-  if (max === null) max = min;
-  if (min > max) [min, max] = [max, min];
-  return { minDays: min, maxDays: max };
-};
-
-
-  let std = null, exp = null;
-  const dbgUse = [];
-
-  for (const it of (items || [])) {
-  if (it?.requires_shipping === false) continue;
-
-  // Hämta variant_id / product_id från radfält ELLER dolda properties, och normalisera till plain-id
-  const vidRaw = it?.variant_id ?? pickIdFromItemProps(it, ['_variant_id','variant_id','variantId']);
-  const pidRaw = it?.product_id ?? pickIdFromItemProps(it, ['_product_id','product_id','productId']);
-  const vid = vidRaw ? toPlainId(vidRaw) : null;
-
-  // 1) direkt product_id; 2) via v2p från GraphQL; 3) via cache från resolve-funktionen
-  let pid = pidRaw ? toPlainId(pidRaw) : null;
-  if (!pid && vid) {
-    pid = v2p[vid] || __variantToProductCache.get(vid) || null;
-  }
-
-  const vCfg = vid ? vWin[vid] : null;
-  const pCfg = pid ? pWin[pid] : null;
-  const src  = vCfg ? 'variant' : (pCfg ? 'product' : 'none');
-  const cfg  = vCfg || pCfg;
-
-  const cStd = coerce(cfg?.standard);
-  const cExp = coerce(cfg?.express);
-
-  // ⬇️ Mergar oberoende – även om bara standard ELLER express finns
-  if (cStd) std = pressifyMergeWindow(std, cStd);
-  if (cExp) exp = pressifyMergeWindow(exp, cExp);
-
-  if (cStd || cExp) {
-    // Lägg in resolvedPid i debuggen så du ser kopplingen
-    dbgUse.push({
-      line: String(vid || pid || '?'),
-      src,
-      std: cStd || null,
-      exp: cExp || null,
-      resolvedPid: pid || null
-    });
-  }
-}
-
-
-  return { std, exp, dbg: { used: dbgUse, products, variants } };
-}
 
 // Global felhanterare – sist i filen (före app.listen), men vi lägger en TIDIG också:
 app.use((err, req, res, next) => {
