@@ -1881,11 +1881,6 @@ try {
   }
 });
 
-
-
-
-
-EFTER (samma, men med Block C som fryser leveransdatumet)
 // Godkänn korrektur (med frysning av leveransdatum)
 app.post('/proof/approve', async (req, res) => {
   const { orderId, lineItemId } = req.body;
