@@ -1578,6 +1578,11 @@ app.post('/webhooks/order-created', async (req, res) => {
     const fallback = tryckfil ? (temporaryStorage[tryckfil] || {}) : {};
     const preview_img = previewFromProp || fallback.previewUrl || null;
     const cloudinaryPublicId = fallback.cloudinaryPublicId || null;
+const pidProp = pickFirstNonEmpty(m, ['_product_id','product_id','productId']);
+const vidProp = pickFirstNonEmpty(m, ['_variant_id','variant_id','variantId']);
+const resolvedProductId = toPlainId(item.product_id || pidProp);
+const resolvedVariantId = toPlainId(item.variant_id || vidProp);
+
 
     // D) “Pretty” alias först …
     const pretty = buildPrettyProperties(m);
@@ -1591,6 +1596,13 @@ app.post('/webhooks/order-created', async (req, res) => {
     if (tryckfil && !properties.some(p => p.name.toLowerCase() === 'tryckfil')) {
       properties.push({ name: 'Tryckfil', value: tryckfil });
     }
+// Säkerställ att _product_id/_variant_id finns i properties (hjälper återbeställning)
+if (resolvedProductId && !properties.some(p => p.name.toLowerCase() === '_product_id')) {
+  properties.push({ name: '_product_id', value: String(resolvedProductId) });
+}
+if (resolvedVariantId && !properties.some(p => p.name.toLowerCase() === '_variant_id')) {
+  properties.push({ name: '_variant_id', value: String(resolvedVariantId) });
+}
 
     // ⭐ Artwork-token
     const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
@@ -1605,9 +1617,9 @@ app.post('/webhooks/order-created', async (req, res) => {
     return {
       orderId,
       lineItemId:   item.id,
-      productId:    item.product_id,
+productId:    resolvedProductId || null,
       productTitle: item.title,
-      variantId:    item.variant_id,
+  variantId:    resolvedVariantId || null,
       variantTitle: item.variant_title,
       quantity:     item.quantity,
       properties,
