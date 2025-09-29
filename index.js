@@ -1669,17 +1669,52 @@ try {
   mf => mf.namespace === ORDER_META_NAMESPACE && mf.key === ORDER_META_KEY
 );
 
-  // 2) Kombinera ALLTID med enrichedProjects (inte newProjects)
-  let combined = [...enrichedProjects];
+ // === Idempotent upsert per (orderId + lineItemId) för att undvika dubbletter ===
+ function upsertProjects(existingArr, newArr) {
+    const byKey = new Map();
+    for (const p of Array.isArray(existingArr) ? existingArr : []) {
+      const k = `${p?.orderId || ''}:${p?.lineItemId || ''}`;
+      if (!k.includes(':')) continue;
+      byKey.set(k, p);
+    }
+    for (const n of Array.isArray(newArr) ? newArr : []) {
+      const k = `${n?.orderId || ''}:${n?.lineItemId || ''}`;
+      if (!k.includes(':')) continue;
+      const prev = byKey.get(k);
+      if (prev) {
+        byKey.set(k, {
+          ...prev,
+          ...n,
+          // behåll ev. redan skapade värden som inte ska skrivas över vid retry
+          shares: prev.shares ?? n.shares,
+         latestToken: prev.latestToken ?? n.latestToken,
+         latestShareUrl: prev.latestShareUrl ?? n.latestShareUrl,
+          delivery: {
+            ...(n.delivery || {}),
+            fixed: (prev.delivery && prev.delivery.fixed)
+              ? prev.delivery.fixed
+              : (n.delivery ? n.delivery.fixed : null),
+          },
+        });
+      } else {
+        byKey.set(k, n);
+      }
+   }
+   return Array.from(byKey.values());
+  }
+
+  // 2) Kombinera idempotent (befintligt + enrichedProjects)
+  let combined;
   if (currentMetafield && currentMetafield.value) {
     try {
       const existingData = JSON.parse(currentMetafield.value);
-      if (Array.isArray(existingData)) {
-        combined = [...existingData, ...enrichedProjects];
-      }
+     combined = upsertProjects(existingData, enrichedProjects);
     } catch (e) {
       console.warn('Kunde inte tolka gammal JSON:', e);
+      combined = upsertProjects([], enrichedProjects);
     }
+  } else {
+    combined = upsertProjects([], enrichedProjects);
   }
 
   // 3) Spara combined
@@ -1692,7 +1727,7 @@ try {
   } else {
     await axios.post(
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
-      { metafield: { namespace: 'order-created', key: 'order-created', type: 'json', value: JSON.stringify(combined) } },
+     { metafield: { namespace: ORDER_META_NAMESPACE, key: ORDER_META_KEY, type: 'json', value: JSON.stringify(combined) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
   }
@@ -2753,7 +2788,9 @@ const out = edges.map(e => ({
 }));
 // ---- NYTT: seeda Redis med färska order-sammanfattningar ----
 try {
-  if (WRITE_ORDERS_TO_REDIS) {
+   if (WRITE_ORDERS_TO_REDIS) {
+    const cidRaw = String(loggedInCustomerId || '');
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
     await seedOrdersToRedis(cidNum, out);
   }
 } catch {}
@@ -3841,50 +3878,72 @@ const expTo   = pressifyAddBusinessDays(now, useExp.maxDays);
 });
 
 
-// ====== REGISTER (engångs) – skapar/uppdaterar CarrierService i butiken
-// Anropa:  POST https://DIN-RENDER-DOMÄN/carrier/pressify/register?token=SHOPIFY_WEBHOOK_SECRET
+// ===== REGISTER (engångs) – skapar/uppdaterar CarrierService i butiken
+// Anropa:  POST https://DIN-HOST/carrier/pressify/register?token=SHOPIFY_WEBHOOK_SECRET
 app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
   try {
+    // 1) Enkel auth så bara du kan trigga registret
     if (!req.query || req.query.token !== SHOPIFY_WEBHOOK_SECRET) {
       return res.status(403).json({ error: 'Forbidden' });
     }
+
+    // 2) Bygg callback URL till din rate-endpoint
     const callbackUrl = `${(HOST || '').replace(/\/$/, '')}${PRESSIFY_CARRIER_ROUTE}`;
-    const headers = { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' };
+    const headers = {
+      'X-Shopify-Access-Token': ACCESS_TOKEN,
+      'Content-Type': 'application/json'
+    };
+
+    // 3) Hämta ev. befintlig CarrierService
     const listUrl = `https://${SHOP}/admin/api/2025-07/carrier_services.json`;
+    const { data: listData } = await axios.get(listUrl, { headers });
+    const existing = (listData?.carrier_services || []).find(cs => cs.name === PRESSIFY_CARRIER_NAME);
 
-    // Finns redan?
-    const existing = await axios.get(listUrl, { headers })
-      .then(r => r.data?.carrier_services || [])
-      .catch(() => []);
-    const current = existing.find(svc =>
-      (svc.callback_url || '').replace(/\/$/, '') === callbackUrl.replace(/\/$/, '')
-      || svc.name === PRESSIFY_CARRIER_NAME
-    );
+    // 4) Payload – håll den minimal och stabil
+    const payload = {
+      carrier_service: {
+        name: PRESSIFY_CARRIER_NAME,
+        callback_url: callbackUrl,
+        active: true,
+        service_discovery: true,     // låt Shopify fråga oss dynamiskt
+        carrier_service_type: 'api'  // viktigt för externa carriers
+      }
+    };
 
-    if (current) {
-      const updUrl = `https://${SHOP}/admin/api/2025-07/carrier_services/${current.id}.json`;
-      await axios.put(updUrl, {
-        carrier_service: { name: PRESSIFY_CARRIER_NAME, callback_url: callbackUrl, service_discovery: true }
-      }, { headers });
+    // 5) Skapa eller uppdatera
+    if (existing) {
+      const { data: updData } = await axios.put(
+        `https://${SHOP}/admin/api/2025-07/carrier_services/${existing.id}.json`,
+        payload,
+        { headers }
+      );
+      return res.json({
+        ok: true,
+        mode: 'updated',
+        id: updData?.carrier_service?.id || existing.id,
+        callback_url: updData?.carrier_service?.callback_url || callbackUrl
+      });
     } else {
-      await axios.post(listUrl, {
-        carrier_service: { name: PRESSIFY_CARRIER_NAME, callback_url: callbackUrl, service_discovery: true }
-      }, { headers });
+      const { data: crtData } = await axios.post(
+        `https://${SHOP}/admin/api/2025-07/carrier_services.json`,
+        payload,
+        { headers }
+      );
+      return res.json({
+        ok: true,
+        mode: 'created',
+        id: crtData?.carrier_service?.id,
+        callback_url: crtData?.carrier_service?.callback_url || callbackUrl
+      });
     }
-
-    return res.json({ ok: true, name: PRESSIFY_CARRIER_NAME, callback_url: callbackUrl });
-  } catch (e) {
-    console.error('pressify carrier register error:', e?.response?.data || e.message);
-    return res.status(500).json({ error: 'register failed' });
+  } catch (err) {
+    console.error('PRESSIFY_REGISTER_ROUTE error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
-// ===== /Pressify Carrier Service =====
-// Samla fönster (standard/express) från cart-items:
-// - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
-// - Merga över alla rader (min av min, max av max)
-// Samla fönster (standard/express) från cart-items:
-// - Företräde: VARIANT.custom.shipping > PRODUCT.custom.shipping
-// - Merga över alla rader (min av min, max av max)
+
+
+
 async function pressifyComputeWindowsFromCart(items = []) {
   const variants = Array.from(new Set(
     (items || [])
