@@ -28,14 +28,13 @@
       "id": "variant_cards",
       "label": "Material",
       "type": "cards",
-      "maxVisible": 3,
+      "maxVisible": 4,
       "showMoreLabel": "Visa fler",
       "default": "1",
       "choices": [
         { "value": "1", "title": "Vinyl", "text": "Slitstarkt plastmaterial som tål väta och sol.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291823/jpeg-optimizer_salom_9321_jxkc45.png" },
         { "value": "1.2", "title": "Transparent", "text": "Genomskinligt material där bara trycket syns.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291824/jpeg-optimizer_transparent_321_eloboe.png" },
         { "value": "0.99", "title": "Kraftpapper", "text": "Obelagt papper med naturlig brun ton.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291829/jpeg-optimizer_kraftpaper_sn8ges.png" },
-        { "value": "1.175", "title": "Metallic", "text": "Blank yta i silverliknande metallisk effekt.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756292310/jpeg-optimizer_metallic_lkjor4.png" },
         { "value": "1.335", "title": "Holografisk", "text": "Material som reflekterar ljus i en regnbågseffekt.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756292310/jpeg-optimizer_holographic_nsadwk.png" }
       ],
       "export": true
