@@ -2650,16 +2650,36 @@ function isDeliveredOrderShape(o) {
 
 app.get('/proxy/orders-meta', async (req, res) => {
   try {
-    // 1) Säkerställ att anropet kommer från Shopify App Proxy
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    const loggedInCustomerId = req.query.logged_in_customer_id; // sätts av Shopify
-    if (!loggedInCustomerId) return res.status(204).end(); // ej inloggad kund
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) return res.status(204).end();
 
     const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
     const scope = String(req.query.scope || '').toLowerCase();
+
+    // 🔹 NYTT: ultrasnabb Redis-snapshot (<=100 ms)
+    try {
+      const cidRaw = String(loggedInCustomerId || '');
+      const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+
+      const preferMs = (String(req.query.snapshot || '') === '1') ? 300 : 100; // valfritt: snapshot=1 tillåter lite längre väntan
+      const snap = await Promise.race([
+        tryReadOrdersFromRedis(cidNum, limit),
+        new Promise(r => setTimeout(() => r(null), preferMs)),
+      ]);
+
+      if (Array.isArray(snap) && snap.length) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('x-source', 'redis-snapshot');
+        return res.json({ orders: snap });
+      }
+    } catch (_) {
+    }
+
+
 
     // ===== NYTT: ADMIN-LÄGE (scope=all) – hämta ALLA ordrar och filtrera bort levererade =====
 if (scope === 'all') {
