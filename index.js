@@ -56,12 +56,18 @@ const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
 function adminHeaders(extra = {}) {
-  return { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json', ...extra };
+  return { 'X-Shopify-Access-Token': ADMIN_TOKEN, ...extra };
 }
-async function adminGet(url, cfg={})   { return axios.get(url,   { ...cfg, headers: adminHeaders(cfg.headers) }); }
-async function adminPost(url, data, cfg={}) { return axios.post(url, data, { ...cfg, headers: adminHeaders(cfg.headers) }); }
-async function adminPut(url, data, cfg={})  { return axios.put(url, data,  { ...cfg, headers: adminHeaders(cfg.headers) }); }
-async function adminDel(url, cfg={})   { return axios.delete(url, { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminGet(url, cfg = {}) {
+  return axios.get(url, { ...cfg, headers: adminHeaders(cfg.headers) });
+}
+async function adminPost(url, data, cfg = {}) {
+  return axios.post(url, data, { ...cfg, headers: adminHeaders(cfg.headers) });
+}
+async function adminPut(url, data, cfg = {}) {
+  return axios.put(url, data, { ...cfg, headers: adminHeaders(cfg.headers) });
+}
+
 
 /* ===== REFERLINK CONFIG ===== */
 const REFER_NS  = 'referlink';
