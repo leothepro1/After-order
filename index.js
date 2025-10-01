@@ -1,4 +1,4 @@
-// FIL: index.js
+/ FIL: index.js
 
 const express = require('express');
 const cors = require('cors');
@@ -56,18 +56,12 @@ const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
 function adminHeaders(extra = {}) {
-  return { 'X-Shopify-Access-Token': ADMIN_TOKEN, ...extra };
+  return { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json', ...extra };
 }
-async function adminGet(url, cfg = {}) {
-  return axios.get(url, { ...cfg, headers: adminHeaders(cfg.headers) });
-}
-async function adminPost(url, data, cfg = {}) {
-  return axios.post(url, data, { ...cfg, headers: adminHeaders(cfg.headers) });
-}
-async function adminPut(url, data, cfg = {}) {
-  return axios.put(url, data, { ...cfg, headers: adminHeaders(cfg.headers) });
-}
-
+async function adminGet(url, cfg={})   { return axios.get(url,   { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminPost(url, data, cfg={}) { return axios.post(url, data, { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminPut(url, data, cfg={})  { return axios.put(url, data,  { ...cfg, headers: adminHeaders(cfg.headers) }); }
+async function adminDel(url, cfg={})   { return axios.delete(url, { ...cfg, headers: adminHeaders(cfg.headers) }); }
 
 /* ===== REFERLINK CONFIG ===== */
 const REFER_NS  = 'referlink';
@@ -2656,36 +2650,16 @@ function isDeliveredOrderShape(o) {
 
 app.get('/proxy/orders-meta', async (req, res) => {
   try {
+    // 1) Säkerställ att anropet kommer från Shopify App Proxy
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) return res.status(204).end();
+    const loggedInCustomerId = req.query.logged_in_customer_id; // sätts av Shopify
+    if (!loggedInCustomerId) return res.status(204).end(); // ej inloggad kund
 
     const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
     const scope = String(req.query.scope || '').toLowerCase();
-
-    // 🔹 NYTT: ultrasnabb Redis-snapshot (<=100 ms)
-    try {
-      const cidRaw = String(loggedInCustomerId || '');
-      const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
-
-      const preferMs = (String(req.query.snapshot || '') === '1') ? 300 : 100; // valfritt: snapshot=1 tillåter lite längre väntan
-      const snap = await Promise.race([
-        tryReadOrdersFromRedis(cidNum, limit),
-        new Promise(r => setTimeout(() => r(null), preferMs)),
-      ]);
-
-      if (Array.isArray(snap) && snap.length) {
-        res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('x-source', 'redis-snapshot');
-        return res.json({ orders: snap });
-      }
-    } catch (_) {
-    }
-
-
 
     // ===== NYTT: ADMIN-LÄGE (scope=all) – hämta ALLA ordrar och filtrera bort levererade =====
 if (scope === 'all') {
