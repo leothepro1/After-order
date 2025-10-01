@@ -1935,16 +1935,24 @@ app.post('/proof/approve', async (req, res) => {
     let projects = [];
     try { projects = JSON.parse(metafield.value || '[]'); } catch { projects = []; }
 
-    projects = projects.map(p => {
-      if (String(p.lineItemId) === String(lineItemId)) {
-        return {
-          ...p,
-          status: 'I produktion',
-          preview_img: p.previewUrl || p.preview_img || null
-        };
-      }
-      return p;
-    });
+ projects = projects.map(p => {
+  if (String(p.lineItemId) !== String(lineItemId)) return p;
+
+  // Samma logik som innan: sätt status + preview_img till godkända bilden
+  const newImg = p.previewUrl || p.preview_img || null;
+  const next = { ...p, status: 'I produktion', preview_img: newImg };
+
+  // BONUS (minimal): om property "_preview_img" finns → uppdatera dess value
+  if (newImg && Array.isArray(p.properties)) {
+    next.properties = p.properties.map(prop =>
+      (prop && prop.name === '_preview_img')
+        ? { ...prop, value: newImg }
+        : prop
+    );
+  }
+
+  return next;
+});
 
    // 3) === BLOCK C: Frys leveransdatum (behåll MIN–MAX) ===
 try {
