@@ -57,6 +57,7 @@
         { "value": 5000, "label": "5 000" }
       ],
       "customChoices": [
+                { "value": 200,  "label": "300" },
         { "value": 300,  "label": "300" },
         { "value": 500,  "label": "500" },
         { "value": 600,  "label": "600" },
