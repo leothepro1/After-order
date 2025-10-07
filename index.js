@@ -46,6 +46,12 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
 // 🔽 Nya env för Partner-app & Proxy
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+// --- Postmark config (env) ---
+const POSTMARK_SERVER_TOKEN = process.env.POSTMARK_SERVER_TOKEN || process.env.POSTMARK_TOKEN || '';
+const POSTMARK_FROM = process.env.POSTMARK_FROM || process.env.POSTMARK_SENDER || 'info@pressify.se';
+const POSTMARK_STREAM = process.env.POSTMARK_STREAM || 'outbound';
+const POSTMARK_TEMPLATE_ALIAS_PROOF_UPLOADED =
+  process.env.POSTMARK_TEMPLATE_ALIAS_PROOF_UPLOADED || process.env.POSTMARK_TEMPLATE_PROOF_READY || 'proof-uploaded';
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET; // används för App Proxy + OAuth-verifiering
 const SCOPES = process.env.SCOPES || 'read_orders,read_customers,write_customers,read_metafields,write_app_proxy';
 const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(/\/$/, '');
@@ -208,6 +214,32 @@ async function getVariantTaxableMap(variantIds = []) {
   return out;
 }
 
+// --- Helper: skicka e-post via Postmark Template (axios) ---
+async function postmarkSendEmail({ to, alias, model }) {
+  if (!POSTMARK_SERVER_TOKEN || !to || !alias) return;
+  try {
+    await axios.post(
+      'https://api.postmarkapp.com/email/withTemplate',
+      {
+        From: POSTMARK_FROM,
+        To: to,
+        TemplateAlias: alias,
+        TemplateModel: model,
+        MessageStream: POSTMARK_STREAM
+      },
+      {
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'X-Postmark-Server-Token': POSTMARK_SERVER_TOKEN
+        },
+        timeout: 5000
+      }
+    );
+  } catch (e) {
+    console.warn('[postmarkSendEmail]', e?.response?.data || e.message);
+  }
+}
 
 
 /* ====== SLUT GLOBALA TAXABLE-HELPERS ====== */
@@ -1908,6 +1940,58 @@ try {
     // 9) Svara med token + URL
     const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
     const backendShare = `${HOST}/proof/share/${encodeURIComponent(token)}`;
+    try {
+  // Vänta lite grann så att metafältsskrivningen hinner persisteras på Shopify
+  setTimeout(async () => {
+    try {
+      // 1) Hämta orderns email från Shopify (standardfält)
+      const { data: oRes } = await axios.get(
+        `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+      const o = oRes?.order || {};
+      const toEmail = o.email || o.customer?.email || null;
+      if (!toEmail) return;
+
+      // 2) Hitta den uppdaterade raden i det vi precis skrev (rotated)
+      //    (vi använder rotated eftersom den innehåller latestShareUrl m.m.)
+      let proj = null;
+      try {
+        proj = (rotated || []).find(p => String(p.lineItemId) === String(lineItemId)) || null;
+      } catch {}
+
+      // 3) Bygg TemplateModel exakt som mallen förväntar sig
+      const item_values = Array.isArray(proj?.properties)
+        ? proj.properties
+            .filter(p => p && typeof p.name === 'string' && !p.name.startsWith('_'))
+            .map(p => p.value)
+            .filter(Boolean)
+        : [];
+
+      const model = {
+        order_name: o.name || proj?.orderNumber || `#${orderId}`,
+        item_title: proj?.productTitle || '',
+        item_preview_url: proj?.previewUrl || proj?.preview_img || '',
+        item_values,
+        item_instructions: proj?.instructions || '',
+        // Länka till just den specifika token-URL vi precis genererade
+        links_proof: proj?.latestShareUrl || url,
+        // valfritt (visas bara om din mall har {{#brand_logo_url}})
+        brand_logo_url: 'https://res.cloudinary.com/dmgmoisae/image/upload/f_auto,q_auto/v1759407646/Pressify_logotyp_mn81jp.png'
+      };
+
+      await postmarkSendEmail({
+        to: toEmail,
+        alias: POSTMARK_TEMPLATE_ALIAS_PROOF_UPLOADED,
+        model
+      });
+    } catch (e) {
+      console.warn('[proof.upload email] send failed:', e?.response?.data || e.message);
+    }
+  }, 900); // ~0.9 s buffert; justera vid behov
+} catch (e) {
+  console.warn('[proof.upload email] schedule failed:', e?.message || e);
+}
     return res.json({ ok: true, token, url, backendShare });
 
   } catch (err) {
