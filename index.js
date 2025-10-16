@@ -994,6 +994,40 @@ app.get('/apps/artwork-token',          forward('/public/printed/artwork-token')
 app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-register'));
 app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
 app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
+// === Pressify Stock: alias under befintliga App Proxy-prefix ===
+// Kräver att STOCK_PROXY_BASE är satt, t.ex. https://pressify-stock-proxy.onrender.com
+function mountStockAlias(prefix) {
+  app.use(`/apps/${prefix}/stock`, async (req, res) => {
+    try {
+      const suffix = req.originalUrl.replace(new RegExp(`^/apps/${prefix}/stock`), '') || '/';
+      const targetUrl = new URL(suffix, process.env.STOCK_PROXY_BASE).toString();
+
+      const r = await axios({
+        method: req.method,
+        url: targetUrl,
+        headers: { 'content-type': req.headers['content-type'] || undefined },
+        data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+        responseType: 'stream',
+        validateStatus: () => true
+      });
+
+      res.status(r.status);
+      Object.entries(r.headers || {}).forEach(([k, v]) => {
+        if (k.toLowerCase() === 'transfer-encoding') return;
+        res.setHeader(k, v);
+      });
+      r.data.pipe(res);
+    } catch (e) {
+      console.error('[pressify-stock alias pass-through]', e?.response?.data || e.message);
+      res.status(502).json({ error: 'stock_proxy_bad_gateway' });
+    }
+  });
+}
+
+// Montera alias för prefix du redan använder i app-proxy:
+mountStockAlias('printed');   // /apps/printed/stock/...
+mountStockAlias('pressify');  // /apps/pressify/stock/...
+// (Behåll båda tills du vet exakt vilket prefix temat ska använda)
 
 
 
