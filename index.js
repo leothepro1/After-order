@@ -724,11 +724,6 @@ app.use(bodyParser.json({ verify: (req, res, buf) => {
 }}));
 app.use(bodyParser.urlencoded({ extended: true }));
 
-app.use(bodyParser.json({ verify: (req, res, buf) => {
-  req.rawBody = buf;
-}}));
-app.use(bodyParser.urlencoded({ extended: true }));
-
 // === Pressify Stock: pass-through till extern proxy (påverkar inget annat) ===
 const STOCK_PROXY_BASE = process.env.STOCK_PROXY_BASE; // ex: https://pressify-stock-proxy.onrender.com
 
@@ -760,6 +755,78 @@ app.use('/apps/pressify-stock', async (req, res) => {
   }
 });
 // === END Pressify Stock ===
+// === Pressify Stock: DITT faktiska App Proxy-prefix (/apps/orders-meta/stock) ===
+// Diagnos: visa att vi träffar huvudappen på /apps/orders-meta/stock/healthz
+app.get('/apps/orders-meta/stock/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', path: '/apps', ts: new Date().toISOString() });
+});
+
+// Pass-through till nya stock-proxyn
+app.use('/apps/orders-meta/stock', async (req, res) => {
+  try {
+    const base = process.env.STOCK_PROXY_BASE; // t.ex. https://pressify-stock-proxy.onrender.com
+    if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
+
+    const suffix = req.originalUrl.replace(/^\/apps\/orders-meta\/stock/, '') || '/';
+    const targetUrl = new URL(suffix, base).toString();
+
+    const r = await axios({
+      method: req.method,
+      url: targetUrl,
+      headers: { 'content-type': req.headers['content-type'] || undefined },
+      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      responseType: 'stream',
+      validateStatus: () => true
+    });
+
+    res.status(r.status);
+    Object.entries(r.headers || {}).forEach(([k, v]) => {
+      if (k.toLowerCase() === 'transfer-encoding') return;
+      res.setHeader(k, v);
+    });
+    r.data.pipe(res);
+  } catch (e) {
+    console.error('[stock pass-through /apps/orders-meta/stock]', e?.response?.data || e.message);
+    res.status(502).json({ error: 'stock_proxy_bad_gateway' });
+  }
+});
+// === Pressify Stock: spegling under /proxy/orders-meta/stock (Shopify rewrites hit) ===
+// Diagnos: bekräfta att /proxy/... når huvudappen
+app.get('/proxy/orders-meta/stock/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', path: '/proxy', ts: new Date().toISOString() });
+});
+
+// Pass-through även för /proxy/orders-meta/stock/*
+app.use('/proxy/orders-meta/stock', async (req, res) => {
+  try {
+    const base = process.env.STOCK_PROXY_BASE;
+    if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
+
+    const suffix = req.originalUrl.replace(/^\/proxy\/orders-meta\/stock/, '') || '/';
+    const targetUrl = new URL(suffix, base).toString();
+
+    const r = await axios({
+      method: req.method,
+      url: targetUrl,
+      headers: { 'content-type': req.headers['content-type'] || undefined },
+      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      responseType: 'stream',
+      validateStatus: () => true
+    });
+
+    res.status(r.status);
+    Object.entries(r.headers || {}).forEach(([k, v]) => {
+      if (k.toLowerCase() === 'transfer-encoding') return;
+      res.setHeader(k, v);
+    });
+    r.data.pipe(res);
+  } catch (e) {
+    console.error('[stock pass-through /proxy/orders-meta/stock]', e?.response?.data || e.message);
+    res.status(502).json({ error: 'stock_proxy_bad_gateway' });
+  }
+});
 
 /* ====== NYTT: config-hjälpare ====== */
 function readJson(filePath) {
