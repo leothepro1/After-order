@@ -762,22 +762,41 @@ app.get('/apps/orders-meta/stock/healthz', (_req, res) => {
   return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', path: '/apps', ts: new Date().toISOString() });
 });
 
-// Pass-through till nya stock-proxyn
+// Pass-through till nya stock-proxyn (buffra JSON för GET → JSON)
 app.use('/apps/orders-meta/stock', async (req, res) => {
   try {
     const base = process.env.STOCK_PROXY_BASE; // t.ex. https://pressify-stock-proxy.onrender.com
     if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
 
-    const suffix = req.originalUrl.replace(/^\/apps\/orders-meta\/stock/, '') || '/';
+    const suffix   = req.originalUrl.replace(/^\/apps\/orders-meta\/stock/, '') || '/';
     const targetUrl = new URL(suffix, base).toString();
 
+    const method = req.method.toUpperCase();
+    const wantsJson = String(req.headers['accept'] || '').includes('application/json');
+
+    // Om det är ett GET-anrop där vi vill ha JSON (t.ex. /search), buffra och returnera som JSON.
+    if (method === 'GET' && wantsJson) {
+      const r = await axios.get(targetUrl, { timeout: 15000, responseType: 'json', validateStatus: () => true });
+      // Vid 200–299: skicka rakt som JSON. Annars skicka status + payload som text/JSON.
+      res.status(r.status);
+      if (typeof r.data === 'object') {
+        return res.json(r.data);
+      } else {
+        // Fallback om backend svarar text: försök parse:a, annars text.
+        try { return res.json(JSON.parse(r.data)); }
+        catch { return res.type('application/json').send(r.data); }
+      }
+    }
+
+    // Övriga (POST, PUT, PATCH, binär download etc.) → kör fortsatt stream-pass-through
     const r = await axios({
-      method: req.method,
+      method,
       url: targetUrl,
       headers: { 'content-type': req.headers['content-type'] || undefined },
-      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      data: ['POST','PUT','PATCH'].includes(method) ? req.body : undefined,
       responseType: 'stream',
-      validateStatus: () => true
+      validateStatus: () => true,
+      timeout: 30000
     });
 
     res.status(r.status);
@@ -791,6 +810,7 @@ app.use('/apps/orders-meta/stock', async (req, res) => {
     res.status(502).json({ error: 'stock_proxy_bad_gateway' });
   }
 });
+
 // === Pressify Stock: spegling under /proxy/orders-meta/stock (Shopify rewrites hit) ===
 // Diagnos: bekräfta att /proxy/... når huvudappen
 app.get('/proxy/orders-meta/stock/healthz', (_req, res) => {
@@ -798,22 +818,37 @@ app.get('/proxy/orders-meta/stock/healthz', (_req, res) => {
   return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', path: '/proxy', ts: new Date().toISOString() });
 });
 
-// Pass-through även för /proxy/orders-meta/stock/*
+// Pass-through även för /proxy/orders-meta/stock/* (buffra JSON för GET → JSON)
 app.use('/proxy/orders-meta/stock', async (req, res) => {
   try {
     const base = process.env.STOCK_PROXY_BASE;
     if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
 
-    const suffix = req.originalUrl.replace(/^\/proxy\/orders-meta\/stock/, '') || '/';
+    const suffix    = req.originalUrl.replace(/^\/proxy\/orders-meta\/stock/, '') || '/';
     const targetUrl = new URL(suffix, base).toString();
 
+    const method = req.method.toUpperCase();
+    const wantsJson = String(req.headers['accept'] || '').includes('application/json');
+
+    if (method === 'GET' && wantsJson) {
+      const r = await axios.get(targetUrl, { timeout: 15000, responseType: 'json', validateStatus: () => true });
+      res.status(r.status);
+      if (typeof r.data === 'object') {
+        return res.json(r.data);
+      } else {
+        try { return res.json(JSON.parse(r.data)); }
+        catch { return res.type('application/json').send(r.data); }
+      }
+    }
+
     const r = await axios({
-      method: req.method,
+      method,
       url: targetUrl,
       headers: { 'content-type': req.headers['content-type'] || undefined },
-      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      data: ['POST','PUT','PATCH'].includes(method) ? req.body : undefined,
       responseType: 'stream',
-      validateStatus: () => true
+      validateStatus: () => true,
+      timeout: 30000
     });
 
     res.status(r.status);
@@ -827,6 +862,7 @@ app.use('/proxy/orders-meta/stock', async (req, res) => {
     res.status(502).json({ error: 'stock_proxy_bad_gateway' });
   }
 });
+
 
 /* ====== NYTT: config-hjälpare ====== */
 function readJson(filePath) {
