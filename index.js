@@ -994,40 +994,45 @@ app.get('/apps/artwork-token',          forward('/public/printed/artwork-token')
 app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-register'));
 app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
 app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
-// === Pressify Stock: alias under befintliga App Proxy-prefix ===
-// Kräver att STOCK_PROXY_BASE är satt, t.ex. https://pressify-stock-proxy.onrender.com
-function mountStockAlias(prefix) {
-  app.use(`/apps/${prefix}/stock`, async (req, res) => {
-    try {
-      const suffix = req.originalUrl.replace(new RegExp(`^/apps/${prefix}/stock`), '') || '/';
-      const targetUrl = new URL(suffix, process.env.STOCK_PROXY_BASE).toString();
+// === Pressify Stock: alias under DITT faktiska App Proxy-prefix (/apps/orders-meta) ===
+// Kräver env: STOCK_PROXY_BASE = https://pressify-stock-proxy.onrender.com
 
-      const r = await axios({
-        method: req.method,
-        url: targetUrl,
-        headers: { 'content-type': req.headers['content-type'] || undefined },
-        data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
-        responseType: 'stream',
-        validateStatus: () => true
-      });
+// (Valfri men bra för diagnos – bekräftar att vi träffar huvudappen)
+app.get('/apps/orders-meta/stock/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', ts: new Date().toISOString() });
+});
 
-      res.status(r.status);
-      Object.entries(r.headers || {}).forEach(([k, v]) => {
-        if (k.toLowerCase() === 'transfer-encoding') return;
-        res.setHeader(k, v);
-      });
-      r.data.pipe(res);
-    } catch (e) {
-      console.error('[pressify-stock alias pass-through]', e?.response?.data || e.message);
-      res.status(502).json({ error: 'stock_proxy_bad_gateway' });
-    }
-  });
-}
+// Själva pass-throughen till din nya stock-proxy
+app.use('/apps/orders-meta/stock', async (req, res) => {
+  try {
+    const base = process.env.STOCK_PROXY_BASE; // ex: https://pressify-stock-proxy.onrender.com
+    if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
 
-// Montera alias för prefix du redan använder i app-proxy:
-mountStockAlias('printed');   // /apps/printed/stock/...
-mountStockAlias('pressify');  // /apps/pressify/stock/...
-// (Behåll båda tills du vet exakt vilket prefix temat ska använda)
+    const suffix = req.originalUrl.replace(/^\/apps\/orders-meta\/stock/, '') || '/';
+    const targetUrl = new URL(suffix, base).toString();
+
+    const r = await axios({
+      method: req.method,
+      url: targetUrl,
+      headers: { 'content-type': req.headers['content-type'] || undefined },
+      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      responseType: 'stream',
+      validateStatus: () => true
+    });
+
+    res.status(r.status);
+    Object.entries(r.headers || {}).forEach(([k, v]) => {
+      if (k.toLowerCase() === 'transfer-encoding') return;
+      res.setHeader(k, v);
+    });
+    r.data.pipe(res);
+  } catch (e) {
+    console.error('[stock pass-through /apps/orders-meta/stock]', e?.response?.data || e.message);
+    res.status(502).json({ error: 'stock_proxy_bad_gateway' });
+  }
+});
+
 
 
 
