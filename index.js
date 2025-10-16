@@ -724,6 +724,43 @@ app.use(bodyParser.json({ verify: (req, res, buf) => {
 }}));
 app.use(bodyParser.urlencoded({ extended: true }));
 
+app.use(bodyParser.json({ verify: (req, res, buf) => {
+  req.rawBody = buf;
+}}));
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// === Pressify Stock: pass-through till extern proxy (påverkar inget annat) ===
+const STOCK_PROXY_BASE = process.env.STOCK_PROXY_BASE; // ex: https://pressify-stock-proxy.onrender.com
+
+app.use('/apps/pressify-stock', async (req, res) => {
+  try {
+    const suffix = req.originalUrl.replace(/^\/apps\/pressify-stock/, '') || '/';
+    const targetUrl = new URL(suffix, STOCK_PROXY_BASE).toString();
+
+    const r = await axios({
+      method: req.method,
+      url: targetUrl,
+      headers: {
+        'content-type': req.headers['content-type'] || undefined
+      },
+      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      responseType: 'stream',
+      validateStatus: () => true
+    });
+
+    res.status(r.status);
+    Object.entries(r.headers || {}).forEach(([k, v]) => {
+      if (k.toLowerCase() === 'transfer-encoding') return;
+      res.setHeader(k, v);
+    });
+    r.data.pipe(res);
+  } catch (e) {
+    console.error('[pressify-stock pass-through]', e?.response?.data || e.message);
+    res.status(502).json({ error: 'stock_proxy_bad_gateway' });
+  }
+});
+// === END Pressify Stock ===
+
 /* ====== NYTT: config-hjälpare ====== */
 function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
