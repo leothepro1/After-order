@@ -420,87 +420,6 @@ async function redisCmd(commandArray) {
 
 // ===== PASS-BY-REFERENCE TOKEN REGISTRY (Upstash Redis) =====
 const ARTWORK_TOKEN_TTL_SECONDS = parseInt(process.env.ARTWORK_TOKEN_TTL_SECONDS || '2592000', 10); // 30 dagar
-// === MOCKUP TOKEN REGISTERY (REDIS, no order linkage) =================
-function mockupTokenKey(hash) {
-  return `mockuptoken:${hash}:v1`;
-}
-function mockupHeroKey(hash, handle) {
-  return `mockuphero:${hash}:${String(handle || '').toLowerCase()}:v1`;
-}
-async function registerMockupTokenInRedis(token, payload /* { preview?, tryckfil? } */) {
-  try {
-    if (!token) return false;
-    const h = tokenHash(token);
-    const key = mockupTokenKey(h);
-
-    const flat = [
-      'token_hash', h,
-      'kind', 'mockup',
-      'iat', String(payload?.iat || Date.now()),
-      ...(payload?.preview ? ['preview', String(payload.preview)] : []),
-      ...(payload?.tryckfil ? ['tryckfil', String(payload.tryckfil)] : [])
-    ];
-
-    await redisCmd(['HSET', key, ...flat]);
-    const ttl = Number(ARTWORK_TOKEN_TTL_SECONDS);
-    if (Number.isFinite(ttl) && ttl > 0) {
-      await redisCmd(['EXPIRE', key, String(ttl)]);
-    }
-    return true;
-  } catch (e) {
-    console.warn('registerMockupTokenInRedis failed:', e?.message || e);
-    return false;
-  }
-}
-async function resolveMockupFromRedis(rawToken) {
-  try {
-    const h = tokenHash(rawToken);
-    const key = mockupTokenKey(h);
-    const r = await redisCmd(['HGETALL', key]);
-    const kv = r?.result || r;
-    if (!kv || typeof kv !== 'object') return null;
-    if (kv.kind && kv.kind !== 'mockup') return null;
-    return {
-      kind: 'mockup',
-      iat: Number(kv.iat || 0) || Date.now(),
-      preview: kv.preview || null,
-      tryckfil: kv.tryckfil || ''
-    };
-  } catch { return null; }
-}
-async function hsetMockupHero(rawToken, handle, heroUrl, meta = {}) {
-  try {
-    if (!rawToken || !handle || !heroUrl) return false;
-    const h = tokenHash(rawToken);
-    const key = mockupHeroKey(h, handle);
-    const flat = [
-      'url', String(heroUrl),
-      'handle', String(handle),
-      ...(meta.filename ? ['filename', String(meta.filename)] : []),
-      ...(meta.preview ? ['preview', String(meta.preview)] : []),
-      'updatedAt', String(Date.now())
-    ];
-    await redisCmd(['HSET', key, ...flat]);
-    const ttl = Number(ARTWORK_TOKEN_TTL_SECONDS);
-    if (Number.isFinite(ttl) && ttl > 0) {
-      await redisCmd(['EXPIRE', key, String(ttl)]);
-    }
-    return true;
-  } catch (e) {
-    console.warn('hsetMockupHero failed:', e?.message || e);
-    return false;
-  }
-}
-async function hgetMockupHero(rawToken, handle) {
-  try {
-    const h = tokenHash(rawToken);
-    const key = mockupHeroKey(h, handle);
-    const r = await redisCmd(['HGETALL', key]);
-    const kv = r?.result || r;
-    if (!kv || typeof kv !== 'object' || !kv.url) return null;
-    return kv;
-  } catch { return null; }
-}
 
 function tokenHash(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
@@ -945,6 +864,7 @@ app.use('/proxy/orders-meta/stock', async (req, res) => {
 });
 
 
+/* ====== NYTT: config-hjälpare ====== */
 function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
@@ -961,15 +881,6 @@ function sendWithCache(res, cfg, versionHint) {
   res.json(cfg);
 }
 /* ====== SLUT config-hjälpare ====== */
-// Simple forward helper for app-proxy aliases
-function forward(targetPath) {
-  return (req, _res, next) => {
-    const q = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    req.url = targetPath + q;
-    next();
-  };
-}
-
 // === ARTWORK TOKEN RESOLVER (PUBLIC VIA APP PROXY) ===
 app.get('/proxy/printed/artwork-token', async (req, res) => {
   try {
@@ -977,7 +888,6 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
-
 
     // Stötta flera query-nycklar
     const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
@@ -1028,19 +938,13 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
 // - Signerad token (p64url.<sig>): verifieras → hämtar projekt + aktiv share-snapshot.
 // - Legacy (t.ex. "071ea4..." eller ett gammalt filnamn): söker i orderns projekt om möjligt.
 //   Obs: legacy utan orderId blir "best effort": vi försöker hitta i senaste snapshoten/Redis-index om tillgängligt.
-// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
-// Accepterar ?artwork=, ?token= eller ?id=
-// - Signerad token (p64url.<sig>): verifieras → hämtar data baserat på kind:
-//     • artwork/proof ⇒ läs orderns projekt & ev. proof-snapshot
-//     • mockup        ⇒ läs mockup-registryn i Redis (ingen order koppling)
-// - Legacy (t.ex. "071ea4..." eller ett gammalt filnamn): söker i orderns projekt om möjligt.
 app.get('/public/printed/artwork-token', async (req, res) => {
-  
   try {
-    const raw = (req.query.artwork || req.query.token || req.query.id || '').toString().trim();
+    const raw =
+      (req.query.artwork || req.query.token || req.query.id || '').toString().trim();
     if (!raw) return res.status(400).json({ error: 'missing_param' });
 
-    // Normalisera svar
+    // Helper: normalisera svar
     const sendOk = ({ preview, filename, token }) => {
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
@@ -1048,29 +952,18 @@ app.get('/public/printed/artwork-token', async (req, res) => {
         filename,
         tryckfil: filename,
         name: filename,
-        ...(token ? { token } : {})
+        ...(token ? { token } : {}) // gör det lättare för frontend att använda rätt suffix
       });
     };
-    // 1) Signerad token?
+
+    // 1) Är det en signerad token? (innehåller en punkt)
     if (raw.includes('.')) {
       const payload = verifyAndParseToken(raw);
-      // Tillåt äldre tokens utan "kind", men om "kind" finns måste den vara 'artwork', 'proof' eller 'mockup'
-      if (!payload || (payload.kind && !/^artwork|proof|mockup$/.test(payload.kind))) {
+      // Tillåt äldre tokens utan "kind", men om "kind" finns måste den vara 'artwork' eller 'proof'
+      if (!payload || (payload.kind && !/^artwork|proof$/.test(payload.kind))) {
         return res.status(401).json({ error: 'invalid_token' });
       }
 
-      // Branch på kind
-      if (payload.kind === 'mockup') {
-        // Hämta mockup-data från Redis-registret
-        const mock = await resolveMockupFromRedis(raw);
-        if (!mock) return res.status(404).json({ error: 'mockup_not_found' });
-        const filename = mock.tryckfil || mock.filename || '';
-        const preview = mock.preview || null;
-        if (!preview) return res.status(404).json({ error: 'preview_missing' });
-        return sendOk({ preview, filename, token: raw });
-      }
-
-      // artwork/proof – kräver orderId + lineItemId
       const { orderId, lineItemId, tid } = payload || {};
       if (!orderId || !lineItemId) {
         return res.status(400).json({ error: 'bad_payload' });
@@ -1081,7 +974,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
       const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
       if (!proj) return res.status(404).json({ error: 'not_found' });
 
-      // Proof: snapshot först, annars projektets preview
+      // Om tokenen är en "share" (proof) – använd snapshot först
       const shares = Array.isArray(proj.shares) ? proj.shares : [];
       const active = shares.find(s => s && s.status === 'active' && (!tid || String(s.tid) === String(tid)));
 
@@ -1091,6 +984,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
         proj.preview_img ||
         null;
 
+      // Försök plocka ut filnamn ("Tryckfil") från properties
       let filename = '';
       try {
         filename =
@@ -1103,11 +997,17 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     }
 
     // 2) Legacy: HEX/filnamn etc. (delbar bakåtkompatibilitet)
+    // För legacy försöker vi:
+    //  a) leta i senaste ordern där samma "Tryckfil" förekommer (via caches/summary om tillgängligt),
+    //  b) annars (om du har Redis-index) kan du lägga in din egen lookup här.
     const legacy = decodeURIComponent(raw).toLowerCase();
 
-    // Fallback: sök i senaste snapshot i Redis-index (om tillgängligt)
+    // === Minimal, säker fallback: sök i "senaste skrivna snapshoten" i order-projektens cache (Redis) ===
+    // Notera: om du inte har ett centralt index – kommentera blocket nedan och ersätt med din egen lookup.
     try {
-      const recentOrders = await getRecentOrdersFromCache?.(50);
+      // Hämta *senaste* aktiva share via order-sammanfattning om du har det indexerat
+      // (vi använder dina redan existerande hjälpmetoder om de finns; om inte, hoppa över try-blocket)
+      const recentOrders = await getRecentOrdersFromCache?.(50); // valfritt helper i din kodbas
       if (Array.isArray(recentOrders)) {
         for (const o of recentOrders) {
           const { projects } = await readOrderProjects(o.id);
@@ -1131,8 +1031,11 @@ app.get('/public/printed/artwork-token', async (req, res) => {
           }
         }
       }
-    } catch {}
+    } catch {
+      // Ignorera – vi har en sista fallback nedan
+    }
 
+    // 2c) Sista utväg: legacy utan träff
     return res.status(401).json({ error: 'invalid_or_legacy_unresolved' });
   } catch (e) {
     console.error('GET /public/printed/artwork-token error:', e?.response?.data || e.message);
@@ -1140,120 +1043,20 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-app.post('/public/printed/artwork-token', async (req, res) => {
-  try {
-    const { artwork, handle, hero_mockup, filename, preview } = req.body || {};
-    if (!artwork || !handle || !hero_mockup) {
-      return res.status(400).json({ ok:false, error:'missing_params' });
-    }
-
-    // Acceptera även artwork/proof tokens, men skriv endast mockup-heros om token är signerad
-    const payload = verifyAndParseToken(artwork);
-    if (!payload || (payload.kind && !/^artwork|proof|mockup$/.test(payload.kind))) {
-      // Vi tillåter “ok” för att inte stoppa klientflödet, men gör inget
-      return res.json({ ok:true, note:'ignored_invalid_token' });
-    }
-
-    // För mockup: spara hero-url per handle
-    if (payload.kind === 'mockup') {
-      await hsetMockupHero(artwork, handle, hero_mockup, { filename, preview });
-      return res.json({ ok:true });
-    }
-
-    // För artwork/proof: no-op (kan utökas vid behov)
-    return res.json({ ok:true, note:'non_mockup_token_noop' });
-  } catch (e) {
-    console.error('POST /public/printed/artwork-token error:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
-  }
-});
-// === PUBLIC REGISTER: /public/printed/artwork-register ==================
-// === PUBLIC REGISTER: /public/mockup/register ===========================
-// === MOCKUP: register & resolve (kompat med frontendens nya anrop) ===
-
-// POST /public/mockup/register
-// Body: { preview: string (obligatorisk), tryckfil?: string }
-app.post('/public/mockup/register', async (req, res) => {
-  try {
-    const { preview, tryckfil } = req.body || {};
-    if (!preview || typeof preview !== 'string') {
-      setCorsOnError(req, res);
-      return res.status(400).json({ ok:false, error:'missing_preview' });
-    }
-
-    const token = makeHexToken32(); // du har redan makeHexToken32 i filen
-    try {
-      await registerTokenInRedis(token, {
-        kind: 'mockup',           // <-- skiljer denna från "artwork"
-        iat: Date.now(),
-        preview,                  // snabb client-preview
-        tryckfil: tryckfil || ''
-      });
-    } catch (e) {
-      console.error('redis register mockup error:', e?.message || e);
-    }
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok:true, token });
-  } catch (e) {
-    console.error('POST /public/mockup/register:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
-  }
-});
-
-// GET /public/mockup/resolve?token=...  (och POST med {token})
-app.all('/public/mockup/resolve', async (req, res) => {
-  try {
-    const token = (req.method === 'GET'
-      ? (req.query.token || req.query.artwork)
-      : (req.body && (req.body.token || req.body.artwork))) || '';
-
-    if (!token || typeof token !== 'string') {
-      setCorsOnError(req, res);
-      return res.status(400).json({ ok:false, error:'missing_token' });
-    }
-
-    const obj = await readTokenFromRedis(token); // du har redan readTokenFromRedis
-    // Tillåt både "mockup" och "artwork" för bakåtkomp
-    if (!obj || !(obj.preview || obj.preview_url || obj.previewUrl) ||
-        !['mockup','artwork'].includes(obj.kind)) {
-      setCorsOnError(req, res);
-      return res.status(404).json({ ok:false, error:'not_found' });
-    }
-
-    return res.json({
-      ok: true,
-      token,
-      preview:  obj.preview || obj.preview_url || obj.previewUrl || null,
-      filename: obj.tryckfil || obj.filename || ''
-    });
-  } catch (e) {
-    console.error('ALL /public/mockup/resolve:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
-  }
-});
-
-// (valfritt) Alias under /apps/... om du vill att shop-domänen ska kunna kalla dem direkt
-app.post('/apps/mockup/register', forward('/public/mockup/register'));
-app.get('/apps/mockup/resolve',  forward('/public/mockup/resolve'));
-app.post('/apps/mockup/resolve', forward('/public/mockup/resolve'));
-
-
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
 // Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
 app.post('/public/printed/artwork-register', async (req, res) => {
   try {
     const { kind, orderId, lineItemId, preview, tryckfil } = req.body || {};
     if (!orderId || !lineItemId) {
-      return res.status(400).json({ ok: false, error: 'missing_params' });
+      return res.status(400).json({ ok:false, error:'missing_params' });
     }
 
+    // Endast artwork tillåts här (proof har egen flow)
     const k = String(kind || 'artwork').toLowerCase();
-    if (k !== 'artwork') return res.status(400).json({ ok: false, error: 'invalid_kind' });
+    if (k !== 'artwork') return res.status(400).json({ ok:false, error:'invalid_kind' });
 
+    // Skapa signerad token (DELNINGSBAR)
     const tid = newTid();
     const token = signTokenPayload({
       kind: 'artwork',
@@ -1263,6 +1066,7 @@ app.post('/public/printed/artwork-register', async (req, res) => {
       iat: Date.now()
     });
 
+    // Valfritt: registrera i Redis så resolvern kan “pass-by-reference”
     try {
       await registerTokenInRedis(token, {
         kind: 'artwork',
@@ -1270,6 +1074,7 @@ app.post('/public/printed/artwork-register', async (req, res) => {
         lineItemId: Number(lineItemId),
         iat: Date.now(),
         tid,
+        // små hjälpfält för snabb client-preview
         preview: preview || null,
         tryckfil: tryckfil || ''
       });
@@ -1277,11 +1082,11 @@ app.post('/public/printed/artwork-register', async (req, res) => {
 
     const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, token, url });
+    return res.json({ ok:true, token, url });
   } catch (e) {
     console.error('POST /public/printed/artwork-register:', e?.response?.data || e.message);
     setCorsOnError(req, res);
-    return res.status(500).json({ ok: false, error: 'internal' });
+    return res.status(500).json({ ok:false, error:'internal' });
   }
 });
 
@@ -1292,13 +1097,44 @@ app.get('/apps/artwork-token',          forward('/public/printed/artwork-token')
 app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-register'));
 app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
 app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
-app.post('/apps/mockup-register',           forward('/public/mockup/register'));
-
 // === Pressify Stock: alias under DITT faktiska App Proxy-prefix (/apps/orders-meta) ===
 // Kräver env: STOCK_PROXY_BASE = https://pressify-stock-proxy.onrender.com
 
-// (duplicate /apps/orders-meta/stock block removed – already defined earlier with JSON-buffer logic)
+// (Valfri men bra för diagnos – bekräftar att vi träffar huvudappen)
+app.get('/apps/orders-meta/stock/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', ts: new Date().toISOString() });
+});
 
+// Själva pass-throughen till din nya stock-proxy
+app.use('/apps/orders-meta/stock', async (req, res) => {
+  try {
+    const base = process.env.STOCK_PROXY_BASE; // ex: https://pressify-stock-proxy.onrender.com
+    if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
+
+    const suffix = req.originalUrl.replace(/^\/apps\/orders-meta\/stock/, '') || '/';
+    const targetUrl = new URL(suffix, base).toString();
+
+    const r = await axios({
+      method: req.method,
+      url: targetUrl,
+      headers: { 'content-type': req.headers['content-type'] || undefined },
+      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
+      responseType: 'stream',
+      validateStatus: () => true
+    });
+
+    res.status(r.status);
+    Object.entries(r.headers || {}).forEach(([k, v]) => {
+      if (k.toLowerCase() === 'transfer-encoding') return;
+      res.setHeader(k, v);
+    });
+    r.data.pipe(res);
+  } catch (e) {
+    console.error('[stock pass-through /apps/orders-meta/stock]', e?.response?.data || e.message);
+    res.status(502).json({ error: 'stock_proxy_bad_gateway' });
+  }
+});
 
 
 
