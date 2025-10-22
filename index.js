@@ -1170,36 +1170,77 @@ app.post('/public/printed/artwork-token', async (req, res) => {
 });
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
 // === PUBLIC REGISTER: /public/mockup/register ===========================
-// Body: { preview?, tryckfil? } → genererar delbar *mockup*-token (utan order)
-// Return: { ok, token, url }
+// === MOCKUP: register & resolve (kompat med frontendens nya anrop) ===
+
+// POST /public/mockup/register
+// Body: { preview: string (obligatorisk), tryckfil?: string }
 app.post('/public/mockup/register', async (req, res) => {
   try {
     const { preview, tryckfil } = req.body || {};
+    if (!preview || typeof preview !== 'string') {
+      setCorsOnError(req, res);
+      return res.status(400).json({ ok:false, error:'missing_preview' });
+    }
 
-    const tid = newTid();
-    const token = signTokenPayload({
-      kind: 'mockup',
-      tid,
-      iat: Date.now()
-    });
-
+    const token = makeHexToken32(); // du har redan makeHexToken32 i filen
     try {
-      await registerMockupTokenInRedis(token, {
+      await registerTokenInRedis(token, {
+        kind: 'mockup',           // <-- skiljer denna från "artwork"
         iat: Date.now(),
-        preview: preview || null,
+        preview,                  // snabb client-preview
         tryckfil: tryckfil || ''
       });
-    } catch {}
+    } catch (e) {
+      console.error('redis register mockup error:', e?.message || e);
+    }
 
-    const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, token, url });
+    return res.json({ ok:true, token });
   } catch (e) {
     console.error('POST /public/mockup/register:', e?.response?.data || e.message);
     setCorsOnError(req, res);
-    return res.status(500).json({ ok: false, error: 'internal' });
+    return res.status(500).json({ ok:false, error:'internal' });
   }
 });
+
+// GET /public/mockup/resolve?token=...  (och POST med {token})
+app.all('/public/mockup/resolve', async (req, res) => {
+  try {
+    const token = (req.method === 'GET'
+      ? (req.query.token || req.query.artwork)
+      : (req.body && (req.body.token || req.body.artwork))) || '';
+
+    if (!token || typeof token !== 'string') {
+      setCorsOnError(req, res);
+      return res.status(400).json({ ok:false, error:'missing_token' });
+    }
+
+    const obj = await readTokenFromRedis(token); // du har redan readTokenFromRedis
+    // Tillåt både "mockup" och "artwork" för bakåtkomp
+    if (!obj || !(obj.preview || obj.preview_url || obj.previewUrl) ||
+        !['mockup','artwork'].includes(obj.kind)) {
+      setCorsOnError(req, res);
+      return res.status(404).json({ ok:false, error:'not_found' });
+    }
+
+    return res.json({
+      ok: true,
+      token,
+      preview:  obj.preview || obj.preview_url || obj.previewUrl || null,
+      filename: obj.tryckfil || obj.filename || ''
+    });
+  } catch (e) {
+    console.error('ALL /public/mockup/resolve:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok:false, error:'internal' });
+  }
+});
+
+// (valfritt) Alias under /apps/... om du vill att shop-domänen ska kunna kalla dem direkt
+app.post('/apps/mockup/register', forward('/public/mockup/register'));
+app.get('/apps/mockup/resolve',  forward('/public/mockup/resolve'));
+app.post('/apps/mockup/resolve', forward('/public/mockup/resolve'));
+
 
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
 // Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
