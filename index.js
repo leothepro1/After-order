@@ -945,7 +945,6 @@ app.use('/proxy/orders-meta/stock', async (req, res) => {
 });
 
 
-/* ====== NYTT: config-hjälpare ====== */
 function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
@@ -962,6 +961,15 @@ function sendWithCache(res, cfg, versionHint) {
   res.json(cfg);
 }
 /* ====== SLUT config-hjälpare ====== */
+// Simple forward helper for app-proxy aliases
+function forward(targetPath) {
+  return (req, _res, next) => {
+    const q = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    req.url = targetPath + q;
+    next();
+  };
+}
+
 // === ARTWORK TOKEN RESOLVER (PUBLIC VIA APP PROXY) ===
 app.get('/proxy/printed/artwork-token', async (req, res) => {
   try {
@@ -969,6 +977,7 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
+
 
     // Stötta flera query-nycklar
     const raw = String(req.query.artwork || req.query.token || req.query.id || '').trim();
@@ -1042,34 +1051,6 @@ app.get('/public/printed/artwork-token', async (req, res) => {
         ...(token ? { token } : {})
       });
     };
-app.post('/public/printed/artwork-token', async (req, res) => {
-  try {
-    const { artwork, handle, hero_mockup, filename, preview } = req.body || {};
-    if (!artwork || !handle || !hero_mockup) {
-      return res.status(400).json({ ok:false, error:'missing_params' });
-    }
-
-    // Acceptera även artwork/proof tokens, men skriv endast mockup-heros om token är signerad
-    const payload = verifyAndParseToken(artwork);
-    if (!payload || (payload.kind && !/^artwork|proof|mockup$/.test(payload.kind))) {
-      // Vi tillåter “ok” för att inte stoppa klientflödet, men gör inget
-      return res.json({ ok:true, note:'ignored_invalid_token' });
-    }
-
-    // För mockup: spara hero-url per handle
-    if (payload.kind === 'mockup') {
-      await hsetMockupHero(artwork, handle, hero_mockup, { filename, preview });
-      return res.json({ ok:true });
-    }
-
-    // För artwork/proof: no-op (kan utökas vid behov)
-    return res.json({ ok:true, note:'non_mockup_token_noop' });
-  } catch (e) {
-    console.error('POST /public/printed/artwork-token error:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
-  }
-});
     // 1) Signerad token?
     if (raw.includes('.')) {
       const payload = verifyAndParseToken(raw);
@@ -1159,15 +1140,42 @@ app.post('/public/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+app.post('/public/printed/artwork-token', async (req, res) => {
+  try {
+    const { artwork, handle, hero_mockup, filename, preview } = req.body || {};
+    if (!artwork || !handle || !hero_mockup) {
+      return res.status(400).json({ ok:false, error:'missing_params' });
+    }
 
+    // Acceptera även artwork/proof tokens, men skriv endast mockup-heros om token är signerad
+    const payload = verifyAndParseToken(artwork);
+    if (!payload || (payload.kind && !/^artwork|proof|mockup$/.test(payload.kind))) {
+      // Vi tillåter “ok” för att inte stoppa klientflödet, men gör inget
+      return res.json({ ok:true, note:'ignored_invalid_token' });
+    }
+
+    // För mockup: spara hero-url per handle
+    if (payload.kind === 'mockup') {
+      await hsetMockupHero(artwork, handle, hero_mockup, { filename, preview });
+      return res.json({ ok:true });
+    }
+
+    // För artwork/proof: no-op (kan utökas vid behov)
+    return res.json({ ok:true, note:'non_mockup_token_noop' });
+  } catch (e) {
+    console.error('POST /public/printed/artwork-token error:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok:false, error:'internal' });
+  }
+});
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
-// Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
-app.post('/public/printed/artwork-register', async (req, res) => {
-  app.post('/public/mockup/register', async (req, res) => {
+// === PUBLIC REGISTER: /public/mockup/register ===========================
+// Body: { preview?, tryckfil? } → genererar delbar *mockup*-token (utan order)
+// Return: { ok, token, url }
+app.post('/public/mockup/register', async (req, res) => {
   try {
     const { preview, tryckfil } = req.body || {};
 
-    // Skapa signerad mockup-token
     const tid = newTid();
     const token = signTokenPayload({
       kind: 'mockup',
@@ -1175,7 +1183,6 @@ app.post('/public/printed/artwork-register', async (req, res) => {
       iat: Date.now()
     });
 
-    // Skriv minimal data i Redis så resolvern kan leverera preview/filename direkt
     try {
       await registerMockupTokenInRedis(token, {
         iat: Date.now(),
@@ -1186,27 +1193,26 @@ app.post('/public/printed/artwork-register', async (req, res) => {
 
     const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok:true, token, url });
+    return res.json({ ok: true, token, url });
   } catch (e) {
     console.error('POST /public/mockup/register:', e?.response?.data || e.message);
     setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
+    return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
 
-// === Alias för App Proxy → publik mockup-register =====================
-app.post('/apps/mockup-register', forward('/public/mockup/register'));
+// === PUBLIC REGISTER: /public/printed/artwork-register ==================
+// Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
+app.post('/public/printed/artwork-register', async (req, res) => {
   try {
     const { kind, orderId, lineItemId, preview, tryckfil } = req.body || {};
     if (!orderId || !lineItemId) {
-      return res.status(400).json({ ok:false, error:'missing_params' });
+      return res.status(400).json({ ok: false, error: 'missing_params' });
     }
 
-    // Endast artwork tillåts här (proof har egen flow)
     const k = String(kind || 'artwork').toLowerCase();
-    if (k !== 'artwork') return res.status(400).json({ ok:false, error:'invalid_kind' });
+    if (k !== 'artwork') return res.status(400).json({ ok: false, error: 'invalid_kind' });
 
-    // Skapa signerad token (DELNINGSBAR)
     const tid = newTid();
     const token = signTokenPayload({
       kind: 'artwork',
@@ -1216,7 +1222,6 @@ app.post('/apps/mockup-register', forward('/public/mockup/register'));
       iat: Date.now()
     });
 
-    // Valfritt: registrera i Redis så resolvern kan “pass-by-reference”
     try {
       await registerTokenInRedis(token, {
         kind: 'artwork',
@@ -1224,7 +1229,6 @@ app.post('/apps/mockup-register', forward('/public/mockup/register'));
         lineItemId: Number(lineItemId),
         iat: Date.now(),
         tid,
-        // små hjälpfält för snabb client-preview
         preview: preview || null,
         tryckfil: tryckfil || ''
       });
@@ -1232,11 +1236,11 @@ app.post('/apps/mockup-register', forward('/public/mockup/register'));
 
     const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok:true, token, url });
+    return res.json({ ok: true, token, url });
   } catch (e) {
     console.error('POST /public/printed/artwork-register:', e?.response?.data || e.message);
     setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
+    return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
 
@@ -1248,44 +1252,12 @@ app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-reg
 app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
 app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
 app.post('/apps/mockup-register',           forward('/public/mockup/register'));
+
 // === Pressify Stock: alias under DITT faktiska App Proxy-prefix (/apps/orders-meta) ===
 // Kräver env: STOCK_PROXY_BASE = https://pressify-stock-proxy.onrender.com
 
-// (Valfri men bra för diagnos – bekräftar att vi träffar huvudappen)
-app.get('/apps/orders-meta/stock/healthz', (_req, res) => {
-  res.set('Cache-Control', 'no-store');
-  return res.json({ ok: true, via: 'main-app', prefix: 'orders-meta', ts: new Date().toISOString() });
-});
+// (duplicate /apps/orders-meta/stock block removed – already defined earlier with JSON-buffer logic)
 
-// Själva pass-throughen till din nya stock-proxy
-app.use('/apps/orders-meta/stock', async (req, res) => {
-  try {
-    const base = process.env.STOCK_PROXY_BASE; // ex: https://pressify-stock-proxy.onrender.com
-    if (!base) return res.status(500).json({ error: 'missing_STOCK_PROXY_BASE' });
-
-    const suffix = req.originalUrl.replace(/^\/apps\/orders-meta\/stock/, '') || '/';
-    const targetUrl = new URL(suffix, base).toString();
-
-    const r = await axios({
-      method: req.method,
-      url: targetUrl,
-      headers: { 'content-type': req.headers['content-type'] || undefined },
-      data: ['POST','PUT','PATCH'].includes(req.method) ? req.body : undefined,
-      responseType: 'stream',
-      validateStatus: () => true
-    });
-
-    res.status(r.status);
-    Object.entries(r.headers || {}).forEach(([k, v]) => {
-      if (k.toLowerCase() === 'transfer-encoding') return;
-      res.setHeader(k, v);
-    });
-    r.data.pipe(res);
-  } catch (e) {
-    console.error('[stock pass-through /apps/orders-meta/stock]', e?.response?.data || e.message);
-    res.status(502).json({ error: 'stock_proxy_bad_gateway' });
-  }
-});
 
 
 
