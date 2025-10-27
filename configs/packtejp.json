@@ -6,7 +6,7 @@
   "options": [
     {
       "id": "qty",
-      "label": "Antal",
+      "label": "Antal rullar",
       "type": "cards",
       "default": 36,
       "choices": [
