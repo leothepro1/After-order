@@ -16,11 +16,7 @@
         { "value": 144, "label": "144 st" },
         { "value": 180, "label": "180 st" },
         { "value": 216, "label": "216 st" },
-        { "value": 252, "label": "252 st" },
-        { "value": 288, "label": "288 st" },
-        { "value": 324, "label": "324 st" },
-        { "value": 360, "label": "360 st" },
-        { "value": 540, "label": "540 st" }
+        { "value": 252, "label": "252 st" }
       ],
       "ui": {
         "component": "shared-cards",
