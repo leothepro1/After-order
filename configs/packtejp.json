@@ -5,53 +5,31 @@
   "currency": "SEK",
   "options": [
     {
-      "id": "size",
-      "label": "Antal färger i trycket",
-      "type": "cards",
-      "maxVisible": 3,
-      "showMoreLabel": "Visa fler",
-      "default": "1",
-      "choices": [
-        {
-          "value": "1",
-          "title": "1-färgstryck",
-          "text": "Enkel design i svart. Perfekt för budget, logotyper eller text.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_svart_tryck_hgzuil.png"
-        },
-        {
-          "value": "2",
-          "title": "2-färgstryck",
-          "text": "Två färger för mer variation och tydligare kontraster.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_2f%C3%A4rg_fx15q3.png"
-        },
-        {
-          "value": "3",
-          "title": "Fullfärgstryck",
-          "text": "Fullfärg för maximal detalj och levande färger.",
-          "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756296722/jpeg-optimizer_helf%C3%A4rgs_grbemc.png"
-        }
-      ],
-      "export": true
-    },
-    {
       "id": "qty",
       "label": "Antal",
-      "type": "select",
+      "type": "cards",
       "default": 36,
       "choices": [
-        { "value": 36, "label": "36" },
-        { "value": 72, "label": "72" },
-        { "value": 108, "label": "108" },
-        { "value": 144, "label": "144" },
-        { "value": 180, "label": "180" },
-        { "value": 216, "label": "216" },
-        { "value": 252, "label": "252" },
-        { "value": 288, "label": "288" },
-        { "value": 324, "label": "324" },
-        { "value": 360, "label": "360" },
-        { "value": 540, "label": "540" }
+        { "value": 36,  "label": "36 st"  },
+        { "value": 72,  "label": "72 st"  },
+        { "value": 108, "label": "108 st" },
+        { "value": 144, "label": "144 st" },
+        { "value": 180, "label": "180 st" },
+        { "value": 216, "label": "216 st" },
+        { "value": 252, "label": "252 st" },
+        { "value": 288, "label": "288 st" },
+        { "value": 324, "label": "324 st" },
+        { "value": 360, "label": "360 st" },
+        { "value": 540, "label": "540 st" }
       ],
-      "ui": { "component": "shared-select" },
+      "ui": {
+        "component": "shared-cards",
+        "display": "price-cards",
+        "maxVisible": 6,
+        "showMoreLabel": "Visa fler",
+        "show": { "unit": true, "total": true, "check": true },
+        "format": { "unit_label": "{unit}/st", "decimals_unit": 1, "decimals_total": 0 }
+      },
       "export": true
     }
   ],
@@ -75,9 +53,8 @@
     }
   },
   "formulas": {
-    "tier": "size",
-    "unit_price": "table('unit_price', qty, tier) * 1.25",
+    "unit_price": "table('unit_price', qty, 1) * 1.25",
     "total_price": "unit * qty"
   },
-  "export": ["size", "qty"]
+  "export": ["qty"]
 }
