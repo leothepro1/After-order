@@ -62,7 +62,7 @@
   "showMoreLabel": "Visa fler kvantiteter",
   "show": { "unit": true, "total": true, "check": true },
   "format": { "unit_label": "{unit}/st", "decimals_unit": 1, "decimals_total": 0 }
-}
+},
       "export": true
     }
   ],
