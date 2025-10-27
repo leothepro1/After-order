@@ -8,7 +8,7 @@
       "id": "size",
       "label": "Storlek",
       "type": "select",
-      "default": 3,
+      "default": 2,
       "choices": [
         { "value": 2, "code": "3213dsa", "label": "A1 (841 x 594 mm)", "w_cm": 84.1, "h_cm": 59.4, "area_cm2": 4995.54 },
         { "value": 3, "code": "213GFD", "label": "A2 (594 x 420 mm)", "w_cm": 59.4, "h_cm": 42.0, "area_cm2": 2494.8 },
