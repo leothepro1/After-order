@@ -5,6 +5,17 @@
   "currency": "SEK",
   "options": [
     {
+      "id": "size",
+      "label": "Storlek",
+      "type": "select",
+      "default": "1",
+      "choices": [
+        { "value": "1", "label": "30 x 7 cm" }
+      ],
+      "ui": { "component": "shared-select" },
+      "export": true
+    },
+    {
       "id": "qty",
       "label": "Antal",
       "type": "cards",
@@ -52,5 +63,6 @@
     "unit_price": "table('unit_price', qty, 1) * 1.25",
     "total_price": "unit * qty"
   },
-  "export": ["qty"]
+  "export": ["print", "qty"]
 }
+
