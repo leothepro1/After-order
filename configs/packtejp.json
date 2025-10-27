@@ -10,13 +10,13 @@
       "type": "cards",
       "default": 36,
       "choices": [
-        { "value": 36,  "label": "36 st"  },
-        { "value": 72,  "label": "72 st"  },
-        { "value": 108, "label": "108 st" },
-        { "value": 144, "label": "144 st" },
-        { "value": 180, "label": "180 st" },
-        { "value": 216, "label": "216 st" },
-        { "value": 252, "label": "252 st" }
+        { "value": 36,  "label": "36"  },
+        { "value": 72,  "label": "72"  },
+        { "value": 108, "label": "108" },
+        { "value": 144, "label": "144" },
+        { "value": 180, "label": "180" },
+        { "value": 216, "label": "216" },
+        { "value": 252, "label": "252" }
       ],
       "ui": {
         "component": "shared-cards",
