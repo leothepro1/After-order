@@ -63,6 +63,6 @@
     "unit_price": "table('unit_price', qty, 1) * 1.25",
     "total_price": "unit * qty"
   },
-  "export": ["print", "qty"]
+  "export": ["size", "qty"]
 }
 
