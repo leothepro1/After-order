@@ -35,7 +35,7 @@
 "ui": {
   "component": "shared-cards",
   "display": "price-cards",
-  "maxVisible": 6,
+  "maxVisible": 9,
   "showMoreLabel": "Visa fler",
   "show": { "unit": true, "total": true, "check": true },
   "format": { "unit_label": "{unit}/st", "decimals_unit": 1, "decimals_total": 0 }
