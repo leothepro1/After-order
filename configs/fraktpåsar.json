@@ -35,7 +35,7 @@
       "ui": {
         "component": "shared-cards",
         "display": "price-cards",
-        "maxVisible": 6,
+        "maxVisible": 8,
         "showMoreLabel": "Visa fler kvantiteter",
         "show": { "unit": true, "total": true, "check": true },
         "format": { "unit_label": "{unit}/st", "decimals_unit": 1, "decimals_total": 0 }
