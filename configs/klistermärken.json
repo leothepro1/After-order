@@ -21,6 +21,12 @@
         "type": "area_cm2",
         "breakpoints": [25, 50, 80, 120, 200, 300],
         "tiers":       [1,   2,  3,   4,   5,   6,   7]
+     },
+      "tooltip": {
+        "buttonLabel": "Storleksguide",
+        "title": "Behöver du hjälp att välja storlek?",
+        "text": "Du behöver inte vara exakt när du väljer mått – vi anpassar storleken efter din design och uppdaterar priset när du får ditt digitala korrektur. Till exempel, om du beställer 7 × 7 cm kan den slutliga storleken bli 7 × 6,8 cm beroende på din design. I korrekturet ser du alltid de exakta måtten och kan be om justeringar tills du är helt nöjd. Här är några vanliga föremål som referens för storlek:",
+        "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1762027423/jpeg-optimizer_ghjjhg_1_st69l3.png"
       },
       "ui": { "component": "shared-select" },
       "export": true    
