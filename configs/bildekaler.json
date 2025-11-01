@@ -23,20 +23,7 @@
         "tiers":       [1,   2,  3,   4,   5,   6,   7]
       },
       "ui": { "component": "shared-select" },
-      "export": true
-    },
-    {
-      "id": "variant_cards",
-      "label": "Material",
-      "type": "cards",
-      "maxVisible": 4,
-      "showMoreLabel": "Visa fler",
-      "default": "1",
-      "choices": [
-        { "value": "1", "title": "Vinyl", "text": "Slitstarkt plastmaterial som tål väta och sol.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291823/jpeg-optimizer_salom_9321_jxkc45.png" },
-        { "value": "1.2", "title": "Transparent", "text": "Genomskinligt material där bara trycket syns.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291824/jpeg-optimizer_transparent_321_eloboe.png" }
-      ],
-      "export": true
+      "export": true    
     },
     {
         "id": "qty",
@@ -125,8 +112,8 @@
   },
 "formulas": {
   "tier": "size === 'custom' ? resolveTierByArea(size_w_cm, size_h_cm, 'size.customTierRules') : size",
-"unit_price": "((size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 100 ? 1.50 : qty === 200 ? 1 : qty === 300 ? 0.68 : qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * ((variant_cards*1) || 1)) * 1.2",
+"unit_price": "((size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 100 ? 1.50 : qty === 200 ? 1 : qty === 300 ? 0.68 : qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * 1.2)",
   "total_price": "unit * qty"
   },
-  "export": ["size", "variant_cards", "qty", "size_w_cm", "size_h_cm"]
+  "export": ["size", "qty", "size_w_cm", "size_h_cm"]
 }
