@@ -16,9 +16,10 @@
       "export": true
     },
     {
+     {
       "id": "qty",
       "label": "Antal",
-      "type": "cards",
+      "type": "select",
       "default": 36,
       "choices": [
         { "value": 36,  "label": "36"  },
@@ -29,14 +30,7 @@
         { "value": 216, "label": "216" },
         { "value": 252, "label": "252" }
       ],
-      "ui": {
-        "component": "shared-cards",
-        "display": "price-cards",
-        "maxVisible": 6,
-        "showMoreLabel": "Visa fler kvantiteter",
-        "show": { "unit": true, "total": true, "check": true },
-        "format": { "unit_label": "{unit}/st", "decimals_unit": 1, "decimals_total": 0 }
-      },
+      "ui": { "component": "shared-select" },
       "export": true
     }
   ],
