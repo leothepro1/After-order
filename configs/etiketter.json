@@ -26,20 +26,6 @@
       "export": true
     },
     {
-      "id": "variant_cards",
-      "label": "Material",
-      "type": "cards",
-      "maxVisible": 3,
-      "showMoreLabel": "Visa fler",
-      "default": "1",
-      "choices": [
-        { "value": "1", "title": "Vinyl", "text": "Perfekt för märkning av produkter och förpackningar.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291823/jpeg-optimizer_salom_9321_jxkc45.png" },
-        { "value": "1.2", "title": "Transparent", "text": "Perfekt när du vill visa produkten tydligt och elegant.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291824/jpeg-optimizer_transparent_321_eloboe.png" },
-        { "value": "0.99", "title": "Kraftpapper", "text": "Obelagd och miljömedveten med en texturerad yta.", "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1756291829/jpeg-optimizer_kraftpaper_sn8ges.png" }
-      ],
-      "export": true
-    },
-    {
       "id": "qty",
       "label": "Antal",
       "type": "select",
@@ -123,7 +109,7 @@
   },
 "formulas": {
   "tier": "size === 'custom' ? resolveTierByArea(size_w_cm, size_h_cm, 'size.customTierRules') : size",
-  "unit_price": "(size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * ((variant_cards*1) || 1)",
+  "unit_price": "(size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * 1|| 1)",
   "total_price": "unit * qty"
   },
   "export": ["size", "variant_cards", "qty", "size_w_cm", "size_h_cm"]
