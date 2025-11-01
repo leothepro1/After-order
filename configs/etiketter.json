@@ -112,7 +112,7 @@
   "unit_price": "(size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 500 || qty === 600 ? 0.66 : qty === 1200 || qty === 1500 ? 0.33 : qty === 900 ? 0.43 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * 1|| 1)",
   "total_price": "unit * qty"
   },
-  "export": ["size", "variant_cards", "qty", "size_w_cm", "size_h_cm"]
+  "export": ["size", "qty", "size_w_cm", "size_h_cm"]
 }
 
 
