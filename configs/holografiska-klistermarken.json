@@ -26,9 +26,7 @@
         "buttonLabel": "Storleksguide",
         "title": "Hur väljer jag rätt storlek?",
         "text": "Välj en av standardstorlekarna eller ange din egen storlek i cm. Priset justeras automatiskt efter ytan.",
-        "image": "https://cdn.example.com/tooltips/size-guide.jpg",
-        "ctaText": "Läs mer",
-        "ctaHref": "https://pressify.se/guider/storlek"
+        "image": "https://cdn.example.com/tooltips/size-guide.jpg"
       },
       "ui": { "component": "shared-select" },
       "export": true
