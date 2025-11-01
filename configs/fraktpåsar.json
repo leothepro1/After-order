@@ -14,6 +14,12 @@
         { "value": 2, "code": "KV148", "label": "25 × 33 cm", "w_cm": 14.8, "h_cm": 14.8, "area_cm2": 219.04 },
         { "value": 3, "code": "A5", "label": "36 × 48 cm", "w_cm": 14.8, "h_cm": 21.0, "area_cm2": 310.8 }
       ],
+      "tooltip": {
+        "buttonLabel": "Storleksguide",
+        "title": "Vad får plats i våra fraktpåsar?",
+        "text": "Våra slitstarka fraktpåsar är perfekta för att skicka mjuka produkter. Här är en ungefärlig guide till vad som ryms i de olika storlekarna.",
+        "image": "https://res.cloudinary.com/dmgmoisae/image/upload/v1762029412/jpeg-optimizer_label_size_nuzshy.png"
+      },
       "ui": { "component": "shared-select" },
       "export": true
     },
