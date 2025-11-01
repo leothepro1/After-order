@@ -20,7 +20,7 @@
     {
       "id": "qty",
       "label": "Antal",
-      "type": "cards",
+      "type": "select",
       "default": 10,
       "choices": [
         { "value": 10, "label": "10" },
@@ -32,14 +32,7 @@
         { "value": 1000, "label": "1000" },
         { "value": 2000, "label": "2000" }
       ],
-      "ui": {
-        "component": "shared-cards",
-        "display": "price-cards",
-        "maxVisible": 8,
-        "showMoreLabel": "Visa fler kvantiteter",
-        "show": { "unit": true, "total": true, "check": true },
-        "format": { "unit_label": "{unit}/st", "decimals_unit": 1, "decimals_total": 0 }
-      },
+      "ui": { "component": "shared-select" },
       "export": true
     }
   ],
