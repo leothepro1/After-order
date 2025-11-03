@@ -1812,48 +1812,57 @@ app.post('/webhooks/order-created', async (req, res) => {
       iat: Date.now(),
       tid
     });
-const pxOriginVal =
+onst pxOriginVal =
   (allClean.find(p => p.name.toLowerCase() === '_px_origin')?.value || '')
     .trim()
     .toLowerCase();
-const skipProof = pxOriginVal === 'noproof';
-    
-    return {
-      orderId,
-      lineItemId:   item.id,
-      productId:    item.product_id,
-      productTitle: item.title,
-      variantId:    item.variant_id,
-      variantTitle: item.variant_title,
-      quantity:     item.quantity,
-      properties,
-      preview_img,
-      cloudinaryPublicId,
-      instructions: instructionsProp ?? null,
-      customerId,
-      orderNumber,
- status: skipProof ? 'I produktion' : 'Väntar på korrektur',
+
+// stöd även _noproof som sätts från kundvagn/kalkylator
+const noproofVal =
+  (allClean.find(p => p.name.toLowerCase() === '_noproof')?.value || '')
+    .trim()
+    .toLowerCase();
+
+// tolka sanningsvärden robust: "1", "true", "ja", etc. räknas som sant
+const isTruthy = v => !!v && v !== '0' && v !== 'false' && v !== 'nej' && v !== 'no' && v !== 'null' && v !== 'undefined';
+
+const skipProof = (pxOriginVal === 'noproof') || isTruthy(noproofVal);
+
+return {
+  orderId,
+  lineItemId:   item.id,
+  productId:    item.product_id,
+  productTitle: item.title,
+  variantId:    item.variant_id,
+  variantTitle: item.variant_title,
+  quantity:     item.quantity,
+  properties,
+  preview_img,
+  cloudinaryPublicId,
+  instructions: instructionsProp ?? null,
+  customerId,
+  orderNumber,
+  status: skipProof ? 'I produktion' : 'Väntar på korrektur',
   tag:    skipProof ? 'I produktion' : 'Väntar på korrektur',
-      date: new Date().toISOString(),
-      artworkToken,                       // ← KOMMA VIKTIGT
-      // === NYTT: dynamiskt leveransfönster (fram till godkänd korrektur)
-      delivery: {
-        v: 1,
-        chosen: chosenMethod,              // 'standard' | 'express'
-        window: {
-          minDays: merged.minDays,
-          maxDays: merged.maxDays,
-          fromISO: etaFrom.toISOString().slice(0,10),
-          toISO:   etaTo.toISOString().slice(0,10),
-          label:   etaLabel
-        },
-        dynamicBase: {
-          orderProcessedAt: baselineISO,
-          computedAt: new Date().toISOString()
-        },
-        fixed: null
-      }
-    };
+  date: new Date().toISOString(),
+  artworkToken,
+  delivery: {
+    v: 1,
+    chosen: chosenMethod,
+    window: {
+      minDays: merged.minDays,
+      maxDays: merged.maxDays,
+      fromISO: etaFrom.toISOString().slice(0,10),
+      toISO:   etaTo.toISOString().slice(0,10),
+      label:   etaLabel
+    },
+    dynamicBase: {
+      orderProcessedAt: baselineISO,
+      computedAt: new Date().toISOString()
+    },
+    fixed: null
+  }
+};
   }));
 
 
