@@ -1803,28 +1803,30 @@ app.post('/webhooks/order-created', async (req, res) => {
       properties.push({ name: 'Tryckfil', value: tryckfil });
     }
 
-    // ⭐ Artwork-token
-    const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
-    await registerTokenInRedis(artworkToken, {
-      kind: 'artwork',
-      orderId: Number(orderId),
-      lineItemId: Number(item.id),
-      iat: Date.now(),
-      tid
-    });
-onst pxOriginVal =
+  // ⭐ Artwork-token
+const { token: artworkToken, tid } = generateArtworkToken(orderId, item.id);
+await registerTokenInRedis(artworkToken, {
+  kind: 'artwork',
+  orderId: Number(orderId),
+  lineItemId: Number(item.id),
+  iat: Date.now(),
+  tid
+});
+
+// --- NYTT: tolka både _px_origin och _noproof för att hoppa korrektur ---
+const pxOriginVal =
   (allClean.find(p => p.name.toLowerCase() === '_px_origin')?.value || '')
     .trim()
     .toLowerCase();
 
-// stöd även _noproof som sätts från kundvagn/kalkylator
 const noproofVal =
   (allClean.find(p => p.name.toLowerCase() === '_noproof')?.value || '')
     .trim()
     .toLowerCase();
 
-// tolka sanningsvärden robust: "1", "true", "ja", etc. räknas som sant
-const isTruthy = v => !!v && v !== '0' && v !== 'false' && v !== 'nej' && v !== 'no' && v !== 'null' && v !== 'undefined';
+// "sant" om inte uttryckligen falskt/nej/0
+const isTruthy = v =>
+  !!v && v !== '0' && v !== 'false' && v !== 'nej' && v !== 'no' && v !== 'null' && v !== 'undefined';
 
 const skipProof = (pxOriginVal === 'noproof') || isTruthy(noproofVal);
 
@@ -1870,8 +1872,6 @@ return {
 
 
   if (newProjects.length === 0) return res.sendStatus(200);
-  // 🔹 ENRICH: injicera productHandle per projekt (utan att ändra befintlig logik)
-// ... efter newProjects och enrich-blocket:
 let enrichedProjects = newProjects;
 try {
   const ids = newProjects.map(p => p.productId).filter(Boolean);
