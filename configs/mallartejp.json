@@ -5,29 +5,19 @@
   "currency": "SEK",
   "options": [
     {
-      "id": "size",
-      "label": "Storlek",
-      "type": "select",
-      "default": "1",
-      "choices": [
-        { "value": "1", "label": "30 x 7 cm" }
-      ],
-      "ui": { "component": "shared-select" },
-      "export": true
-    },
-    {
       "id": "qty",
       "label": "Antal",
       "type": "select",
       "default": 36,
       "choices": [
-        { "value": 36,  "label": "36"  },
-        { "value": 72,  "label": "72"  },
-        { "value": 108, "label": "108" },
-        { "value": 144, "label": "144" },
-        { "value": 180, "label": "180" },
-        { "value": 216, "label": "216" },
-        { "value": 252, "label": "252" }
+    { "value": 30,  "label": "30"  },
+    { "value": 90,  "label": "90"  },
+    { "value": 460, "label": "460" },
+    { "value": 915, "label": "915" },
+    { "value": 1830, "label": "1830" },
+    { "value": 2740, "label": "2740" },
+    { "value": 3660, "label": "3660" },
+    { "value": 4570, "label": "4570" }
       ],
       "ui": { "component": "shared-select" },
       "export": true
@@ -38,17 +28,14 @@
       "rows": [36, 72, 108, 144, 180, 216, 252, 288, 324, 360, 540],
       "cols": [1, 2, 3],
       "data": [
-        [31.54, 39.54, 47.65],
-        [22.28, 25.12, 28.96],
-        [19.59, 22.44, 24.84],
-        [16.75, 18.26, 20.13],
-        [15.63, 17.18, 18.51],
-        [15.04, 16.39, 17.77],
-        [14.78, 15.83, 17.06],
-        [14.33, 15.44, 16.43],
-        [14.24, 15.13, 16.19],
-        [12.02, 13.02, 14.42],
-        [11.20, 11.53, 15.52]
+    [9],
+[5],
+[3],
+[4],
+[3],
+[3],
+[3],
+[3]
       ]
     }
   },
@@ -56,5 +43,5 @@
     "unit_price": "table('unit_price', qty, 1) * 1.25",
     "total_price": "unit * qty"
   },
-  "export": ["size", "qty"]
+  "export": ["qty"]
 }
