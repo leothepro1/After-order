@@ -41,7 +41,7 @@
   },
   "formulas": {
     "unit_price": "table('unit_price', qty, 1) * 1.25",
-    "total_price": "unit_price * qty"
+    "total_price": "unit * qty"
   },
   "export": ["qty"]
 }
