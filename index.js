@@ -1812,7 +1812,12 @@ app.post('/webhooks/order-created', async (req, res) => {
       iat: Date.now(),
       tid
     });
-
+const pxOriginVal =
+  (allClean.find(p => p.name.toLowerCase() === '_px_origin')?.value || '')
+    .trim()
+    .toLowerCase();
+const skipProof = pxOriginVal === 'noproof';
+    
     return {
       orderId,
       lineItemId:   item.id,
@@ -1827,8 +1832,8 @@ app.post('/webhooks/order-created', async (req, res) => {
       instructions: instructionsProp ?? null,
       customerId,
       orderNumber,
-      status: 'Väntar på korrektur',
-      tag:    'Väntar på korrektur',
+ status: skipProof ? 'I produktion' : 'Väntar på korrektur',
+  tag:    skipProof ? 'I produktion' : 'Väntar på korrektur',
       date: new Date().toISOString(),
       artworkToken,                       // ← KOMMA VIKTIGT
       // === NYTT: dynamiskt leveransfönster (fram till godkänd korrektur)
