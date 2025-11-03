@@ -6,7 +6,7 @@
   "options": [
     {
   "id": "qty",
-  "label": "Antal (meter)",
+  "label": "Antal meter",
   "type": "cards",
   "default": 30,
   "choices": [
