@@ -49,7 +49,7 @@
         {
             "id": "qty",
             "label": "Antal",
-            "type": "cards",
+            "type": "select",
             "default": 1,
             "choices": [
                 {
@@ -58,19 +58,7 @@
                 }
             ],
             "ui": {
-                "component": "shared-cards",
-                "display": "price-cards",
-                "maxVisible": 8,
-                "showMoreLabel": "Visa fler kvantiteter",
-                "show": {
-                    "unit": true,
-                    "total": true,
-                    "check": true
-                },
-                "format": {
-                    "unit_label": "{unit}/st",
-                    "decimals_unit": 1,
-                    "decimals_total": 0
+                "component": "shared-select"
                 }
             },
             "export": true
