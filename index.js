@@ -1321,6 +1321,7 @@ function purgeInvalidEmails(payload) {
 
 
 // 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
+// 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
 async function handleDraftCreate(req, res){
   try{
     const body = req.body || {};
@@ -1388,13 +1389,27 @@ if (hasCustomPrice) {
 
 
 const shopCfg = await getShopTaxConfig();
+const baseDraft = {
+  ...incoming,
+  line_items: cleanLines,
+  ...(body.note ? { note: body.note } : {}),
+  taxes_included: shopCfg.taxes_included,
+  tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
+};
+
+// ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
+const note_attributes = Array.isArray(baseDraft.note_attributes) ? baseDraft.note_attributes.slice() : [];
+if (body.discountCode) {
+  note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
+}
+if (Number.isFinite(Number(body.discountSaved))) {
+  note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
+}
+
 payloadToShopify = {
   draft_order: {
-    ...incoming,
-    line_items: cleanLines,
-    ...(body.note ? { note: body.note } : {}),
-    taxes_included: shopCfg.taxes_included,
-    tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
+    ...baseDraft,
+    ...(note_attributes.length ? { note_attributes } : {})
   }
 };
 }
@@ -1408,13 +1423,29 @@ payloadToShopify = {
       }
  const shopCfg = await getShopTaxConfig();
 const line_items = await buildCustomLinesFromGeneric(items);
+
+// Basdraft utan rabatt på raderna
+const baseDraft = {
+  line_items,
+  ...(body.note ? { note: body.note } : {}),
+  ...(body.customerId ? { customer: { id: body.customerId } } : {}),
+  taxes_included: shopCfg.taxes_included,
+  tags: 'pressify,draft-checkout'
+};
+
+// ⬇️ Rabattkod endast i note_attributes (undvik line properties)
+const note_attributes = [];
+if (body.discountCode) {
+  note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
+}
+if (Number.isFinite(Number(body.discountSaved))) {
+  note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
+}
+
 payloadToShopify = {
   draft_order: {
-    line_items,
-    ...(body.note ? { note: body.note } : {}),
-    ...(body.customerId ? { customer: { id: body.customerId } } : {}),
-    taxes_included: shopCfg.taxes_included,
-    tags: 'pressify,draft-checkout'
+    ...baseDraft,
+    ...(note_attributes.length ? { note_attributes } : {})
   }
 };
   }
@@ -1448,6 +1479,7 @@ payloadToShopify = {
     return res.status(500).json({ error: 'internal' });
   }
 }
+
 
 // 4) Montera alla endpoints som frontend testar → samma handler
 const DRAFT_ROUTES = [
