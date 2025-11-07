@@ -121,7 +121,7 @@
   },
 "formulas": {
   "tier": "size === 'custom' ? resolveTierByArea(size_w_cm, size_h_cm, 'size.customTierRules') : size",
-"unit_price": "((size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 50 ? 1 : qty === 100 ? 1.50 : qty === 200 ? 1 : qty === 300 ? 0.68 : (qty === 500 || qty === 600) ? 0.66 : qty === 900 ? 0.43 : (qty === 1200 || qty === 1500) ? 0.33 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier)) * 1.2)",
+"unit_price": "((size === 'custom' ? table('unit_price_custom_by_cm', size_h_cm, size_w_cm) * (qty === 50 ? 1 : qty === 100 ? 1.50 : qty === 200 ? 1 : qty === 300 ? 0.68 : (qty === 500 || qty === 600) ? 0.66 : qty === 900 ? 0.43 : (qty === 1200 || qty === 1500) ? 0.33 : qty === 2000 ? 0.25 : 1) : table('unit_price', qty, tier))",
   "total_price": "unit * qty"
   },
   "export": ["size", "qty", "size_w_cm", "size_h_cm"]
