@@ -1126,13 +1126,13 @@ function normalizePrice(v) {
   return safe.toFixed(2);
 }
 
-// Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem fel
+// Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem
 function isValidEmail(e) {
   if (!e || typeof e !== 'string') return false;
-  // enkel men robust: text@text.tld, inga mellanslag
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+  // enkel men robust: text@text.tld
+  , inga mellanslag
+  return /^[^\s@]+@[^\s@]+.[^\s@]+$/.test(e.trim());
 }
-
 
 // Ta bort felaktiga email så att Shopify inte försöker koppla kund eller trigga moms/discount-regler fel
 function purgeInvalidEmails(payload) {
@@ -1176,16 +1176,16 @@ async function createShopifyDraftWithRetry(payloadToShopify) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const r = await axios.post(
-  `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
-  payloadToShopify,
-  {
-    headers: {
-      'X-Shopify-Access-Token': ACCESS_TOKEN,
-      'Content-Type': 'application/json'
-    },
-    timeout: 8000
-  }
-);
+        https://${SHOP}/admin/api/2025-07/draft_orders.json,
+        payloadToShopify,
+        {
+          headers: {
+            'X-Shopify-Access-Token': ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          },
+          timeout: 8000
+        }
+      );
       return r.data?.draft_order;
     } catch (e) {
       lastErr = e;
@@ -1213,6 +1213,7 @@ async function createShopifyDraftWithRetry(payloadToShopify) {
 }
 
 // 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
+// 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
 async function handleDraftCreate(req, res) {
   try {
     const body = req.body || {};
@@ -1225,32 +1226,31 @@ async function handleDraftCreate(req, res) {
       // Bygg taxable-kartor en gång
       const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
 
-       const sanitizedLineItems = (incoming.line_items || []).map(li => {
-    const taxable = vTaxMap.get(li.variant_id) ?? true;
-    return {
-      ...li,
-      ...(li.variant_id ? { variant_id: li.variant_id } : {}),
-      ...(li.product_id ? { product_id: li.product_id } : {}),
-      taxable
-    };
-  }).filter(li => li.quantity > 0);
+      const sanitizedLineItems = (incoming.line_items || []).map(li => {
+        const taxable = vTaxMap.get(li.variant_id) ?? true;
+        return {
+          ...li,
+          ...(li.variant_id ? { variant_id: li.variant_id } : {}),
+          ...(li.product_id ? { product_id: li.product_id } : {}),
+          taxable
+        };
+      }).filter(li => li.quantity > 0);
 
-  const sanitizedDraftOrder = {
-    ...incoming,
-    line_items: sanitizedLineItems,
-    customer: incoming.customer && incoming.customer.id ? { id: incoming.customer.id } : undefined
-  };
+      const incoming = {
+        ...incoming,
+        line_items: sanitizedLineItems,
+        customer: incoming.customer && incoming.customer.id ? { id: incoming.customer.id } : undefined
+      };
 
-  const shopCfg = await getShopConfig();
-  payloadToShopify = purgeInvalidEmails({
-    draft_order: {
-      ...sanitizedDraftOrder,
-      currency: shopCfg.currency,
-      use_customer_default_address: true,
-      taxes_included: shopCfg.taxes_included
-    }
-  });
-
+      const shopCfg = await getShopConfig();
+      payloadToShopify = purgeInvalidEmails({
+        draft_order: {
+          ...incoming,
+          currency: shopCfg.currency,
+          use_customer_default_address: true,
+          taxes_included: shopCfg.taxes_included
+        }
+      });
     } else {
       // B) Pressify-cart payload → bygg upp draft_order från lineItems/lines
       const shopCfg = await getShopConfig();
@@ -1290,9 +1290,7 @@ async function handleDraftCreate(req, res) {
         return base;
       }).filter(Boolean);
 
-         const email = body.email && isValidEmail(body.email)
-        ? String(body.email).trim()
-        : undefined;
+      const email = body.email && isValidEmail(body.email) ? String(body.email).trim() : undefined;
 
       const baseDraft = {
         line_items,
@@ -1302,27 +1300,16 @@ async function handleDraftCreate(req, res) {
         ...(body.billing_address ? { billing_address: body.billing_address } : {}),
         ...(body.note ? { note: body.note } : {}),
         taxes_included: shopCfg.taxes_included,
-        // ⬇️ exakt som förr: använd ev. prepaid tags från frontend, annars standard
         tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
       };
 
       // ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
-      const note_attributes = Array.isArray(baseDraft.note_attributes)
-        ? baseDraft.note_attributes.slice()
-        : [];
-
+      const note_attributes = Array.isArray(baseDraft.note_attributes) ? baseDraft.note_attributes.slice() : [];
       if (body.discountCode) {
-        note_attributes.push({
-          name: 'discount_code',
-          value: String(body.discountCode)
-        });
+        note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
       }
-
       if (Number.isFinite(Number(body.discountSaved))) {
-        note_attributes.push({
-          name: 'discount_saved',
-          value: String(Number(body.discountSaved).toFixed(2))
-        });
+        note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
       }
 
       payloadToShopify = {
@@ -1331,7 +1318,6 @@ async function handleDraftCreate(req, res) {
           ...(note_attributes.length ? { note_attributes } : {})
         }
       };
-
     }
 
     // 4) Skicka till Shopify (med sanering + cache + retry)
@@ -4909,4 +4895,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
 
