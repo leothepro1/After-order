@@ -3330,6 +3330,8 @@ app.post('/proxy/profile/update', async (req, res) => {
     return res.redirect(302, '/account?profile_error=Internal%20error');
   }
 });
+// AFTER (utdrag ur index.js)
+
 // Duplicerad route för App Proxy-sökvägen /apps/orders-meta/profile/update
 app.post('/proxy/orders-meta/profile/update', async (req, res) => {
   try {
@@ -3378,12 +3380,12 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
 });
 
 // ===== APP PROXY: Pressify Teams – skapa teamkonto =====
-// POST /proxy/teams/create  (via Shopify App Proxy, t.ex. /apps/pressify/teams/create)
+// POST /proxy/orders-meta/teams/create  (via Shopify App Proxy: theme anropar /apps/orders-meta/teams/create)
 // Body: { teamName, teamEmail? }
 // - Skapar ett nytt team-konto (Shopify customer)
 // - Sätter teamets metafält (isTeam, teamName, ownerCustomerId, members[owner])
 // - Uppdaterar ägarens metafält med memberships[...]
-app.post('/proxy/teams/create', async (req, res) => {
+app.post('/proxy/orders-meta/teams/create', async (req, res) => {
   try {
     // 1) Verifiera att anropet kommer via Shopify App Proxy
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -3452,15 +3454,6 @@ app.post('/proxy/teams/create', async (req, res) => {
     const teamCustomerId = teamCustomer.id;
 
     // 6) Skriv TEAMS-metafält på TEAM-KONTOT
-    // Struktur enligt din modell:
-    // {
-    //   "isTeam": true,
-    //   "teamName": "...",
-    //   "ownerCustomerId": 11111,
-    //   "members": [
-    //     { "customerId": 11111, "email": "ägare@...", "role": "owner" }
-    //   ]
-    // }
     const teamMetaValue = {
       isTeam: true,
       teamName,
@@ -3476,17 +3469,6 @@ app.post('/proxy/teams/create', async (req, res) => {
     await writeCustomerTeams(teamCustomerId, teamMetaValue);
 
     // 7) Uppdatera TEAMS-metafält på ÄGARENS PERSONLIGA KONTO
-    // Struktur enligt din modell:
-    // {
-    //   "memberships": [
-    //     {
-    //       "teamCustomerId": 33333,
-    //       "teamName": "ICA Maxi",
-    //       "role": "owner",
-    //       "isDefault": true
-    //     }
-    //   ]
-    // }
     const currentOwnerMeta = await readCustomerTeams(ownerIdNum);
     let ownerValue = currentOwnerMeta.value;
     if (!ownerValue || typeof ownerValue !== 'object') {
@@ -3529,7 +3511,7 @@ app.post('/proxy/teams/create', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('POST /proxy/teams/create error:', err?.response?.data || err.message);
+    console.error('POST /proxy/orders-meta/teams/create error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
   }
 });
