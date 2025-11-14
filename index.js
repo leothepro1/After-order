@@ -2995,6 +2995,7 @@ if (scope === 'all') {
 
   // Först: GraphQL
   try {
+    // ===== KUND- / TEAM-BUNDNA ORDRAR =====
     const query = `
       query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
         orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
@@ -3005,35 +3006,74 @@ if (scope === 'all') {
               processedAt
               fulfillmentStatus
               displayFulfillmentStatus
+              tags
               metafield(namespace: $ns, key: $key) { value }
             }
           }
         }
       }
     `;
-    // Viktigt: skicka in 'q' – t.ex. status:any
-    const gqlVars = {
+
+    // customerId kan vara:
+    // - tomt  → personligt läge (default)
+    // - teamId → när scope=team och frontend skickar aktivt team-id
+    const rawCustomerIdParam = String(req.query.customerId || '').trim();
+
+    let q;
+    if (scope === 'team' && rawCustomerIdParam) {
+      const customerId = rawCustomerIdParam;
+      // TEAM-LÄGE: hämta alla ordrar som är taggade med rätt team-id
+      // (detta är raden du specificerade)
+      q = `status:any tag:'pressify_team_id:${customerId}'`;
+    } else {
+      // PERSONLIGT LÄGE: befintligt beteende (kundens egna order i Shopify)
+      q = `customer_id:${loggedInCustomerId} status:any`;
+    }
+
+    let data = await shopifyGraphQL(query, {
       first: limit,
-      q: 'status:any',
+      q,
       ns: ORDER_META_NAMESPACE,
       key: ORDER_META_KEY
-    };
-    const data = await shopifyGraphQL(query, gqlVars);
-    if (data.errors) throw new Error('GraphQL error');
+    });
+
+    if (data.errors) {
+      throw new Error('GraphQL error');
+    }
 
     const edges = data?.data?.orders?.edges || [];
-    let out = edges.map(e => ({
+
+    const filteredEdges = edges.filter(e => {
+      if (scope === 'team') return true;
+      const tags = e.node.tags || [];
+      return !tags.some(t => String(t || '').startsWith('pressify_team_id:'));
+    });
+
+    const out = filteredEdges.map(e => ({
       id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
       name: e.node.name,
       processedAt: e.node.processedAt,
       metafield: e.node.metafield ? e.node.metafield.value : null,
       fulfillmentStatus: e.node.fulfillmentStatus || null,
-      displayFulfillmentStatus: e.node.displayFulfillmentStatus || null
+      displayFulfillmentStatus: null
     }));
-    out = out.filter(o => !isDeliveredOrderShape(o));
-    
+    try {
+      if (WRITE_ORDERS_TO_REDIS) {
+        const cacheIdRaw =
+          scope === 'team' && rawCustomerIdParam
+            ? rawCustomerIdParam
+            : String(loggedInCustomerId || '');
+
+        const cacheIdNum = cacheIdRaw.startsWith('gid://')
+          ? cacheIdRaw.split('/').pop()
+          : cacheIdRaw;
+
+        await seedOrdersToRedis(cacheIdNum, out);
+      }
+    } catch {}
+
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ orders: out, admin: true });
+    return res.json({ orders: out });
       } catch (gqlErr) {
         // REST-FALLBACK: hämta ALLA ordrar utan customer_id
         try {
