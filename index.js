@@ -1290,33 +1290,9 @@ async function handleDraftCreate(req, res) {
         return base;
       }).filter(Boolean);
 
-      const email = body.email && isValidEmail(body.email) ? String(body.email).trim() : undefined;
-
-      // Workspace / team-kontekst från frontend (scope + teamId + teamName)
-      const scopeRaw = String(body.scope || '').trim();
-      const isTeamScope = scopeRaw === 'team';
-      const teamIdRaw = body.teamId != null ? String(body.teamId).trim() : '';
-      const teamNameRaw = body.teamName != null ? String(body.teamName).trim() : '';
-      const teamId = teamIdRaw || '';
-      const teamName = teamNameRaw || '';
-
-      // Bygg upp taggar (pressify + draft-checkout + ev. team-taggar)
-      const tagsArr = [];
-      if (incoming.tags) {
-        String(incoming.tags).split(',').forEach(t => {
-          const trimmed = String(t || '').trim();
-          if (trimmed) tagsArr.push(trimmed);
-        });
-      } else {
-        tagsArr.push('pressify','draft-checkout');
-      }
-      if (isTeamScope && teamId) {
-        tagsArr.push(`pressify_team_id:${teamId}`);
-        tagsArr.push('pressify_scope:team');
-      } else {
-        tagsArr.push('pressify_scope:personal');
-      }
-      const tags = Array.from(new Set(tagsArr)).join(',');
+         const email = body.email && isValidEmail(body.email)
+        ? String(body.email).trim()
+        : undefined;
 
       const baseDraft = {
         line_items,
@@ -1326,27 +1302,27 @@ async function handleDraftCreate(req, res) {
         ...(body.billing_address ? { billing_address: body.billing_address } : {}),
         ...(body.note ? { note: body.note } : {}),
         taxes_included: shopCfg.taxes_included,
-        tags
+        // ⬇️ exakt som förr: använd ev. prepaid tags från frontend, annars standard
+        tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
       };
 
- // ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
-      const note_attributes = Array.isArray(baseDraft.note_attributes) ? baseDraft.note_attributes.slice() : [];
+      // ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
+      const note_attributes = Array.isArray(baseDraft.note_attributes)
+        ? baseDraft.note_attributes.slice()
+        : [];
+
       if (body.discountCode) {
-        note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
-      }
-      if (Number.isFinite(Number(body.discountSaved))) {
-        note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
+        note_attributes.push({
+          name: 'discount_code',
+          value: String(body.discountCode)
+        });
       }
 
-      // ⬇️ Lägg även workspace-info (scope/team) på ORDERNIVÅ för filtrering senare
-      if (isTeamScope && teamId) {
-        note_attributes.push({ name: 'pf_scope', value: 'team' });
-        note_attributes.push({ name: 'pf_team_id', value: teamId });
-        if (teamName) {
-          note_attributes.push({ name: 'pf_team_name', value: teamName });
-        }
-      } else {
-        note_attributes.push({ name: 'pf_scope', value: 'personal' });
+      if (Number.isFinite(Number(body.discountSaved))) {
+        note_attributes.push({
+          name: 'discount_saved',
+          value: String(Number(body.discountSaved).toFixed(2))
+        });
       }
 
       payloadToShopify = {
@@ -1355,6 +1331,7 @@ async function handleDraftCreate(req, res) {
           ...(note_attributes.length ? { note_attributes } : {})
         }
       };
+
     }
 
     // 4) Skicka till Shopify (med sanering + cache + retry)
