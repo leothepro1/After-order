@@ -1213,7 +1213,6 @@ async function createShopifyDraftWithRetry(payloadToShopify) {
 }
 
 // 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
-// 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
 async function handleDraftCreate(req, res) {
   try {
     const body = req.body || {};
@@ -1226,31 +1225,32 @@ async function handleDraftCreate(req, res) {
       // Bygg taxable-kartor en gång
       const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
 
-      const sanitizedLineItems = (incoming.line_items || []).map(li => {
-        const taxable = vTaxMap.get(li.variant_id) ?? true;
-        return {
-          ...li,
-          ...(li.variant_id ? { variant_id: li.variant_id } : {}),
-          ...(li.product_id ? { product_id: li.product_id } : {}),
-          taxable
-        };
-      }).filter(li => li.quantity > 0);
+       const sanitizedLineItems = (incoming.line_items || []).map(li => {
+    const taxable = vTaxMap.get(li.variant_id) ?? true;
+    return {
+      ...li,
+      ...(li.variant_id ? { variant_id: li.variant_id } : {}),
+      ...(li.product_id ? { product_id: li.product_id } : {}),
+      taxable
+    };
+  }).filter(li => li.quantity > 0);
 
-      const incoming = {
-        ...incoming,
-        line_items: sanitizedLineItems,
-        customer: incoming.customer && incoming.customer.id ? { id: incoming.customer.id } : undefined
-      };
+  const sanitizedDraftOrder = {
+    ...incoming,
+    line_items: sanitizedLineItems,
+    customer: incoming.customer && incoming.customer.id ? { id: incoming.customer.id } : undefined
+  };
 
-      const shopCfg = await getShopConfig();
-      payloadToShopify = purgeInvalidEmails({
-        draft_order: {
-          ...incoming,
-          currency: shopCfg.currency,
-          use_customer_default_address: true,
-          taxes_included: shopCfg.taxes_included
-        }
-      });
+  const shopCfg = await getShopConfig();
+  payloadToShopify = purgeInvalidEmails({
+    draft_order: {
+      ...sanitizedDraftOrder,
+      currency: shopCfg.currency,
+      use_customer_default_address: true,
+      taxes_included: shopCfg.taxes_included
+    }
+  });
+
     } else {
       // B) Pressify-cart payload → bygg upp draft_order från lineItems/lines
       const shopCfg = await getShopConfig();
