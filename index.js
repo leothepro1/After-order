@@ -2515,124 +2515,171 @@ function xySignature(search) {
 // alias
 const verifyAppProxySignature = xySignature;
 
-// ===== APP PROXY: /proxy/avatar (mappar från /apps/.../avatar) =====
+// ===== APP PROXY: /proxy/avatar (mappar från t.ex. /apps/orders-meta/avatar) =====
 app.all('/proxy/avatar', async (req, res) => {
   try {
-    // 1) Verifiera att anropet kommer via Shopify App Proxy
-    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+    // 1) Verifiera App Proxy-signaturen
+    const search = req.url.split('?')[1] || '';
+    if (!verifyAppProxySignature(search)) {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    // 2) Kräver inloggad kund (Shopify bifogar logged_in_customer_id)
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) return res.status(401).json({ error: 'Not logged in' });
-
-    if (req.method === 'GET') {
-      // Hämta nuvarande metafält
-      const mfRes = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
-      return res.json({ metafield: mf ? mf.value : null });
+    // 2) Shopify skickar alltid logged_in_customer_id = PERSONLIGT konto
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'Not logged in' });
     }
 
-    if (req.method === 'POST') {
-      const { action, meta } = req.body || {};
+    const normalizeCustomerId = (cid) => {
+      if (!cid) return null;
+      const s = String(cid);
+      return s.startsWith('gid://') ? s.split('/').pop() : s;
+    };
 
-      // Hämta ev. befintligt metafält
-      const existingRes = await axios.get(
+    const loggedInCustomerId = normalizeCustomerId(loggedInCustomerIdRaw);
+
+    // ===== GET: hämta avatar för DET PERSONLIGA kontot (legacy-beteende) =====
+    if (req.method === 'GET') {
+      const { data } = await axios.get(
         `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
-      const existing = (existingRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+      const mf = (data.metafields || []).find(
+        m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
+      );
+      return res.json({ ok: true, metafield: mf ? mf.value : null });
+    }
 
-      if (action === 'delete') {
-        if (existing) {
-          await axios.delete(
-            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-        }
-        return res.json({ ok: true, deleted: true });
+    // Vi hanterar allt annat via POST
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    const body = req.body || {};
+    const { action, meta, targetType, teamCustomerId } = body;
+
+    // 3) Bestäm vilket kund-ID som är "target":
+    //    - personal  → loggedInCustomerId
+    //    - team      → teamCustomerId (från frontend)
+    let targetCustomerId = loggedInCustomerId;
+    if (String(targetType || '').toLowerCase() === 'team' && teamCustomerId) {
+      targetCustomerId = normalizeCustomerId(teamCustomerId);
+    }
+    if (!targetCustomerId) {
+      return res.status(400).json({ error: 'Missing target customer id' });
+    }
+
+    // TODO (säkerhet): här kan du lägga in extra koll:
+    //  - läs customer.metafields.teams.teams för loggedInCustomerId
+    //  - verifiera att loggedInCustomerId är medlem/ägare i det teamCustomerId man försöker ändra
+
+    // 4) Läs befintligt Profilbild-metafält för targetCustomerId
+    const { data: mfData } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const existing = (mfData.metafields || []).find(
+      m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
+    );
+
+    // ===== action: get (POST-variant för att hämta team-avatar) =====
+    if (action === 'get') {
+      return res.json({
+        ok: true,
+        metafield: existing ? existing.value : null
+      });
+    }
+
+    // ===== action: delete =====
+    if (action === 'delete') {
+      if (existing) {
+        await axios.delete(
+          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+      }
+      return res.json({ ok: true, deleted: true });
+    }
+
+    // ===== action: save =====
+    if (action === 'save') {
+      if (
+        !meta ||
+        (
+          !meta.public_id &&
+          !meta.secure_url &&
+          typeof meta.selection === 'undefined' &&
+          typeof meta.marketing === 'undefined' &&
+          typeof meta.role === 'undefined'
+        )
+      ) {
+        return res.status(400).json({ error: 'Invalid meta payload' });
       }
 
-      if (action === 'save') {
-        // Tillåt att spara enbart selection/marketing/role, eller bild, eller kombination
-        if (
-          !meta ||
-          (
-            !meta.public_id &&
-            !meta.secure_url &&
-            typeof meta.selection === 'undefined' &&
-            typeof meta.marketing === 'undefined' &&
-            typeof meta.role === 'undefined'
-          )
-        ) {
-          return res.status(400).json({ error: 'Invalid meta payload' });
-        }
+      let existingValue = {};
+      try {
+        existingValue = existing && existing.value ? JSON.parse(existing.value) : {};
+      } catch {
+        existingValue = {};
+      }
 
-        // Bevara tidigare metafält-värde (om det finns)
-        let existingValue = {};
-        try { existingValue = existing?.value ? JSON.parse(existing.value) : {}; } catch {}
+      const normalizeBool = (v) => {
+        if (typeof v === 'boolean') return v;
+        if (typeof v === 'number') return v !== 0;
+        if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
+        return false;
+      };
 
-        // Normalisera inkommande fält
-        const normalizeBool = (v) => {
-          if (typeof v === 'boolean') return v;
-          if (typeof v === 'number') return v !== 0;
-          if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
-          return false;
-        };
+      const valueObj = {
+        // Bildfält – bevara gamla om de inte skickas
+        public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
+        version:    meta.version ?? existingValue.version ?? null,
+        secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
 
-        const payload = {
+        // Övriga fält du redan använder
+        selection:  String(meta.selection ?? existingValue.selection ?? ''),
+        marketing:  (typeof meta.marketing !== 'undefined')
+                      ? normalizeBool(meta.marketing)
+                      : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
+        role:       String(meta.role ?? existingValue.role ?? ''),
+
+        updatedAt:  new Date().toISOString()
+      };
+
+      const payload = {
+        metafield: {
           namespace: 'Profilbild',
           key: 'Profilbild',
           type: 'json',
-          value: JSON.stringify({
-            // Bildfält – bevara om ej skickas
-            public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
-            version:    meta.version ?? existingValue.version ?? null,
-            secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
-
-            // Nya fält – bevara om ej skickas
-            selection:  String(meta.selection ?? existingValue.selection ?? ''),  // dropdown
-            marketing:  (typeof meta.marketing !== 'undefined')
-                          ? normalizeBool(meta.marketing)
-                          : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
-            role:       String(meta.role ?? existingValue.role ?? ''),           // arbetsroll
-
-            // Uppdaterad timestamp
-            updatedAt:  new Date().toISOString()
-          })
-        };
-
-        if (existing) {
-          await axios.put(
-            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-            { metafield: { id: existing.id, ...payload } },
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-        } else {
-          await axios.post(
-            `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
-            { metafield: payload },
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
+          value: JSON.stringify(valueObj)
         }
+      };
 
-        return res.json({ ok: true });
+      if (existing) {
+        await axios.put(
+          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+          { metafield: { id: existing.id, ...payload.metafield } },
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+      } else {
+        await axios.post(
+          `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+          payload,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
       }
 
-      return res.status(400).json({ error: 'Unknown action' });
+      return res.json({ ok: true });
     }
 
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
     console.error('/proxy/avatar error:', err?.response?.data || err.message);
     setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 // ===== REFERLINK: hämta eller skapa per-kund slug + redirect =====
 app.get('/proxy/link', async (req, res) => {
   try {
