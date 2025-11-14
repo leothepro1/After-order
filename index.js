@@ -2747,18 +2747,15 @@ app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 
 
-// ===== DUPLICATE ROUTE: /proxy/orders-meta/avatar (team-aware) =====
 app.all('/proxy/orders-meta/avatar', async (req, res) => {
   try {
-    // 1) Verifiera App Proxy-signaturen
     const search = req.url.split('?')[1] || '';
     if (!verifyAppProxySignature(search)) {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    // 2) Shopify skickar alltid logged_in_customer_id = PERSONLIGT konto
-    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
-    if (!loggedInCustomerIdRaw) {
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) {
       return res.status(401).json({ error: 'Not logged in' });
     }
 
@@ -2767,116 +2764,54 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
       const s = String(cid);
       return s.startsWith('gid://') ? s.split('/').pop() : s;
     };
+    const customerId = normalizeCustomerId(loggedInCustomerId);
 
-    const loggedInCustomerId = normalizeCustomerId(loggedInCustomerIdRaw);
-
-    // ===== GET (legacy): hämta avatar för det personliga kontot =====
-    if (req.method === 'GET') {
-      const { data } = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const mf = (data.metafields || []).find(
-        m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
-      );
-      return res.json({ ok: true, metafield: mf ? mf.value : null });
-    }
-
-    // Vi hanterar allt annat via POST
     if (req.method !== 'POST') {
+      // GET kan du låta vara kvar som tidigare om något annat använder den,
+      // men avatar-komponenten använder nu bara metafältet från Liquid.
+      if (req.method === 'GET') {
+        const mfRes = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+        const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+        return res.json({ ok: true, metafield: mf ? mf.value : null });
+      }
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const body = req.body || {};
-    const { action, meta, targetType, teamCustomerId } = body;
+    const { action, meta, targetType, teamCustomerId } = req.body || {};
+    const tType = (targetType || 'personal').toLowerCase();
 
-    // 3) Bestäm vilket kund-ID som är "target":
-    //    - personal  → loggedInCustomerId
-    //    - team      → teamCustomerId (från frontend)
-    let targetCustomerId = loggedInCustomerId;
-    if (String(targetType || '').toLowerCase() === 'team' && teamCustomerId) {
-      targetCustomerId = normalizeCustomerId(teamCustomerId);
-    }
-    if (!targetCustomerId) {
-      return res.status(400).json({ error: 'Missing target customer id' });
-    }
-
-    // TODO säkerhet:
-    //  - läs customer.metafields.teams.teams för loggedInCustomerId
-    //  - verifiera att loggedInCustomerId är medlem/ägare i det teamCustomerId som ändras
-
-    // 4) Läs befintligt Profilbild-metafält för targetCustomerId
-    const { data: mfData } = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+    // Läs befintligt metafält
+    const mfRes = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
-    const existing = (mfData.metafields || []).find(
+    const existing = (mfRes.data.metafields || []).find(
       m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
     );
 
-    // ===== action: get (team eller personal) =====
-    if (action === 'get') {
-      return res.json({
-        ok: true,
-        metafield: existing ? existing.value : null
-      });
-    }
+    let valueObj = {};
+    try { valueObj = existing && existing.value ? JSON.parse(existing.value) : {}; } catch { valueObj = {}; }
 
-    // ===== action: delete =====
+    valueObj.teams = valueObj.teams || {};
+
+    // ==== DELETE ====
     if (action === 'delete') {
-      if (existing) {
-        await axios.delete(
-          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
+      if (tType === 'team' && teamCustomerId) {
+        const tid = String(teamCustomerId);
+        if (valueObj.teams[tid]) {
+          delete valueObj.teams[tid];
+        }
+      } else {
+        // personlig avatar bort
+        delete valueObj.personal;
+        // ev. bakåtkomp-fält
+        delete valueObj.public_id;
+        delete valueObj.secure_url;
+        delete valueObj.version;
       }
-      return res.json({ ok: true, deleted: true });
-    }
-
-    // ===== action: save =====
-    if (action === 'save') {
-      if (
-        !meta ||
-        (
-          !meta.public_id &&
-          !meta.secure_url &&
-          typeof meta.selection === 'undefined' &&
-          typeof meta.marketing === 'undefined' &&
-          typeof meta.role === 'undefined'
-        )
-      ) {
-        return res.status(400).json({ error: 'Invalid meta payload' });
-      }
-
-      let existingValue = {};
-      try {
-        existingValue = existing && existing.value ? JSON.parse(existing.value) : {};
-      } catch {
-        existingValue = {};
-      }
-
-      const normalizeBool = (v) => {
-        if (typeof v === 'boolean') return v;
-        if (typeof v === 'number') return v !== 0;
-        if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
-        return false;
-      };
-
-      const valueObj = {
-        // Bildfält – bevara gamla om de inte skickas
-        public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
-        version:    meta.version ?? existingValue.version ?? null,
-        secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
-
-        // Övriga fält du redan använder
-        selection:  String(meta.selection ?? existingValue.selection ?? ''),
-        marketing:  (typeof meta.marketing !== 'undefined')
-                      ? normalizeBool(meta.marketing)
-                      : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
-        role:       String(meta.role ?? existingValue.role ?? ''),
-
-        updatedAt:  new Date().toISOString()
-      };
 
       const payload = {
         metafield: {
@@ -2895,13 +2830,97 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
         );
       } else {
         await axios.post(
-          `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+          `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
           payload,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
       }
 
       return res.json({ ok: true });
+    }
+
+    // ==== SAVE ====
+    if (action === 'save') {
+      if (
+        !meta ||
+        (
+          !meta.public_id &&
+          !meta.secure_url &&
+          typeof meta.selection === 'undefined' &&
+          typeof meta.marketing === 'undefined' &&
+          typeof meta.role === 'undefined'
+        )
+      ) {
+        return res.status(400).json({ error: 'Invalid meta payload' });
+      }
+
+      const normalizeBool = (v) => {
+        if (typeof v === 'boolean') return v;
+        if (typeof v === 'number') return v !== 0;
+        if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
+        return false;
+      };
+
+      if (tType === 'team' && teamCustomerId) {
+        const tid = String(teamCustomerId);
+        const old = valueObj.teams[tid] || {};
+        valueObj.teams[tid] = {
+          ...old,
+          public_id:  String(meta.public_id ?? old.public_id ?? ''),
+          version:    meta.version ?? old.version ?? null,
+          secure_url: String(meta.secure_url ?? old.secure_url ?? ''),
+          selection:  String(meta.selection ?? old.selection ?? ''),
+          marketing:  (typeof meta.marketing !== 'undefined')
+                        ? normalizeBool(meta.marketing)
+                        : (typeof old.marketing !== 'undefined' ? !!old.marketing : false),
+          role:       String(meta.role ?? old.role ?? ''),
+          updatedAt:  new Date().toISOString()
+        };
+      } else {
+        const old = valueObj.personal || {};
+        valueObj.personal = {
+          ...old,
+          public_id:  String(meta.public_id ?? old.public_id ?? ''),
+          version:    meta.version ?? old.version ?? null,
+          secure_url: String(meta.secure_url ?? old.secure_url ?? ''),
+          selection:  String(meta.selection ?? old.selection ?? ''),
+          marketing:  (typeof meta.marketing !== 'undefined')
+                        ? normalizeBool(meta.marketing)
+                        : (typeof old.marketing !== 'undefined' ? !!old.marketing : false),
+          role:       String(meta.role ?? old.role ?? ''),
+          updatedAt:  new Date().toISOString()
+        };
+
+        // bakåtkomp till root-fält om något annat läser dem
+        valueObj.public_id  = valueObj.personal.public_id;
+        valueObj.version    = valueObj.personal.version;
+        valueObj.secure_url = valueObj.personal.secure_url;
+      }
+
+      const payload = {
+        metafield: {
+          namespace: 'Profilbild',
+          key: 'Profilbild',
+          type: 'json',
+          value: JSON.stringify(valueObj)
+        }
+      };
+
+      if (existing) {
+        await axios.put(
+          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+          { metafield: { id: existing.id, ...payload.metafield } },
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+      } else {
+        await axios.post(
+          `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
+          payload,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+      }
+
+      return res.json({ ok: true, value: valueObj });
     }
 
     return res.status(400).json({ error: 'Unknown action' });
@@ -2911,6 +2930,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 
 
 // 🔹 Hjälp: hämta product.handle för en lista av product_id (unik, liten volym per order)
