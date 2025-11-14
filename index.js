@@ -1,4 +1,4 @@
-// FIL: index.js
+
 
 const express = require('express');
 const cors = require('cors');
@@ -1126,12 +1126,12 @@ function normalizePrice(v) {
   return safe.toFixed(2);
 }
 
+
 // Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem
 function isValidEmail(e) {
   if (!e || typeof e !== 'string') return false;
-  // enkel men robust: text@text.tld
-  , inga mellanslag
-  return /^[^\s@]+@[^\s@]+.[^\s@]+$/.test(e.trim());
+  // enkel men robust: text@text.tld, inga mellanslag
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
 }
 
 // Ta bort felaktiga email så att Shopify inte försöker koppla kund eller trigga moms/discount-regler fel
@@ -1146,220 +1146,167 @@ function purgeInvalidEmails(payload) {
   return payload;
 }
 
-// Enkel minnescache för draft orders (idempotens + snabbare svar)
-const draftCache = new Map(); // key -> { at, response }
-
-// Bygg en nyckel utifrån kund + rader + priser (inte allt brus)
-function computeDraftKey(body) {
-  const h = crypto.createHash('sha256');
-  const core = {
-    customerId: body.customerId || null,
-    discountCode: body.discountCode || null,
-    lineItems: (body.lineItems || body.lines || []).map(li => ({
-      variantId: li.variantId || li.variant_id || null,
-      productId: li.productId || li.product_id || null,
-      quantity: Number(li.quantity || 0) || 0,
-      custom_line_total: typeof li.custom_line_total === 'number' ? li.custom_line_total : null,
-      price: typeof li.price === 'number' ? li.price : null,
-      custom_price: typeof li.custom_price === 'number' ? li.custom_price : null
-    }))
-  };
-  h.update(JSON.stringify(core));
-  return h.digest('hex');
-}
-
-// Skapa draft_order hos Shopify med retry + backoff vid rate limit
-async function createShopifyDraftWithRetry(payloadToShopify) {
-  const maxAttempts = 4;
-  let lastErr;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const r = await axios.post(
-        https://${SHOP}/admin/api/2025-07/draft_orders.json,
-        payloadToShopify,
-        {
-          headers: {
-            'X-Shopify-Access-Token': ACCESS_TOKEN,
-            'Content-Type': 'application/json'
-          },
-          timeout: 8000
-        }
-      );
-      return r.data?.draft_order;
-    } catch (e) {
-      lastErr = e;
-      const status = e.response?.status;
-      const msg = e.response?.data?.errors || e.message || '';
-      const isRateLimit =
-        status === 429 ||
-        (typeof msg === 'string' &&
-          msg.toLowerCase().includes('exceeded 2 calls per second'));
-
-      if (!isRateLimit || attempt === maxAttempts) {
-        throw e;
-      }
-
-      const retryAfterHeader = e.response?.headers?.['retry-after'];
-      const retryMs = retryAfterHeader
-        ? Number(retryAfterHeader) * 1000
-        : 400 * attempt;
-
-      await new Promise(r => setTimeout(r, retryMs));
-    }
-  }
-
-  throw lastErr || new Error('Unknown draft create error');
-}
 
 // 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
 // 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
-async function handleDraftCreate(req, res) {
-  try {
+async function handleDraftCreate(req, res){
+  try{
     const body = req.body || {};
     let payloadToShopify = null;
 
     // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
     if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft_order.line_items)) {
       const incoming = body.shopify.draft_order;
+// Bygg taxable-kartor en gång
+const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
+const pTaxMap = await getProductDefaultTaxableMap((incoming.line_items || []).map(li => li.product_id).filter(Boolean));
 
-      // Bygg taxable-kartor en gång
-      const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
+const cleanLines = incoming.line_items.map(li => {
+  const qty = Math.max(1, parseInt(li.quantity || 1, 10));
+  const props = appendHiddenIds(sanitizeProps(li.properties || []), li.product_id, li.variant_id);
+  const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
 
-      const sanitizedLineItems = (incoming.line_items || []).map(li => {
-        const taxable = vTaxMap.get(li.variant_id) ?? true;
-        return {
-          ...li,
-          ...(li.variant_id ? { variant_id: li.variant_id } : {}),
-          ...(li.product_id ? { product_id: li.product_id } : {}),
-          taxable
-        };
-      }).filter(li => li.quantity > 0);
+  const vid = li.variant_id;
+  const pid = li.product_id;
+  const inferredTaxable =
+    typeof vTaxMap[vid] === 'boolean' ? vTaxMap[vid] :
+    (typeof pTaxMap[pid] === 'boolean' ? pTaxMap[pid] : true);
 
-      const incoming = {
-        ...incoming,
-        line_items: sanitizedLineItems,
-        customer: incoming.customer && incoming.customer.id ? { id: incoming.customer.id } : undefined
-      };
+if (hasCustomPrice) {
+    return {
+      custom: true,
+      title: String(li.title || 'Trycksak'),
+      quantity: qty,
+      price: normalizePrice(li.price),
+      taxable: inferredTaxable,          // ⬅️ lägg på taxable
+      requires_shipping: true,
+      properties: props 
+    };
+  }
 
-      const shopCfg = await getShopConfig();
-      payloadToShopify = purgeInvalidEmails({
-        draft_order: {
-          ...incoming,
-          currency: shopCfg.currency,
-          use_customer_default_address: true,
-          taxes_included: shopCfg.taxes_included
-        }
-      });
-    } else {
-      // B) Pressify-cart payload → bygg upp draft_order från lineItems/lines
-      const shopCfg = await getShopConfig();
+  const out = {
+    ...(li.variant_id ? { variant_id: li.variant_id } : {}),
+    quantity: qty,
+    properties: props
+  };
 
-      const incoming = Array.isArray(body.lineItems) ? body.lineItems : Array.isArray(body.lines) ? body.lines : [];
-      // Bygg taxable-kartor en gång
+  if (li.applied_discount) {
+    const ad = li.applied_discount || {};
+    out.applied_discount = {
+      title: String(ad.title || 'Pressify pris'),
+      value_type: ad.value_type === 'fixed_amount' ? 'fixed_amount' : 'percentage',
+      value: Number.isFinite(Number(ad.value)) ? String(ad.value) : '0'
+    };
+  }
 
-      const vTaxMap = await getVariantTaxableMap(incoming.map(li => li.variantId || li.variant_id).filter(Boolean));
+  if (!out.variant_id) {
+    return {
+      custom: true,
+      title: String(li.title || 'Trycksak'),
+      quantity: qty,
+      price: normalizePrice(0),
+      taxable: inferredTaxable,          // ⬅️ även här
+      requires_shipping: true,
+      properties: props 
+    };
+  }
+  return out;
+});
 
-      const line_items = incoming.map(li => {
-        const qty = Number(li.quantity || 0) || 0;
-        const price = normalizePrice(li.custom_price ?? li.price ?? 0);
-        const customLineTotal = typeof li.custom_line_total === 'number' ? li.custom_line_total : undefined;
-        if (!qty) return null;
 
-        const taxable = vTaxMap.get(li.variantId || li.variant_id) ?? true;
 
-        const base = {
-          quantity: qty,
-          price,
-          taxable,
-          ...(li.productId ? { product_id: li.productId } : {}),
-          ...(li.variantId ? { variant_id: li.variantId } : {}),
-          ...(Array.isArray(li.properties) ? { properties: li.properties } : {})
-        };
+const shopCfg = await getShopTaxConfig();
+const baseDraft = {
+  ...incoming,
+  line_items: cleanLines,
+  ...(body.note ? { note: body.note } : {}),
+  taxes_included: shopCfg.taxes_included,
+  tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
+};
 
-        // Om vi fått en exakt line-total som redan inkluderar all vår logik → lagra i custom_attributes
-        if (typeof customLineTotal === 'number' && Number.isFinite(customLineTotal)) {
-          const cents = Math.round(customLineTotal * 100);
-          base.properties = Array.isArray(base.properties) ? base.properties.slice() : [];
-          base.properties.push({
-            name: '_pressify_line_total',
-            value: String(cents)
-          });
-        }
+// ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
+const note_attributes = Array.isArray(baseDraft.note_attributes) ? baseDraft.note_attributes.slice() : [];
+if (body.discountCode) {
+  note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
+}
+if (Number.isFinite(Number(body.discountSaved))) {
+  note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
+}
 
-        return base;
-      }).filter(Boolean);
+payloadToShopify = {
+  draft_order: {
+    ...baseDraft,
+    ...(note_attributes.length ? { note_attributes } : {})
+  }
+};
+}
 
-      const email = body.email && isValidEmail(body.email) ? String(body.email).trim() : undefined;
-
-      const baseDraft = {
-        line_items,
-        ...(email ? { email } : {}),
-        ...(body.customerId ? { customer: { id: body.customerId } } : {}),
-        ...(body.shipping_address ? { shipping_address: body.shipping_address } : {}),
-        ...(body.billing_address ? { billing_address: body.billing_address } : {}),
-        ...(body.note ? { note: body.note } : {}),
-        taxes_included: shopCfg.taxes_included,
-        tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
-      };
-
-      // ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
-      const note_attributes = Array.isArray(baseDraft.note_attributes) ? baseDraft.note_attributes.slice() : [];
-      if (body.discountCode) {
-        note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
+    // B) Annars: bygg egna custom lines från lineItems/lines (kör på ert pris)
+    if (!payloadToShopify) {
+      const items = Array.isArray(body.lineItems) ? body.lineItems :
+                    Array.isArray(body.lines)     ? body.lines     : [];
+      if (!items.length) {
+        return res.status(400).json({ error: 'Inga rader i payload' });
       }
-      if (Number.isFinite(Number(body.discountSaved))) {
-        note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
-      }
+ const shopCfg = await getShopTaxConfig();
+const line_items = await buildCustomLinesFromGeneric(items);
 
-      payloadToShopify = {
-        draft_order: {
-          ...baseDraft,
-          ...(note_attributes.length ? { note_attributes } : {})
-        }
-      };
-    }
+// Basdraft utan rabatt på raderna
+const baseDraft = {
+  line_items,
+  ...(body.note ? { note: body.note } : {}),
+  ...(body.customerId ? { customer: { id: body.customerId } } : {}),
+  taxes_included: shopCfg.taxes_included,
+  tags: 'pressify,draft-checkout'
+};
 
-    // 4) Skicka till Shopify (med sanering + cache + retry)
-    payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email
+// ⬇️ Rabattkod endast i note_attributes (undvik line properties)
+const note_attributes = [];
+if (body.discountCode) {
+  note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
+}
+if (Number.isFinite(Number(body.discountSaved))) {
+  note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
+}
 
-    // Idempotent cache: återanvänd samma draft om samma payload kommer igen inom 10 minuter
-    const cacheKey = computeDraftKey(body);
-    const now = Date.now();
-    const cached = draftCache.get(cacheKey);
-    const TEN_MIN = 10 * 60 * 1000;
+payloadToShopify = {
+  draft_order: {
+    ...baseDraft,
+    ...(note_attributes.length ? { note_attributes } : {})
+  }
+};
+  }
 
-    if (cached && (now - cached.at) < TEN_MIN) {
-      return res.json(cached.response);
-    }
+    // 4) Skicka till Shopify
+    payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
+      
+    const r = await axios.post(
+      `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
+      payloadToShopify,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
+    );
 
-    // Skapa draft_order hos Shopify med robust retry/backoff vid rate limit
-    const draft = await createShopifyDraftWithRetry(payloadToShopify);
-
+    const draft = r.data?.draft_order;
     if (!draft || !draft.invoice_url) {
       return res.status(502).json({ error: 'draft_order saknar invoice_url' });
     }
 
     // 5) Svara uniformt (frontend letar flera nycklar)
-    const responsePayload = {
+    return res.json({
       ok: true,
       draft_order_id: draft.id,
       name: draft.name,
       invoice_url: draft.invoice_url,
       invoiceUrl: draft.invoice_url,
       url: draft.invoice_url
-    };
-
-    draftCache.set(cacheKey, { at: now, response: responsePayload });
-
-    return res.json(responsePayload);
-
-  } catch (e) {
+    });
+  } catch (e){
     console.error('[draft create] error:', e?.response?.data || e.message);
     try { setCorsOnError(req, res); } catch {}
     return res.status(500).json({ error: 'internal' });
   }
 }
+
 
 // 4) Montera alla endpoints som frontend testar → samma handler
 const DRAFT_ROUTES = [
@@ -1375,9 +1322,10 @@ const DRAFT_ROUTES = [
 ];
 DRAFT_ROUTES.forEach(p => app.post(p, handleDraftCreate));
 
+
+
 /* ========= SLUT PRESSIFY DRAFT ORDER ========= */
-
-
+// ===== NY ROUTE (DIN) – placerad direkt efter "SLUT PRESSIFY DRAFT ORDER" =====
 app.all('/din/nya/route', async (req, res) => {
   try {
     // Din helt fristående logik här
