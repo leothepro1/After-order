@@ -1126,13 +1126,13 @@ function normalizePrice(v) {
   return safe.toFixed(2);
 }
 
-// Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem
+// Minimal emailvalidering; vi tar hellre bort felaktiga email än låter Shopify tolka dem fel
 function isValidEmail(e) {
   if (!e || typeof e !== 'string') return false;
-  // enkel men robust: text@text.tld
-  , inga mellanslag
-  return /^[^\s@]+@[^\s@]+.[^\s@]+$/.test(e.trim());
+  // enkel men robust: text@text.tld, inga mellanslag
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
 }
+
 
 // Ta bort felaktiga email så att Shopify inte försöker koppla kund eller trigga moms/discount-regler fel
 function purgeInvalidEmails(payload) {
