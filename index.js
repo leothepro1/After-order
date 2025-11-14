@@ -58,6 +58,130 @@ const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
 // överst bland konfig:
+// Publik butik (för delningslänkar 
+
+// ===== Pressify: order-scope / team / rabatt på ordernivå =====
+const PRESSIFY_NS = 'pressify';
+const PRESSIFY_SCOPE_KEY = 'scope';
+const PRESSIFY_TEAM_ID_KEY = 'team_id';
+const PRESSIFY_TEAM_NAME_KEY = 'team_name';
+const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
+const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
+
+/**
+ * Normaliserar scope/team från payloadet som kommer från cart.js
+ * scope: "personal" (default) eller "team"
+ */
+function pfExtractScopeFromPayload(body = {}) {
+  const rawScope = String(body.scope || '').toLowerCase();
+  const scope = rawScope === 'team' ? 'team' : 'personal';
+
+  const teamId = scope === 'team' && body.teamId
+    ? String(body.teamId)
+    : null;
+
+  const teamName = scope === 'team' && body.teamName
+    ? String(body.teamName)
+    : null;
+
+  return { scope, teamId, teamName };
+}
+
+/**
+ * Bygger:
+ *  - note_attributes:
+ *      pf_scope, pf_team_id, pf_team_name,
+ *      discount_code, discount_saved
+ *  - metafields (namespace "pressify"):
+ *      scope, team_id, team_name, discount_code, discount_saved
+ *
+ *  OBS: ändrar inte priser – rabatten är redan inräknad i custom-priserna.
+ */
+function pfBuildDraftOrderMeta(baseDraft = {}, body = {}) {
+  const { scope, teamId, teamName } = pfExtractScopeFromPayload(body);
+
+  // Behåll ev. befintliga note_attributes / metafields
+  const note_attributes = Array.isArray(baseDraft.note_attributes)
+    ? baseDraft.note_attributes.slice()
+    : [];
+
+  const metafields = Array.isArray(baseDraft.metafields)
+    ? baseDraft.metafields.slice()
+    : [];
+
+  // ---- NOTE ATTRIBUTES: scope + team ----
+  if (scope === 'team') {
+    note_attributes.push({ name: 'pf_scope', value: 'team' });
+    if (teamId)   note_attributes.push({ name: 'pf_team_id', value: teamId });
+    if (teamName) note_attributes.push({ name: 'pf_team_name', value: teamName });
+  } else {
+    // Personlig workspace
+    note_attributes.push({ name: 'pf_scope', value: 'personal' });
+  }
+
+  // ---- NOTE ATTRIBUTES: rabatt-loggning ----
+  if (body.discountCode) {
+    note_attributes.push({
+      name: 'discount_code',
+      value: String(body.discountCode)
+    });
+  }
+
+  if (Number.isFinite(Number(body.discountSaved))) {
+    note_attributes.push({
+      name: 'discount_saved',
+      value: String(Number(body.discountSaved).toFixed(2))
+    });
+  }
+
+  // ---- METAFIELDS: scope/team ----
+  metafields.push({
+    namespace: PRESSIFY_NS,
+    key: PRESSIFY_SCOPE_KEY,
+    type: 'single_line_text_field',
+    value: scope
+  });
+
+  if (scope === 'team' && teamId) {
+    metafields.push({
+      namespace: PRESSIFY_NS,
+      key: PRESSIFY_TEAM_ID_KEY,
+      type: 'single_line_text_field',
+      value: teamId
+    });
+
+    if (teamName) {
+      metafields.push({
+        namespace: PRESSIFY_NS,
+        key: PRESSIFY_TEAM_NAME_KEY,
+        type: 'single_line_text_field',
+        value: teamName
+      });
+    }
+  }
+
+  // ---- METAFIELDS: rabatt-loggning ----
+  if (body.discountCode) {
+    metafields.push({
+      namespace: PRESSIFY_NS,
+      key: PRESSIFY_DISCOUNT_CODE_KEY,
+      type: 'single_line_text_field',
+      value: String(body.discountCode)
+    });
+  }
+
+  if (Number.isFinite(Number(body.discountSaved))) {
+    metafields.push({
+      namespace: PRESSIFY_NS,
+      key: PRESSIFY_DISCOUNT_SAVED_KEY,
+      type: 'number_decimal',
+      value: Number(body.discountSaved).toFixed(2)
+    });
+  }
+
+  return { note_attributes, metafields };
+}
+// överst bland konfig:
 // Publik butik (för delningslänkar till Shopify-sidan)
 const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
@@ -1224,58 +1348,48 @@ const baseDraft = {
   tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
 };
 
-// ⬇️ Lägg rabattkod på ORDERNIVÅ (note_attributes), inga line properties
-const note_attributes = Array.isArray(baseDraft.note_attributes) ? baseDraft.note_attributes.slice() : [];
-if (body.discountCode) {
-  note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
-}
-if (Number.isFinite(Number(body.discountSaved))) {
-  note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
-}
+// Pressify: scope/team + rabattkod i note_attributes + metafields
+const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
 
 payloadToShopify = {
   draft_order: {
     ...baseDraft,
-    ...(note_attributes.length ? { note_attributes } : {})
+    ...(note_attributes.length ? { note_attributes } : {}),
+    ...(metafields.length ? { metafields } : {})
   }
 };
 }
 
-    // B) Annars: bygg egna custom lines från lineItems/lines (kör på ert pris)
-    if (!payloadToShopify) {
+  if (!payloadToShopify) {
       const items = Array.isArray(body.lineItems) ? body.lineItems :
                     Array.isArray(body.lines)     ? body.lines     : [];
       if (!items.length) {
         return res.status(400).json({ error: 'Inga rader i payload' });
       }
- const shopCfg = await getShopTaxConfig();
-const line_items = await buildCustomLinesFromGeneric(items);
 
-// Basdraft utan rabatt på raderna
-const baseDraft = {
-  line_items,
-  ...(body.note ? { note: body.note } : {}),
-  ...(body.customerId ? { customer: { id: body.customerId } } : {}),
-  taxes_included: shopCfg.taxes_included,
-  tags: 'pressify,draft-checkout'
-};
+      const shopCfg = await getShopTaxConfig();
+      const line_items = await buildCustomLinesFromGeneric(items);
 
-// ⬇️ Rabattkod endast i note_attributes (undvik line properties)
-const note_attributes = [];
-if (body.discountCode) {
-  note_attributes.push({ name: 'discount_code', value: String(body.discountCode) });
-}
-if (Number.isFinite(Number(body.discountSaved))) {
-  note_attributes.push({ name: 'discount_saved', value: String(Number(body.discountSaved).toFixed(2)) });
-}
+      // Basdraft utan rabatt på raderna – litar på custom-priser från cart.js
+      const baseDraft = {
+        line_items,
+        ...(body.note ? { note: body.note } : {}),
+        ...(body.customerId ? { customer: { id: body.customerId } } : {}),
+        taxes_included: shopCfg.taxes_included,
+        tags: 'pressify,draft-checkout'
+      };
 
-payloadToShopify = {
-  draft_order: {
-    ...baseDraft,
-    ...(note_attributes.length ? { note_attributes } : {})
-  }
-};
-  }
+      // Pressify: scope/team + rabattkod i note_attributes + metafields
+      const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
+
+      payloadToShopify = {
+        draft_order: {
+          ...baseDraft,
+          ...(note_attributes.length ? { note_attributes } : {}),
+          ...(metafields.length ? { metafields } : {})
+        }
+      };
+    }
 
     // 4) Skicka till Shopify
     payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
@@ -2832,7 +2946,8 @@ app.use('/proxy/orders-meta', (req, res, next) => {
     const cid = req.query.logged_in_customer_id || 'anon';
     const first = req.query.first || '25';
     const scope = req.query.scope || 'customer';
-    const key = `${cid}:${first}:${scope}`;
+    const teamId = req.query.teamId || '';
+    const key = `${cid}:${first}:${scope}:${teamId}`;
 
     const hit = ordersMetaCache.get(key);
     if (hit && (Date.now() - hit.at) < 20000) {
@@ -2868,6 +2983,32 @@ function gidToId(gid) {
 }
 function toGid(kind, id) {
   return `gid://shopify/${kind}/${String(id)}`;
+}
+
+/**
+ * Filtrerar orders på workspace-scope:
+ *  - scope=personal  → bara personliga (eller orders utan scope-fält)
+ *  - scope=team      → bara team-ordrar, ev. filtrerade på teamId
+ *  - övrigt/ingen    → ingen extra filtrering
+ */
+function applyWorkspaceScopeFilter(list, scopeParam, teamIdParam) {
+  const scope = String(scopeParam || '').toLowerCase();
+  const teamId = teamIdParam != null ? String(teamIdParam) : null;
+
+  if (scope === 'personal') {
+    // Allt som inte är markerat som team räknas som personal
+    return (list || []).filter(o => (o.scope || 'personal') !== 'team');
+  }
+
+  if (scope === 'team') {
+    return (list || []).filter(o => {
+      if ((o.scope || 'personal') !== 'team') return false;
+      if (!teamId) return true;
+      return String(o.teamId || '') === teamId;
+    });
+  }
+
+  return list || [];
 }
 
 // ===== TEAMS: helpers för customer.metafields.teams.teams (JSON) =====
@@ -3008,6 +3149,10 @@ if (scope === 'all') {
               displayFulfillmentStatus
               tags
               metafield(namespace: $ns, key: $key) { value }
+              metafields(namespace: "pressify", keys: ["scope", "team_id", "team_name"]) {
+                key
+                value
+              }
             }
           }
         }
@@ -3041,7 +3186,7 @@ if (scope === 'all') {
       throw new Error('GraphQL error');
     }
 
-    const edges = data?.data?.orders?.edges || [];
+const edges = data?.data?.orders?.edges || [];
 
     const filteredEdges = edges.filter(e => {
       if (scope === 'team') return true;
@@ -3049,14 +3194,45 @@ if (scope === 'all') {
       return !tags.some(t => String(t || '').startsWith('pressify_team_id:'));
     });
 
-    const out = filteredEdges.map(e => ({
-      id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
-      name: e.node.name,
-      processedAt: e.node.processedAt,
-      metafield: e.node.metafield ? e.node.metafield.value : null,
-      fulfillmentStatus: e.node.fulfillmentStatus || null,
-      displayFulfillmentStatus: null
-    }));
+    const out = filteredEdges.map(e => {
+      const node = e.node;
+      const base = {
+        id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
+        name: node.name,
+        processedAt: node.processedAt,
+        metafield: node.metafield ? node.metafield.value : null,
+        fulfillmentStatus: node.fulfillmentStatus || null,
+        displayFulfillmentStatus: null
+      };
+
+      // Pressify: scope/team från order-metafields
+      let scopeVal = 'personal';
+      let teamId = null;
+      let teamName = null;
+
+      const pfMfs = Array.isArray(node.metafields) ? node.metafields : [];
+      const mfScope = pfMfs.find(m => m.key === 'scope');
+      const mfTeamId = pfMfs.find(m => m.key === 'team_id');
+      const mfTeamName = pfMfs.find(m => m.key === 'team_name');
+
+      if (mfScope && typeof mfScope.value === 'string') {
+        const val = mfScope.value.toLowerCase();
+        scopeVal = val === 'team' ? 'team' : 'personal';
+      }
+
+      if (scopeVal === 'team') {
+        if (mfTeamId && mfTeamId.value != null) {
+          teamId = String(mfTeamId.value);
+        }
+        if (mfTeamName && mfTeamName.value != null) {
+          teamName = String(mfTeamName.value);
+        }
+      }
+
+      return { ...base, scope: scopeVal, teamId, teamName };
+    });
+
+    // out används fortfarande till Redis-seed nedan.
     try {
       if (WRITE_ORDERS_TO_REDIS) {
         const cacheIdRaw =
@@ -3084,7 +3260,6 @@ if (scope === 'all') {
           const orders = ordersRes.data.orders || [];
 
           const out = [];
-          // ... efter vi hämtat orders med REST:
 for (const o of orders) {
   const mfRes = await axios.get(
     `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
@@ -3144,16 +3319,46 @@ const query = `
       throw new Error('GraphQL error');
     }
 
-    const edges = data?.data?.orders?.edges || [];
-const out = edges.map(e => ({
-  id: parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id),
-  name: e.node.name,
-  processedAt: e.node.processedAt,
-  metafield: e.node.metafield ? e.node.metafield.value : null,
-  fulfillmentStatus: e.node.fulfillmentStatus || null,
-  displayFulfillmentStatus: null
-}));
-// ---- NYTT: seeda Redis med färska order-sammanfattningar ----
+const edges = data?.data?.orders?.edges || [];
+const out = edges.map(e => {
+  const node = e.node;
+  const base = {
+    id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
+    name: node.name,
+    processedAt: node.processedAt,
+    metafield: node.metafield ? node.metafield.value : null,
+    fulfillmentStatus: node.fulfillmentStatus || null,
+    displayFulfillmentStatus: null
+  };
+
+  // Pressify: scope/team från order-metafields (om de finns)
+  let scopeVal = 'personal';
+  let teamId = null;
+  let teamName = null;
+
+  // I kundläget är queryn idag utan pressify-metafields; äldre ordrar får default "personal".
+  const pfMfs = Array.isArray(node.metafields) ? node.metafields : [];
+  const mfScope = pfMfs.find(m => m.key === 'scope');
+  const mfTeamId = pfMfs.find(m => m.key === 'team_id');
+  const mfTeamName = pfMfs.find(m => m.key === 'team_name');
+
+  if (mfScope && typeof mfScope.value === 'string') {
+    const val = mfScope.value.toLowerCase();
+    scopeVal = val === 'team' ? 'team' : 'personal';
+  }
+
+  if (scopeVal === 'team') {
+    if (mfTeamId && mfTeamId.value != null) {
+      teamId = String(mfTeamId.value);
+    }
+    if (mfTeamName && mfTeamName.value != null) {
+      teamName = String(mfTeamName.value);
+    }
+  }
+
+  return { ...base, scope: scopeVal, teamId, teamName };
+});
+
 try {
    if (WRITE_ORDERS_TO_REDIS) {
     const cidRaw = String(loggedInCustomerId || '');
@@ -3164,7 +3369,8 @@ try {
 // ---- /NYTT ----
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ orders: out });
+    const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
+    return res.json({ orders: scopedOut });
   } catch (e) {
     // 🔁 Fallback: befintlig REST-implementation (oförändrad) om något går fel
     try {
@@ -3178,27 +3384,93 @@ try {
       );
       const orders = ordersRes.data.orders || [];
 
-      const out = [];
+ const out = [];
       for (const o of orders) {
         const mfRes = await axios.get(
           `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
-        const mf = (mfRes.data.metafields || []).find(
+        const metafields = mfRes.data.metafields || [];
+
+        const projectMf = metafields.find(
           m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
         );
- out.push({
-  id: o.id,
-  name: o.name,
-  processedAt: o.processed_at || o.created_at,
-  metafield: mf ? mf.value : null,
-  fulfillmentStatus: o.fulfillment_status || null,
-  displayFulfillmentStatus: null
-});
+
+        const scopeMf = metafields.find(
+          m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_SCOPE_KEY
+        );
+        const teamIdMf = metafields.find(
+          m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_TEAM_ID_KEY
+        );
+        const teamNameMf = metafields.find(
+          m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_TEAM_NAME_KEY
+        );
+
+        // Default: personal
+        let scopeVal = 'personal';
+        let teamId = null;
+        let teamName = null;
+
+        if (scopeMf && typeof scopeMf.value === 'string') {
+          const val = scopeMf.value.toLowerCase();
+          scopeVal = val === 'team' ? 'team' : 'personal';
+        }
+
+        if (scopeVal === 'team') {
+          if (teamIdMf && teamIdMf.value != null) {
+            teamId = String(teamIdMf.value);
+          }
+          if (teamNameMf && teamNameMf.value != null) {
+            teamName = String(teamNameMf.value);
+          }
+        }
+
+        // Fallback för äldre ordrar: läs från line item properties _pf_scope/_pf_team_id/_pf_team_name
+        if (!scopeMf) {
+          try {
+            const line = (o.line_items || []).find(li =>
+              Array.isArray(li.properties) &&
+              li.properties.some(p => p && p.name === '_pf_scope')
+            );
+
+            if (line && Array.isArray(line.properties)) {
+              const pScope = line.properties.find(p => p.name === '_pf_scope');
+              const pTeamId = line.properties.find(p => p.name === '_pf_team_id');
+              const pTeamName = line.properties.find(p => p.name === '_pf_team_name');
+
+              if (pScope && typeof pScope.value === 'string') {
+                const val = pScope.value.toLowerCase();
+                scopeVal = val === 'team' ? 'team' : 'personal';
+              }
+
+              if (scopeVal === 'team') {
+                if (pTeamId && pTeamId.value != null) {
+                  teamId = String(pTeamId.value);
+                }
+                if (pTeamName && pTeamName.value != null) {
+                  teamName = String(pTeamName.value);
+                }
+              }
+            }
+          } catch {}
+        }
+
+        out.push({
+          id: o.id,
+          name: o.name,
+          processedAt: o.processed_at || o.created_at,
+          metafield: projectMf ? projectMf.value : null,
+          fulfillmentStatus: o.fulfillment_status || null,
+          displayFulfillmentStatus: null,
+          scope: scopeVal,
+          teamId,
+          teamName
+        });
       }
 
       res.setHeader('Cache-Control', 'no-store');
-      return res.json({ orders: out });
+      const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
+      return res.json({ orders: scopedOut });
     } catch (err) {
       console.error('proxy/orders-meta error:', err?.response?.data || err.message);
       setCorsOnError(req, res);
