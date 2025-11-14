@@ -2747,122 +2747,171 @@ app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 
 
-// ===== DUPLICATE ROUTE for stores where Proxy URL includes "/proxy/orders-meta" =====
+// ===== DUPLICATE ROUTE: /proxy/orders-meta/avatar (team-aware) =====
 app.all('/proxy/orders-meta/avatar', async (req, res) => {
   try {
-    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+    // 1) Verifiera App Proxy-signaturen
+    const search = req.url.split('?')[1] || '';
+    if (!verifyAppProxySignature(search)) {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) return res.status(401).json({ error: 'Not logged in' });
-
-    if (req.method === 'GET') {
-      const mfRes = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
-      return res.json({ metafield: mf ? mf.value : null });
+    // 2) Shopify skickar alltid logged_in_customer_id = PERSONLIGT konto
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'Not logged in' });
     }
 
-    if (req.method === 'POST') {
-      const { action, meta } = req.body || {};
+    const normalizeCustomerId = (cid) => {
+      if (!cid) return null;
+      const s = String(cid);
+      return s.startsWith('gid://') ? s.split('/').pop() : s;
+    };
 
-      const existingRes = await axios.get(
+    const loggedInCustomerId = normalizeCustomerId(loggedInCustomerIdRaw);
+
+    // ===== GET (legacy): hämta avatar för det personliga kontot =====
+    if (req.method === 'GET') {
+      const { data } = await axios.get(
         `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
         { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
       );
-      const existing = (existingRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+      const mf = (data.metafields || []).find(
+        m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
+      );
+      return res.json({ ok: true, metafield: mf ? mf.value : null });
+    }
 
-      if (action === 'delete') {
-        if (existing) {
-          await axios.delete(
-            `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-        }
-        return res.json({ ok: true, deleted: true });
-      }
+    // Vi hanterar allt annat via POST
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
 
-      if (action === 'save') {
-        // Tillåt att spara enbart selection/marketing/role, eller bild, eller kombination
-        if (
-          !meta ||
-          (
-            !meta.public_id &&
-            !meta.secure_url &&
-            typeof meta.selection === 'undefined' &&
-            typeof meta.marketing === 'undefined' &&
-            typeof meta.role === 'undefined'
-          )
-        ) {
-          return res.status(400).json({ error: 'Invalid meta payload' });
-        }
+    const body = req.body || {};
+    const { action, meta, targetType, teamCustomerId } = body;
 
-        // Hämta ev. befintligt metafält (för att bevara gamla värden)
-        const mfRes2 = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
+    // 3) Bestäm vilket kund-ID som är "target":
+    //    - personal  → loggedInCustomerId
+    //    - team      → teamCustomerId (från frontend)
+    let targetCustomerId = loggedInCustomerId;
+    if (String(targetType || '').toLowerCase() === 'team' && teamCustomerId) {
+      targetCustomerId = normalizeCustomerId(teamCustomerId);
+    }
+    if (!targetCustomerId) {
+      return res.status(400).json({ error: 'Missing target customer id' });
+    }
+
+    // TODO säkerhet:
+    //  - läs customer.metafields.teams.teams för loggedInCustomerId
+    //  - verifiera att loggedInCustomerId är medlem/ägare i det teamCustomerId som ändras
+
+    // 4) Läs befintligt Profilbild-metafält för targetCustomerId
+    const { data: mfData } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const existing = (mfData.metafields || []).find(
+      m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
+    );
+
+    // ===== action: get (team eller personal) =====
+    if (action === 'get') {
+      return res.json({
+        ok: true,
+        metafield: existing ? existing.value : null
+      });
+    }
+
+    // ===== action: delete =====
+    if (action === 'delete') {
+      if (existing) {
+        await axios.delete(
+          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
-        const existing2 = (mfRes2.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+      }
+      return res.json({ ok: true, deleted: true });
+    }
 
-        let existingValue = {};
-        try { existingValue = existing2?.value ? JSON.parse(existing2.value) : {}; } catch {}
+    // ===== action: save =====
+    if (action === 'save') {
+      if (
+        !meta ||
+        (
+          !meta.public_id &&
+          !meta.secure_url &&
+          typeof meta.selection === 'undefined' &&
+          typeof meta.marketing === 'undefined' &&
+          typeof meta.role === 'undefined'
+        )
+      ) {
+        return res.status(400).json({ error: 'Invalid meta payload' });
+      }
 
-        const normalizeBool = (v) => {
-          if (typeof v === 'boolean') return v;
-          if (typeof v === 'number') return v !== 0;
-          if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
-          return false;
-        };
+      let existingValue = {};
+      try {
+        existingValue = existing && existing.value ? JSON.parse(existing.value) : {};
+      } catch {
+        existingValue = {};
+      }
 
-        const payload = {
+      const normalizeBool = (v) => {
+        if (typeof v === 'boolean') return v;
+        if (typeof v === 'number') return v !== 0;
+        if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
+        return false;
+      };
+
+      const valueObj = {
+        // Bildfält – bevara gamla om de inte skickas
+        public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
+        version:    meta.version ?? existingValue.version ?? null,
+        secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
+
+        // Övriga fält du redan använder
+        selection:  String(meta.selection ?? existingValue.selection ?? ''),
+        marketing:  (typeof meta.marketing !== 'undefined')
+                      ? normalizeBool(meta.marketing)
+                      : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
+        role:       String(meta.role ?? existingValue.role ?? ''),
+
+        updatedAt:  new Date().toISOString()
+      };
+
+      const payload = {
+        metafield: {
           namespace: 'Profilbild',
           key: 'Profilbild',
           type: 'json',
-          value: JSON.stringify({
-            public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
-            version:    meta.version ?? existingValue.version ?? null,
-            secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
-
-            selection:  String(meta.selection ?? existingValue.selection ?? ''),
-            marketing:  (typeof meta.marketing !== 'undefined')
-                          ? normalizeBool(meta.marketing)
-                          : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
-            role:       String(meta.role ?? existingValue.role ?? ''),
-
-            updatedAt:  new Date().toISOString()
-          })
-        };
-
-        if (existing2) {
-          await axios.put(
-            `https://${SHOP}/admin/api/2025-07/metafields/${existing2.id}.json`,
-            { metafield: { id: existing2.id, ...payload } },
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-        } else {
-          await axios.post(
-            `https://${SHOP}/admin/api/2025-07/customers/${loggedInCustomerId}/metafields.json`,
-            { metafield: payload },
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
+          value: JSON.stringify(valueObj)
         }
+      };
 
-        return res.json({ ok: true });
+      if (existing) {
+        await axios.put(
+          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+          { metafield: { id: existing.id, ...payload.metafield } },
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+      } else {
+        await axios.post(
+          `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+          payload,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
       }
 
-      return res.status(400).json({ error: 'Unknown action' });
+      return res.json({ ok: true });
     }
 
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
     console.error('/proxy/orders-meta/avatar error:', err?.response?.data || err.message);
     setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 
 // 🔹 Hjälp: hämta product.handle för en lista av product_id (unik, liten volym per order)
 const HANDLE_CACHE_TTL = 5 * 60 * 1000;
