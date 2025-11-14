@@ -3448,7 +3448,6 @@ app.post('/proxy/profile/update', async (req, res) => {
 });
 // AFTER (utdrag ur index.js)
 
-// Duplicerad route för App Proxy-sökvägen /apps/orders-meta/profile/update
 app.post('/proxy/orders-meta/profile/update', async (req, res) => {
   try {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -3471,9 +3470,8 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
     const lastName  = (req.body.last_name  || '').trim();
     const email     = (req.body.email      || '').trim();
 
-    // Nytt: styr mål-konto (personligt / team) via hidden fields
-    const targetTypeRaw      = String(req.body.target_type || '').trim().toLowerCase();
-    const teamCustomerIdRaw  = String(req.body.team_customer_id || '').trim();
+    const targetTypeRaw     = String(req.body.target_type || '').trim().toLowerCase();
+    const teamCustomerIdRaw = String(req.body.team_customer_id || '').trim();
 
     let targetCustomerId = loggedInCustomerId;
     let isTeamTarget = false;
@@ -3484,15 +3482,13 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
         return res.status(400).json({ error: 'Invalid team customer id' });
       }
 
-      // Säkerhet: verifiera att team-kontot verkligen är ett team
-      // och att inloggad kund är ägare
+      // Säkerhet: verifiera att team-kontot verkligen är ett team och att inloggad kund är owner
       const teamMeta = await readCustomerTeams(teamIdNum);
       const teamValue = teamMeta?.value || null;
 
       if (!teamValue || !teamValue.isTeam) {
         return res.status(400).json({ error: 'not_a_team_account' });
       }
-
       if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
         return res.status(403).json({ error: 'not_team_owner' });
       }
@@ -3505,9 +3501,6 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
       return res.status(400).json({ error: 'Missing target customer id' });
     }
 
-    // Bygg payload mot rätt konto
-    // - Personligt konto: namn + ev. e-post
-    // - Teamkonto: endast namn (e-post ignoreras här)
     const customerPayload = {
       id: targetCustomerId,
       ...(firstName ? { first_name: firstName } : {}),
@@ -3526,9 +3519,8 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
       }
     );
 
-    // Om vi uppdaterar ett TEAM-konto → synca TEAMS-metafälten (teamName)
+    // Om vi uppdaterar ett TEAM-konto → synca teamnamnet i metafält
     if (isTeamTarget && firstName) {
-      // 1) Uppdatera TEAMS-metafält på TEAM-kontot
       const currentTeamMeta = await readCustomerTeams(targetCustomerId);
       let teamValue = currentTeamMeta.value;
       if (!teamValue || typeof teamValue !== 'object') {
@@ -3538,7 +3530,6 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
       teamValue.teamName = firstName;
       await writeCustomerTeams(targetCustomerId, teamValue);
 
-      // 2) Uppdatera ägarens memberships[].teamName så att header/UI blir rätt
       const ownerMeta = await readCustomerTeams(loggedInCustomerId);
       let ownerValue = ownerMeta.value;
       if (ownerValue && typeof ownerValue === 'object' && Array.isArray(ownerValue.memberships)) {
@@ -3550,7 +3541,6 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
           }
           return m;
         });
-
         if (changed) {
           await writeCustomerTeams(loggedInCustomerId, ownerValue);
         }
@@ -3568,8 +3558,173 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
       return res.status(500).json({ error: 'Internal error' });
     }
     return res.redirect(302, '/account?profile_error=Internal%20error');
+ }
+});
+
+//
+// NYTT: Team-adresser via Admin API (utan session-switch)
+//
+app.all('/proxy/orders-meta/team-addresses', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'Invalid signature' });
+    }
+
+    const normalizeCustomerId = (cid) => {
+      if (!cid) return null;
+      const s = String(cid).trim();
+      return s.startsWith('gid://') ? s.split('/').pop() : s;
+    };
+
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'Not logged in' });
+    }
+    const loggedInCustomerId = normalizeCustomerId(loggedInCustomerIdRaw);
+
+    const method = req.method.toUpperCase();
+    const body   = method === 'GET' ? {} : (req.body || {});
+    const action = (body.action || req.query.action || 'list').toLowerCase();
+
+    const teamCustomerIdRaw =
+      body.team_customer_id ||
+      req.query.team_customer_id ||
+      '';
+
+    const teamCustomerId = normalizeCustomerId(teamCustomerIdRaw);
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'Missing team_customer_id' });
+    }
+
+    // Säkerhet: verifiera att loggedInCustomerId är owner/admin på teamet
+    const teamMeta = await readCustomerTeams(teamCustomerId);
+    const teamValue = teamMeta?.value || null;
+    if (!teamValue || !teamValue.isTeam) {
+      return res.status(400).json({ error: 'not_a_team_account' });
+    }
+    if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
+      return res.status(403).json({ error: 'not_team_owner' });
+    }
+
+    const baseUrl = `https://${SHOP}/admin/api/2025-07/customers/${teamCustomerId}`;
+
+    if (action === 'list') {
+      const resp = await axios.get(`${baseUrl}/addresses.json`, {
+        headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+      });
+      const addresses = resp.data?.addresses || [];
+      const defaultAddress = addresses.find(a => a.default) || null;
+
+      return res.json({
+        ok: true,
+        teamCustomerId,
+        defaultAddressId: defaultAddress ? defaultAddress.id : null,
+        addresses
+      });
+    }
+
+    if (action === 'create') {
+      const addressPayload = {
+        first_name: (body.first_name || '').trim(),
+        last_name:  (body.last_name  || '').trim(),
+        company:    (body.company    || '').trim(),
+        address1:   (body.address1   || '').trim(),
+        address2:   (body.address2   || '').trim(),
+        zip:        (body.zip        || '').trim(),
+        city:       (body.city       || '').trim(),
+        country:    (body.country    || '').trim() || 'Sweden',
+        province:   (body.province   || '').trim(),
+        phone:      (body.phone      || '').trim(),
+        default:    body.default === '1' || body.default === 'true'
+      };
+
+      const resp = await axios.post(
+        `${baseUrl}/addresses.json`,
+        { address: addressPayload },
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+      );
+
+      return res.json({ ok: true, address: resp.data.address });
+    }
+
+    if (action === 'update') {
+      const addrIdRaw = body.address_id || body.id;
+      const addrId = addrIdRaw ? String(addrIdRaw).trim() : null;
+      if (!addrId) {
+        return res.status(400).json({ error: 'Missing address_id' });
+      }
+
+      const addressPayload = {
+        id: addrId,
+        ...(body.first_name ? { first_name: body.first_name.trim() } : {}),
+        ...(body.last_name  ? { last_name:  body.last_name.trim()  } : {}),
+        ...(body.company    ? { company:    body.company.trim()    } : {}),
+        ...(body.address1   ? { address1:   body.address1.trim()   } : {}),
+        ...(body.address2   ? { address2:   body.address2.trim()   } : {}),
+        ...(body.zip        ? { zip:        body.zip.trim()        } : {}),
+        ...(body.city       ? { city:       body.city.trim()       } : {}),
+        ...(body.country    ? { country:    body.country.trim()    } : {}),
+        ...(body.province   ? { province:   body.province.trim()   } : {}),
+        ...(body.phone      ? { phone:      body.phone.trim()      } : {})
+      };
+
+      const resp = await axios.put(
+        `${baseUrl}/addresses/${addrId}.json`,
+        { address: addressPayload },
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+      );
+
+      // Default-flagga separat
+      if (body.default === '1' || body.default === 'true') {
+        await axios.put(
+          `${baseUrl}/addresses/${addrId}/default.json`,
+          {},
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return res.json({ ok: true, address: resp.data.address });
+    }
+
+    if (action === 'delete') {
+      const addrIdRaw = body.address_id || body.id;
+      const addrId = addrIdRaw ? String(addrIdRaw).trim() : null;
+      if (!addrId) {
+        return res.status(400).json({ error: 'Missing address_id' });
+      }
+
+      await axios.delete(
+        `${baseUrl}/addresses/${addrId}.json`,
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      );
+
+      return res.json({ ok: true, deletedId: addrId });
+    }
+
+    if (action === 'set_default') {
+      const addrIdRaw = body.address_id || body.id;
+      const addrId = addrIdRaw ? String(addrIdRaw).trim() : null;
+      if (!addrId) {
+        return res.status(400).json({ error: 'Missing address_id' });
+      }
+
+      const resp = await axios.put(
+        `${baseUrl}/addresses/${addrId}/default.json`,
+        {},
+        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+      );
+
+      return res.json({ ok: true, address: resp.data.customer_address || null });
+    }
+
+    return res.status(400).json({ error: 'Unknown action' });
+  } catch (err) {
+    console.error('team-addresses error:', err?.response?.data || err.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 
 
 // ===== APP PROXY: Pressify Teams – skapa teamkonto =====
