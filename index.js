@@ -3455,31 +3455,107 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) return res.status(401).json({ error: 'Not logged in' });
+    const normalizeCustomerId = (cid) => {
+      if (!cid) return null;
+      const s = String(cid).trim();
+      return s.startsWith('gid://') ? s.split('/').pop() : s;
+    };
+
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'Not logged in' });
+    }
+    const loggedInCustomerId = normalizeCustomerId(loggedInCustomerIdRaw);
 
     const firstName = (req.body.first_name || '').trim();
     const lastName  = (req.body.last_name  || '').trim();
     const email     = (req.body.email      || '').trim();
 
-    // --- REST istället för GraphQL ---
-    const cidRaw = String(loggedInCustomerId || '').trim();
-    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    // Nytt: styr mål-konto (personligt / team) via hidden fields
+    const targetTypeRaw      = String(req.body.target_type || '').trim().toLowerCase();
+    const teamCustomerIdRaw  = String(req.body.team_customer_id || '').trim();
 
-    const payload = {
-      customer: {
-        id: cidNum,
-        ...(firstName ? { first_name: firstName } : {}),
-        ...(lastName  ? { last_name:  lastName  } : {}),
-        ...(email     ? { email } : {})
+    let targetCustomerId = loggedInCustomerId;
+    let isTeamTarget = false;
+
+    if (targetTypeRaw === 'team' && teamCustomerIdRaw) {
+      const teamIdNum = normalizeCustomerId(teamCustomerIdRaw);
+      if (!teamIdNum) {
+        return res.status(400).json({ error: 'Invalid team customer id' });
       }
+
+      // Säkerhet: verifiera att team-kontot verkligen är ett team
+      // och att inloggad kund är ägare
+      const teamMeta = await readCustomerTeams(teamIdNum);
+      const teamValue = teamMeta?.value || null;
+
+      if (!teamValue || !teamValue.isTeam) {
+        return res.status(400).json({ error: 'not_a_team_account' });
+      }
+
+      if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
+        return res.status(403).json({ error: 'not_team_owner' });
+      }
+
+      isTeamTarget = true;
+      targetCustomerId = teamIdNum;
+    }
+
+    if (!targetCustomerId) {
+      return res.status(400).json({ error: 'Missing target customer id' });
+    }
+
+    // Bygg payload mot rätt konto
+    // - Personligt konto: namn + ev. e-post
+    // - Teamkonto: endast namn (e-post ignoreras här)
+    const customerPayload = {
+      id: targetCustomerId,
+      ...(firstName ? { first_name: firstName } : {}),
+      ...(!isTeamTarget && lastName  ? { last_name:  lastName  } : {}),
+      ...(!isTeamTarget && email     ? { email } : {})
     };
 
     const upRes = await axios.put(
-      `https://${SHOP}/admin/api/2025-07/customers/${cidNum}.json`,
-      payload,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type': 'application/json' } }
+      `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}.json`,
+      { customer: customerPayload },
+      {
+        headers: {
+          'X-Shopify-Access-Token': ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
     );
+
+    // Om vi uppdaterar ett TEAM-konto → synca TEAMS-metafälten (teamName)
+    if (isTeamTarget && firstName) {
+      // 1) Uppdatera TEAMS-metafält på TEAM-kontot
+      const currentTeamMeta = await readCustomerTeams(targetCustomerId);
+      let teamValue = currentTeamMeta.value;
+      if (!teamValue || typeof teamValue !== 'object') {
+        teamValue = {};
+      }
+      teamValue.isTeam = true;
+      teamValue.teamName = firstName;
+      await writeCustomerTeams(targetCustomerId, teamValue);
+
+      // 2) Uppdatera ägarens memberships[].teamName så att header/UI blir rätt
+      const ownerMeta = await readCustomerTeams(loggedInCustomerId);
+      let ownerValue = ownerMeta.value;
+      if (ownerValue && typeof ownerValue === 'object' && Array.isArray(ownerValue.memberships)) {
+        let changed = false;
+        ownerValue.memberships = ownerValue.memberships.map((m) => {
+          if (Number(m.teamCustomerId) === Number(targetCustomerId)) {
+            changed = true;
+            return { ...m, teamName: firstName };
+          }
+          return m;
+        });
+
+        if (changed) {
+          await writeCustomerTeams(loggedInCustomerId, ownerValue);
+        }
+      }
+    }
 
     if (req.get('accept')?.includes('application/json')) {
       return res.json({ ok: true, customer: upRes.data.customer });
@@ -3492,8 +3568,9 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
       return res.status(500).json({ error: 'Internal error' });
     }
     return res.redirect(302, '/account?profile_error=Internal%20error');
- }
+  }
 });
+
 
 // ===== APP PROXY: Pressify Teams – skapa teamkonto =====
 // POST /proxy/orders-meta/teams/create  (via Shopify App Proxy: theme anropar /apps/orders-meta/teams/create)
