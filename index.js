@@ -659,7 +659,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Global throttling för Shopify Admin API (request-KÖ + 429-retry)
 // ANVÄNDER befintlig sleep(...) ovan – redeklarera den inte här!
-const ADMIN_MIN_DELAY_MS = 550; // ~1.8 rps (fortfarande under 2 rps)
+const ADMIN_MIN_DELAY_MS = 350; // ~1.8 rps (fortfarande under 2 rps)
 let __adminLastAt = 0;
 const __adminQueue = [];
 let __adminDraining = false;
