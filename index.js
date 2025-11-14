@@ -3385,6 +3385,12 @@ app.post('/proxy/orders-meta/profile/update', async (req, res) => {
 // - Skapar ett nytt team-konto (Shopify customer)
 // - Sätter teamets metafält (isTeam, teamName, ownerCustomerId, members[owner])
 // - Uppdaterar ägarens metafält med memberships[...]
+// ===== APP PROXY: Pressify Teams – skapa teamkonto =====
+// POST /proxy/orders-meta/teams/create  (via Shopify App Proxy: theme anropar /apps/orders-meta/teams/create)
+// Body: { teamName, teamEmail }
+// - Skapar ett nytt team-konto (Shopify customer)
+// - Sätter teamets metafält (isTeam, teamName, ownerCustomerId, members[owner])
+// - Uppdaterar ägarens metafält med memberships[...]
 app.post('/proxy/orders-meta/teams/create', async (req, res) => {
   try {
     // 1) Verifiera att anropet kommer via Shopify App Proxy
@@ -3392,7 +3398,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
       return res.status(403).json({ error: 'invalid_signature' });
     }
 
-    // 2) Kräver inloggad kund
+    // 2) Kräver inloggad kund (ägaren av teamet)
     const loggedInCustomerId = req.query.logged_in_customer_id;
     if (!loggedInCustomerId) {
       return res.status(401).json({ error: 'not_logged_in' });
@@ -3400,15 +3406,23 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
     const ownerIdStr = String(loggedInCustomerId || '').trim();
     const ownerIdNum = parseInt(ownerIdStr, 10);
 
-    // 3) Läs input
+    // 3) Läs input från frontend – vi förlitar oss nu på explicit teamEmail
     const teamName = String(req.body?.teamName || '').trim();
-    const teamEmailRaw = String(req.body?.teamEmail || req.body?.email || '').trim().toLowerCase();
+    const teamEmailRaw = String(req.body?.teamEmail || '').trim().toLowerCase();
 
     if (!teamName) {
       return res.status(400).json({ error: 'missing_team_name' });
     }
+    if (!teamEmailRaw) {
+      return res.status(400).json({ error: 'missing_email_for_team' });
+    }
+    if (!isValidEmail(teamEmailRaw)) {
+      return res.status(400).json({ error: 'invalid_email' });
+    }
 
-    // 4) Hämta ägarens e-post (fallback om teamEmail inte skickas)
+    const finalTeamEmail = teamEmailRaw;
+
+    // 4) Hämta ägarens e-post (används enbart för members[0].email)
     let ownerEmail = '';
     try {
       const ownerRes = await axios.get(
@@ -3418,11 +3432,6 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
       ownerEmail = String(ownerRes.data?.customer?.email || '').trim();
     } catch (e) {
       console.warn('create team: kunde inte läsa ägarens kunddata', e?.response?.data || e.message);
-    }
-
-    const finalTeamEmail = teamEmailRaw || ownerEmail;
-    if (!finalTeamEmail) {
-      return res.status(400).json({ error: 'missing_email_for_team' });
     }
 
     // 5) Skapa team-kund i Shopify (vanligt customer-konto)
@@ -3436,16 +3445,36 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
       }
     };
 
-    const createRes = await axios.post(
-      `https://${SHOP}/admin/api/2025-07/customers.json`,
-      createPayload,
-      {
-        headers: {
-          'X-Shopify-Access-Token': ACCESS_TOKEN,
-          'Content-Type': 'application/json'
+    let createRes;
+    try {
+      createRes = await axios.post(
+        `https://${SHOP}/admin/api/2025-07/customers.json`,
+        createPayload,
+        {
+          headers: {
+            'X-Shopify-Access-Token': ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+    } catch (err) {
+      const status = err?.response?.status;
+      const data = err?.response?.data;
+      console.error('POST /proxy/orders-meta/teams/create create-customer error:', data || err.message);
+
+      // Mappa vanliga Shopify-fel till våra frontend-koder
+      if (status === 422 && data && data.errors) {
+        const emailErrors = Array.isArray(data.errors.email) ? data.errors.email.join(' ') : String(data.errors.email || '');
+        if (/has already been taken/i.test(emailErrors)) {
+          return res.status(400).json({ error: 'email_taken' });
+        }
+        if (/invalid/i.test(emailErrors)) {
+          return res.status(400).json({ error: 'invalid_email' });
         }
       }
-    );
+
+      return res.status(500).json({ error: 'internal_error' });
+    }
 
     const teamCustomer = createRes.data?.customer;
     if (!teamCustomer || !teamCustomer.id) {
@@ -3454,6 +3483,15 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
     const teamCustomerId = teamCustomer.id;
 
     // 6) Skriv TEAMS-metafält på TEAM-KONTOT
+    // Struktur enligt din modell:
+    // {
+    //   "isTeam": true,
+    //   "teamName": "ICA Maxi",
+    //   "ownerCustomerId": 11111,
+    //   "members": [
+    //     { "customerId": 11111, "email": "agare@...", "role": "owner" }
+    //   ]
+    // }
     const teamMetaValue = {
       isTeam: true,
       teamName,
@@ -3501,7 +3539,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
 
     await writeCustomerTeams(ownerIdNum, ownerValue);
 
-    // 8) Svar till frontend – här läser UI sedan från metafält (ingen extra logik)
+    // 8) Svar till frontend – UI läser sedan från metafält
     return res.json({
       ok: true,
       team: {
@@ -3515,6 +3553,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 // ===== END APP PROXY =====
 
