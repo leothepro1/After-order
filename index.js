@@ -88,6 +88,93 @@ function pfExtractScopeFromPayload(body = {}) {
 }
 
 /**
+ * Normaliserar ett teamId:
+ *  - "gid://shopify/Customer/9582772027730" → "9582772027730"
+ *  - "9582772027730"                        → "9582772027730"
+ */
+function pfNormalizeTeamId(raw) {
+  if (raw == null) return null;
+  try {
+    const s = String(raw).trim();
+    if (!s) return null;
+    const parts = s.split('/');
+    return parts[parts.length - 1] || null;
+  } catch {
+    return raw != null ? String(raw) : null;
+  }
+}
+
+/**
+ * Läser ORDER_META-JSON (array med projekt) och plockar ut:
+ *  - _pf_scope ("personal" | "team")
+ *  - _pf_team_id (som ren siffra)
+ *  - _pf_team_name
+ *
+ * Default: { scope: "personal", teamId: null, teamName: null }
+ */
+function pfExtractScopeFromOrderProjects(projectsRaw) {
+  let scope = 'personal';
+  let teamId = null;
+  let teamName = null;
+
+  if (!projectsRaw) {
+    return { scope, teamId, teamName };
+  }
+
+  let arr = [];
+  try {
+    if (typeof projectsRaw === 'string') {
+      arr = JSON.parse(projectsRaw || '[]') || [];
+    } else if (Array.isArray(projectsRaw)) {
+      arr = projectsRaw;
+    } else if (typeof projectsRaw === 'object') {
+      // om någon gång ett objekt sparats direkt
+      arr = [projectsRaw];
+    }
+  } catch {
+    arr = [];
+  }
+
+  if (!Array.isArray(arr)) {
+    return { scope, teamId, teamName };
+  }
+
+  for (const p of arr) {
+    if (!p || typeof p !== 'object') continue;
+
+    const rawScope = String(
+      p._pf_scope ||
+      p.scope ||
+      p.pressify_scope ||
+      ''
+    ).toLowerCase();
+
+    if (rawScope !== 'team') continue;
+
+    const rawTeamId =
+      p._pf_team_id ??
+      p.teamId ??
+      p.team_id ??
+      p.pressify_team_id ??
+      null;
+
+    const rawTeamName =
+      p._pf_team_name ??
+      p.teamName ??
+      p.team_name ??
+      p.pressify_team_name ??
+      null;
+
+    scope = 'team';
+    teamId = pfNormalizeTeamId(rawTeamId);
+    teamName = rawTeamName != null ? String(rawTeamName) : null;
+    break;
+  }
+
+  return { scope, teamId, teamName };
+}
+
+/**
  * Bygger:
  *  - note_attributes:
  *      pf_scope, pf_team_id, pf_team_name,
@@ -184,6 +271,7 @@ function pfBuildDraftOrderMeta(baseDraft = {}, body = {}) {
 // överst bland konfig:
 // Publik butik (för delningslänkar till Shopify-sidan)
 const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
+
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
 function adminHeaders(extra = {}) {
   return { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json', ...extra };
@@ -2988,31 +3076,38 @@ function toGid(kind, id) {
 /**
  * Filtrerar orders på workspace-scope:
  *  - scope=personal  → bara personliga (eller orders utan scope-fält)
- *  - scope=team      → bara team-ordrar, ev. filtrerade på teamId
+ *  - scope=team      → bara team-ordrar, filtrerade på teamId (normaliserat)
  *  - övrigt/ingen    → ingen extra filtrering
+ *
+ * Viktigt:
+ *  - teamId kan vara GID eller ren siffra både i query och på ordern.
+ *    Vi använder pfNormalizeTeamId för båda.
  */
 function applyWorkspaceScopeFilter(list, scopeParam, teamIdParam) {
   const scope = String(scopeParam || '').toLowerCase();
-  const teamId = teamIdParam != null ? String(teamIdParam) : null;
+  const wantTeamId = pfNormalizeTeamId(teamIdParam);
+  const src = Array.isArray(list) ? list : [];
 
   if (scope === 'personal') {
     // Allt som inte är markerat som team räknas som personal
-    return (list || []).filter(o => (o.scope || 'personal') !== 'team');
+    return src.filter(o => (o.scope || 'personal') !== 'team');
   }
 
   if (scope === 'team') {
-    return (list || []).filter(o => {
+    return src.filter(o => {
       if ((o.scope || 'personal') !== 'team') return false;
-      if (!teamId) return true;
-      return String(o.teamId || '') === teamId;
+      if (!wantTeamId) return true;
+      const orderTeamId = pfNormalizeTeamId(o.teamId);
+      return orderTeamId === wantTeamId;
     });
   }
 
-  return list || [];
+  return src;
 }
 
 // ===== TEAMS: helpers för customer.metafields.teams.teams (JSON) =====
 async function readCustomerTeams(customerId) {
+
   const customerGid = toGid('Customer', customerId);
   const query = `
     query GetCustomerTeams($id: ID!) {
@@ -3316,15 +3411,35 @@ const query = `
   }
 `;
     // Inkludera status:any så det matchar REST-listan (öppna/stängda)
-    const q = `customer_id:${loggedInCustomerId} status:any`;
-    let data = await shopifyGraphQL(query, { first: limit, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+   // Bestäm scope/team från query (workspace)
+const scopeParam = String(req.query.scope || '').toLowerCase();
+const teamIdFilter = String(req.query.teamId || '').trim();
 
-    if (data.errors) {
-      // Fallback till REST om GraphQL skulle fela
-      throw new Error('GraphQL error');
-    }
+// Inkludera status:any så det matchar REST-listan (öppna/stängda)
+//  - personal-läge → filtrera på customer_id
+//  - team-läge     → INGEN customer_id-filter (hämta senaste N ordrar)
+let q;
+if (scopeParam === 'team' && teamIdFilter) {
+  q = `status:any`;
+} else {
+  q = `customer_id:${loggedInCustomerId} status:any`;
+}
+
+let data = await shopifyGraphQL(query, {
+  first: limit,
+  q,
+  ns: ORDER_META_NAMESPACE,
+  key: ORDER_META_KEY
+});
+
+if (data.errors) {
+  // Fallback till REST om GraphQL skulle fela
+  throw new Error('GraphQL error');
+}
 
 const edges = data?.data?.orders?.edges || [];
+
+// Bygg output + scope från ORDER_META-JSON
 const out = edges.map(e => {
   const node = e.node;
   const base = {
@@ -3336,36 +3451,15 @@ const out = edges.map(e => {
     displayFulfillmentStatus: null
   };
 
-  // Pressify: scope/team från order-metafields (om de finns)
-  let scopeVal = 'personal';
-  let teamId = null;
-  let teamName = null;
+  const { scope, teamId, teamName } = pfExtractScopeFromOrderProjects(
+    node.metafield ? node.metafield.value : null
+  );
 
-  // I kundläget är queryn idag utan pressify-metafields; äldre ordrar får default "personal".
-  const pfMfs = Array.isArray(node.metafields) ? node.metafields : [];
-  const mfScope = pfMfs.find(m => m.key === 'scope');
-  const mfTeamId = pfMfs.find(m => m.key === 'team_id');
-  const mfTeamName = pfMfs.find(m => m.key === 'team_name');
-
-  if (mfScope && typeof mfScope.value === 'string') {
-    const val = mfScope.value.toLowerCase();
-    scopeVal = val === 'team' ? 'team' : 'personal';
-  }
-
-  if (scopeVal === 'team') {
-    if (mfTeamId && mfTeamId.value != null) {
-      teamId = String(mfTeamId.value);
-    }
-    if (mfTeamName && mfTeamName.value != null) {
-      teamName = String(mfTeamName.value);
-    }
-  }
-
-  return { ...base, scope: scopeVal, teamId, teamName };
+  return { ...base, scope, teamId, teamName };
 });
 
 try {
-   if (WRITE_ORDERS_TO_REDIS) {
+  if (WRITE_ORDERS_TO_REDIS) {
     const cidRaw = String(loggedInCustomerId || '');
     const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
     await seedOrdersToRedis(cidNum, out);
@@ -3373,9 +3467,10 @@ try {
 } catch {}
 // ---- /NYTT ----
 
-    res.setHeader('Cache-Control', 'no-store');
-    const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
-    return res.json({ orders: scopedOut });
+res.setHeader('Cache-Control', 'no-store');
+const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
+return res.json({ orders: scopedOut });
+
   } catch (e) {
     // 🔁 Fallback: befintlig REST-implementation (oförändrad) om något går fel
  try {
@@ -3390,104 +3485,109 @@ try {
     // 🔑 Viktigt:
     // - personal / customer-läge => begränsa på customer_id
     // - team-läge               => hämta senaste ordrarna för hela shoppen
-    const baseUrl = `https://${SHOP}/admin/api/2025-07/orders.json`;
-    const ordersUrl =
-      scopeParam === 'team' && teamIdFilter
-        ? `${baseUrl}?limit=${limit}&status=any&order=created_at+desc`
-        : `${baseUrl}?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc`;
+ const baseUrl = `https://${SHOP}/admin/api/2025-07/orders.json`;
+const ordersUrl =
+  scopeParam === 'team' && teamIdFilter
+    ? `${baseUrl}?limit=${limit}&status=any&order=created_at+desc`
+    : `${baseUrl}?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc`;
 
-    const ordersRes = await axios.get(ordersUrl, {
-      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
-    });
-    const orders = ordersRes.data.orders || [];
+const ordersRes = await axios.get(ordersUrl, {
+  headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+});
+const orders = ordersRes.data.orders || [];
 
-    const out = [];
-      for (const o of orders) {
-        const mfRes = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-        const metafields = mfRes.data.metafields || [];
+const out = [];
+for (const o of orders) {
+  const mfRes = await axios.get(
+    `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+  const metafields = mfRes.data.metafields || [];
 
-        const projectMf = metafields.find(
-          m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
-        );
+  const projectMf = metafields.find(
+    m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+  );
 
-        const scopeMf = metafields.find(
-          m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_SCOPE_KEY
-        );
-        const teamIdMf = metafields.find(
-          m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_TEAM_ID_KEY
-        );
-        const teamNameMf = metafields.find(
-          m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_TEAM_NAME_KEY
-        );
+  const scopeMf = metafields.find(
+    m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_SCOPE_KEY
+  );
+  const teamIdMf = metafields.find(
+    m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_TEAM_ID_KEY
+  );
+  const teamNameMf = metafields.find(
+    m => m.namespace === PRESSIFY_NS && m.key === PRESSIFY_TEAM_NAME_KEY
+  );
 
-        // Default: personal
-        let scopeVal = 'personal';
-        let teamId = null;
-        let teamName = null;
+  // 1) Primär källa: ORDER_META JSON (_pf_scope/_pf_team_id/_pf_team_name)
+  let { scope: scopeVal, teamId, teamName } = pfExtractScopeFromOrderProjects(
+    projectMf ? projectMf.value : null
+  );
 
-        if (scopeMf && typeof scopeMf.value === 'string') {
-          const val = scopeMf.value.toLowerCase();
-          scopeVal = val === 'team' ? 'team' : 'personal';
-        }
+  // 2) Fallback: gamla pressify-metafields + line item properties
+  if (scopeVal !== 'team') {
+    // Pressify-metafields
+    if (scopeMf && typeof scopeMf.value === 'string') {
+      const val = scopeMf.value.toLowerCase();
+      scopeVal = val === 'team' ? 'team' : 'personal';
+    }
 
-        if (scopeVal === 'team') {
-          if (teamIdMf && teamIdMf.value != null) {
-            teamId = String(teamIdMf.value);
-          }
-          if (teamNameMf && teamNameMf.value != null) {
-            teamName = String(teamNameMf.value);
-          }
-        }
-
-        // Fallback för äldre ordrar: läs från line item properties _pf_scope/_pf_team_id/_pf_team_name
-        if (!scopeMf) {
-          try {
-            const line = (o.line_items || []).find(li =>
-              Array.isArray(li.properties) &&
-              li.properties.some(p => p && p.name === '_pf_scope')
-            );
-
-            if (line && Array.isArray(line.properties)) {
-              const pScope = line.properties.find(p => p.name === '_pf_scope');
-              const pTeamId = line.properties.find(p => p.name === '_pf_team_id');
-              const pTeamName = line.properties.find(p => p.name === '_pf_team_name');
-
-              if (pScope && typeof pScope.value === 'string') {
-                const val = pScope.value.toLowerCase();
-                scopeVal = val === 'team' ? 'team' : 'personal';
-              }
-
-              if (scopeVal === 'team') {
-                if (pTeamId && pTeamId.value != null) {
-                  teamId = String(pTeamId.value);
-                }
-                if (pTeamName && pTeamName.value != null) {
-                  teamName = String(pTeamName.value);
-                }
-              }
-            }
-          } catch {}
-        }
-
-        out.push({
-          id: o.id,
-          name: o.name,
-          processedAt: o.processed_at || o.created_at,
-          metafield: projectMf ? projectMf.value : null,
-          fulfillmentStatus: o.fulfillment_status || null,
-          displayFulfillmentStatus: null,
-          scope: scopeVal,
-          teamId,
-          teamName
-        });
+    if (scopeVal === 'team') {
+      if (teamIdMf && teamIdMf.value != null) {
+        teamId = pfNormalizeTeamId(teamIdMf.value);
       }
+      if (teamNameMf && teamNameMf.value != null) {
+        teamName = String(teamNameMf.value);
+      }
+    }
 
-      res.setHeader('Cache-Control', 'no-store');
-      const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
-      return res.json({ orders: scopedOut });
+    // Fallback för ännu äldre ordrar: line item properties _pf_scope/_pf_team_id/_pf_team_name
+    if (!scopeMf && scopeVal !== 'team') {
+      try {
+        const line = (o.line_items || []).find(li =>
+          Array.isArray(li.properties) &&
+          li.properties.some(p => p && p.name === '_pf_scope')
+        );
+
+        if (line && Array.isArray(line.properties)) {
+          const pScope = line.properties.find(p => p.name === '_pf_scope');
+          const pTeamId = line.properties.find(p => p.name === '_pf_team_id');
+          const pTeamName = line.properties.find(p => p.name === '_pf_team_name');
+
+          if (pScope && typeof pScope.value === 'string') {
+            const val = pScope.value.toLowerCase();
+            scopeVal = val === 'team' ? 'team' : 'personal';
+          }
+
+          if (scopeVal === 'team') {
+            if (pTeamId && pTeamId.value != null) {
+              teamId = pfNormalizeTeamId(pTeamId.value);
+            }
+            if (pTeamName && pTeamName.value != null) {
+              teamName = String(pTeamName.value);
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  out.push({
+    id: o.id,
+    name: o.name,
+    processedAt: o.processed_at || o.created_at,
+    metafield: projectMf ? projectMf.value : null,
+    fulfillmentStatus: o.fulfillment_status || null,
+    displayFulfillmentStatus: null,
+    scope: scopeVal || 'personal',
+    teamId,
+    teamName
+  });
+}
+
+res.setHeader('Cache-Control', 'no-store');
+const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
+return res.json({ orders: scopedOut });
+
     } catch (err) {
       console.error('proxy/orders-meta error:', err?.response?.data || err.message);
       setCorsOnError(req, res);
