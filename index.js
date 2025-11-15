@@ -3162,18 +3162,24 @@ if (scope === 'all') {
     // customerId kan vara:
     // - tomt  → personligt läge (default)
     // - teamId → när scope=team och frontend skickar aktivt team-id
+       // customerId kan vara:
+    // - tomt  → personligt läge (default)
+    // - teamId → när scope=team och frontend skickar aktivt team-id
     const rawCustomerIdParam = String(req.query.customerId || '').trim();
 
+    // OBS: vi använder INTE längre customerId för att filtrera i GraphQL.
+    // I team-läge hämtar vi bara "senaste N ordrar" och låter
+    // applyWorkspaceScopeFilter + _pf_scope/_pf_team_id göra jobbet.
     let q;
     if (scope === 'team' && rawCustomerIdParam) {
-      const customerId = rawCustomerIdParam;
-      // TEAM-LÄGE: hämta alla ordrar som är taggade med rätt team-id
-      // (detta är raden du specificerade)
-      q = `status:any tag:'pressify_team_id:${customerId}'`;
+      // TEAM-LÄGE: hämta senaste ordrar utan customer_id-filter.
+      // Vi filtrerar ner dem på team i Node efteråt.
+      q = `status:any`;
     } else {
       // PERSONLIGT LÄGE: befintligt beteende (kundens egna order i Shopify)
       q = `customer_id:${loggedInCustomerId} status:any`;
     }
+
 
     let data = await shopifyGraphQL(query, {
       first: limit,
@@ -3186,13 +3192,12 @@ if (scope === 'all') {
       throw new Error('GraphQL error');
     }
 
-const edges = data?.data?.orders?.edges || [];
+    const edges = data?.data?.orders?.edges || [];
 
-    const filteredEdges = edges.filter(e => {
-      if (scope === 'team') return true;
-      const tags = e.node.tags || [];
-      return !tags.some(t => String(t || '').startsWith('pressify_team_id:'));
-    });
+    // Taggarna behövs inte längre för filtrering;
+    // vi lutar oss på _pf_scope/_pf_team_id + applyWorkspaceScopeFilter.
+    const filteredEdges = edges;
+
 
     const out = filteredEdges.map(e => {
       const node = e.node;
@@ -3373,18 +3378,30 @@ try {
     return res.json({ orders: scopedOut });
   } catch (e) {
     // 🔁 Fallback: befintlig REST-implementation (oförändrad) om något går fel
-    try {
-      const loggedInCustomerId = req.query.logged_in_customer_id;
-      if (!loggedInCustomerId) return res.status(204).end();
+ try {
+    const scopeParam = String(req.query.scope || '').toLowerCase();
+    const teamIdFilter = String(req.query.teamId || '').trim();
+    const loggedInCustomerId = req.query.logged_in_customer_id;
 
-      const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
-      const ordersRes = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/orders.json?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const orders = ordersRes.data.orders || [];
+    if (!loggedInCustomerId) return res.status(204).end();
 
- const out = [];
+    const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
+
+    // 🔑 Viktigt:
+    // - personal / customer-läge => begränsa på customer_id
+    // - team-läge               => hämta senaste ordrarna för hela shoppen
+    const baseUrl = `https://${SHOP}/admin/api/2025-07/orders.json`;
+    const ordersUrl =
+      scopeParam === 'team' && teamIdFilter
+        ? `${baseUrl}?limit=${limit}&status=any&order=created_at+desc`
+        : `${baseUrl}?customer_id=${loggedInCustomerId}&limit=${limit}&status=any&order=created_at+desc`;
+
+    const ordersRes = await axios.get(ordersUrl, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+    const orders = ordersRes.data.orders || [];
+
+    const out = [];
       for (const o of orders) {
         const mfRes = await axios.get(
           `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
