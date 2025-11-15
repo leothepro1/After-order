@@ -4159,7 +4159,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
       });
     }
 
-    await writeCustomerTeams(ownerIdNum, ownerValue);
+       await writeCustomerTeams(ownerIdNum, ownerValue);
 
     // 8) Svar till frontend – UI läser sedan från metafält
     return res.json({
@@ -4172,6 +4172,127 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
     });
   } catch (err) {
     console.error('POST /proxy/orders-meta/teams/create error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// NYTT: Bjud in medlemmar till ett befintligt teamkonto
+// POST /proxy/orders-meta/teams/invite  (via App Proxy: /apps/orders-meta/teams/invite)
+// Body: { teamCustomerId, emails: ["a@...", "b@..."] }
+//
+// Direkt-effekt: alla giltiga mailadresser läggs in i teamets metafält:
+// teamValue.members.push({ customerId: null, email, role: "member" })
+app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
+  try {
+    // 1) Verifiera att anropet kommer via Shopify App Proxy
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund (ägare av teamet)
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
+
+    const body = req.body || {};
+
+    // 3) Identifiera team-kontot
+    const teamCustomerIdRaw =
+      body.teamCustomerId ||
+      body.team_customer_id ||
+      req.query.teamCustomerId ||
+      req.query.team_customer_id ||
+      null;
+
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
+      : null;
+
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'missing_team_customer_id' });
+    }
+
+    // 4) Plocka ut emails från body
+    let emails = Array.isArray(body.emails) ? body.emails : [];
+    emails = emails
+      .map(e => String(e || '').trim().toLowerCase())
+      .filter(Boolean);
+
+    // Ta bort dubbletter
+    emails = Array.from(new Set(emails));
+
+    if (!emails.length) {
+      return res.status(400).json({ error: 'no_emails' });
+    }
+
+    // Extra: filtrera bort uppenbart ogiltiga mail här också
+    const validEmails = emails.filter(isValidEmail);
+    if (!validEmails.length) {
+      return res.status(400).json({ error: 'no_valid_emails' });
+    }
+
+    // 5) Läs teamets metafält och kontrollera att inloggad kund är ägare
+    const teamMeta = await readCustomerTeams(teamCustomerId);
+    const teamValue = teamMeta?.value || null;
+
+    if (!teamValue || !teamValue.isTeam) {
+      return res.status(400).json({ error: 'not_a_team_account' });
+    }
+
+    if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
+      return res.status(403).json({ error: 'not_team_owner' });
+    }
+
+    const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
+    const existingEmails = new Set(
+      members
+        .map(m => String(m && m.email ? m.email : '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    const added = [];
+
+    // 6) Lägg in alla nya mailadresser som "member"
+    validEmails.forEach(email => {
+      if (existingEmails.has(email)) return;
+
+      const member = {
+        customerId: null, // vi känner inte mottagarens customer-id ännu
+        email,
+        role: 'member'
+      };
+
+      members.push(member);
+      existingEmails.add(email);
+      added.push(member);
+    });
+
+    if (!added.length) {
+      return res.json({
+        ok: true,
+        added: [],
+        team: {
+          id: teamCustomerId,
+          teamName: teamValue.teamName || null
+        }
+      });
+    }
+
+    teamValue.members = members;
+    await writeCustomerTeams(teamCustomerId, teamValue);
+
+    return res.json({
+      ok: true,
+      added,
+      team: {
+        id: teamCustomerId,
+        teamName: teamValue.teamName || null
+      }
+    });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/teams/invite error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
   }
 });
@@ -4238,10 +4359,10 @@ if (!payload || (payload.kind && payload.kind !== 'proof')) {
 
   } catch (e) {
     console.error('GET /proof/share/:token error:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ error: 'Internal error' });
+    return res.status(500).json({ error: 'Kunde inte hämta projekt' });
   }
 });
+
 
 /* ===== NYTT: hämta review-form data via token ===== */
 app.get('/review/share/:token', async (req, res) => {
