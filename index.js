@@ -69,9 +69,65 @@ const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
 /**
- * Normaliserar scope/team från payloadet som kommer från cart.js
- * scope: "personal" (default) eller "team"
+ * Läser scope/team från ORDER_META (order-created/order-created)
+ * dvs JSON som ser ut ungefär som:
+ * [
+ *   {
+ *     orderId: ...,
+ *     ...,
+ *     properties: [
+ *       { name: "_pf_scope", value: "team" },
+ *       { name: "_pf_team_id", value: "9582772027730" },
+ *       { name: "_pf_team_name", value: "Rutgersson" },
+ *       ...
+ *     ]
+ *   },
+ *   ...
+ * ]
  */
+function pfExtractScopeFromOrderProjects(rawValue) {
+  if (!rawValue) return null;
+
+  let arr = null;
+  try {
+    arr = JSON.parse(rawValue);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(arr)) return null;
+
+  // Leta efter första projectet som har _pf_scope
+  for (const proj of arr) {
+    const props = Array.isArray(proj.properties) ? proj.properties : [];
+    const scopeP = props.find(p => p && p.name === '_pf_scope');
+    if (!scopeP || typeof scopeP.value !== 'string') continue;
+
+    const rawScope = scopeP.value.toLowerCase();
+    const scope = rawScope === 'team' ? 'team' : 'personal';
+
+    let teamId = null;
+    let teamName = null;
+
+    if (scope === 'team') {
+      const teamIdP = props.find(p => p && p.name === '_pf_team_id');
+      const teamNameP = props.find(p => p && p.name === '_pf_team_name');
+
+      if (teamIdP && teamIdP.value != null) {
+        teamId = String(teamIdP.value);
+      }
+      if (teamNameP && teamNameP.value != null) {
+        teamName = String(teamNameP.value);
+      }
+    }
+
+    return { scope, teamId, teamName };
+  }
+
+  return null;
+}
+
+
 function pfExtractScopeFromPayload(body = {}) {
   const rawScope = String(body.scope || '').toLowerCase();
   const scope = rawScope === 'team' ? 'team' : 'personal';
@@ -2993,7 +3049,15 @@ function toGid(kind, id) {
  */
 function applyWorkspaceScopeFilter(list, scopeParam, teamIdParam) {
   const scope = String(scopeParam || '').toLowerCase();
-  const teamId = teamIdParam != null ? String(teamIdParam) : null;
+
+  // Normalisera teamId: ta alltid sista delen om det är ett GID
+  const normalizeId = (v) => {
+    if (v == null) return null;
+    const s = String(v);
+    return s.includes('/') ? s.split('/').pop() : s;
+  };
+
+  const teamId = normalizeId(teamIdParam);
 
   if (scope === 'personal') {
     // Allt som inte är markerat som team räknas som personal
@@ -3004,12 +3068,13 @@ function applyWorkspaceScopeFilter(list, scopeParam, teamIdParam) {
     return (list || []).filter(o => {
       if ((o.scope || 'personal') !== 'team') return false;
       if (!teamId) return true;
-      return String(o.teamId || '') === teamId;
+      return normalizeId(o.teamId || '') === teamId;
     });
   }
 
   return list || [];
 }
+
 
 // ===== TEAMS: helpers för customer.metafields.teams.teams (JSON) =====
 async function readCustomerTeams(customerId) {
@@ -3424,16 +3489,66 @@ try {
         );
 
         // Default: personal
-        let scopeVal = 'personal';
-        let teamId = null;
-        let teamName = null;
+       // Default: personal
+let scopeVal = 'personal';
+let teamId = null;
+let teamName = null;
 
-        if (scopeMf && typeof scopeMf.value === 'string') {
-          const val = scopeMf.value.toLowerCase();
-          scopeVal = val === 'team' ? 'team' : 'personal';
+// 1) Försök läsa scope/team från "pressify"-metafält om de finns
+if (scopeMf && typeof scopeMf.value === 'string') {
+  const val = scopeMf.value.toLowerCase();
+  scopeVal = val === 'team' ? 'team' : 'personal';
+}
+
+if (scopeVal === 'team') {
+  if (teamIdMf && teamIdMf.value != null) {
+    teamId = String(teamIdMf.value);
+  }
+  if (teamNameMf && teamNameMf.value != null) {
+    teamName = String(teamNameMf.value);
+  }
+}
+
+// 2) Om vi fortfarande inte har "team" – försök läsa från ORDER_META JSON
+if ((!scopeMf || scopeVal === 'personal') && projectMf && projectMf.value) {
+  const fromProjects = pfExtractScopeFromOrderProjects(projectMf.value);
+  if (fromProjects) {
+    scopeVal = fromProjects.scope || scopeVal;
+    if (fromProjects.teamId) teamId = fromProjects.teamId;
+    if (fromProjects.teamName) teamName = fromProjects.teamName;
+  }
+}
+
+// 3) Fallback för äldre ordrar: line item properties _pf_scope/_pf_team_id/_pf_team_name
+if (!scopeMf && (!projectMf || !projectMf.value)) {
+  try {
+    const line = (o.line_items || []).find(li =>
+      Array.isArray(li.properties) &&
+      li.properties.some(p => p && p.name === '_pf_scope')
+    );
+
+    if (line && Array.isArray(line.properties)) {
+      const pScope = line.properties.find(p => p.name === '_pf_scope');
+      const pTeamId = line.properties.find(p => p.name === '_pf_team_id');
+      const pTeamName = line.properties.find(p => p.name === '_pf_team_name');
+
+      if (pScope && typeof pScope.value === 'string') {
+        const val = pScope.value.toLowerCase();
+        scopeVal = val === 'team' ? 'team' : 'personal';
+      }
+
+      if (scopeVal === 'team') {
+        if (pTeamId && pTeamId.value != null) {
+          teamId = String(pTeamId.value);
         }
+        if (pTeamName && pTeamName.value != null) {
+          teamName = String(pTeamName.value);
+        }
+      }
+    }
+  } catch {}
+}
 
-        if (scopeVal === 'team') {
           if (teamIdMf && teamIdMf.value != null) {
             teamId = String(teamIdMf.value);
           }
