@@ -3218,138 +3218,87 @@ app.get('/proxy/orders-meta', async (req, res) => {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    const loggedInCustomerId = req.query.logged_in_customer_id; // sätts av Shopify
-    if (!loggedInCustomerId) return res.status(204).end(); // ej inloggad kund
+   const loggedInCustomerId = req.query.logged_in_customer_id;
+if (!loggedInCustomerId) return res.status(204).end();
 
-    const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
-    const scope = String(req.query.scope || '').toLowerCase();
+const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
 
-    // ===== NYTT: ADMIN-LÄGE (scope=all) – hämta ALLA ordrar och filtrera bort levererade =====
-if (scope === 'all') {
-  const ok = await isAdminCustomer(loggedInCustomerId);
-  if (!ok) return res.status(403).json({ error: 'Forbidden' });
+// Bestäm scope/team från query (workspace)
+const scopeParam = String(req.query.scope || '').toLowerCase();
+const teamIdFilter = String(req.query.teamId || '').trim();
 
-  // Först: GraphQL
-  try {
-    // ===== KUND- / TEAM-BUNDNA ORDRAR =====
-    const query = `
-      query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
-        orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
-          edges {
-            node {
-              id
-              name
-              processedAt
-              fulfillmentStatus
-              displayFulfillmentStatus
-              tags
-              metafield(namespace: $ns, key: $key) { value }
-              metafields(namespace: "pressify", keys: ["scope", "team_id", "team_name"]) {
-                key
-                value
-              }
-            }
-          }
+// Inkludera status:any så det matchar REST-listan (öppna/stängda)
+//  - personal-läge → filtrera på customer_id
+//  - team-läge     → INGEN customer_id-filter (hämta senaste N ordrar)
+let q;
+if (scopeParam === 'team' && teamIdFilter) {
+  q = `status:any`;
+} else {
+  q = `customer_id:${loggedInCustomerId} status:any`;
+}
+
+const query = `
+  query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
+    orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
+      edges {
+        node {
+          id
+          name
+          processedAt
+          fulfillmentStatus
+          displayFulfillmentStatus
+          metafield(namespace: $ns, key: $key) { value }
         }
       }
-    `;
-
-    // customerId kan vara:
-    // - tomt  → personligt läge (default)
-    // - teamId → när scope=team och frontend skickar aktivt team-id
-       // customerId kan vara:
-    // - tomt  → personligt läge (default)
-    // - teamId → när scope=team och frontend skickar aktivt team-id
-    const rawCustomerIdParam = String(req.query.customerId || '').trim();
-
-    // OBS: vi använder INTE längre customerId för att filtrera i GraphQL.
-    // I team-läge hämtar vi bara "senaste N ordrar" och låter
-    // applyWorkspaceScopeFilter + _pf_scope/_pf_team_id göra jobbet.
-    let q;
-    if (scope === 'team' && rawCustomerIdParam) {
-      // TEAM-LÄGE: hämta senaste ordrar utan customer_id-filter.
-      // Vi filtrerar ner dem på team i Node efteråt.
-      q = `status:any`;
-    } else {
-      // PERSONLIGT LÄGE: befintligt beteende (kundens egna order i Shopify)
-      q = `customer_id:${loggedInCustomerId} status:any`;
     }
+  }
+`;
 
+let data = await shopifyGraphQL(query, {
+  first: limit,
+  q,
+  ns: ORDER_META_NAMESPACE,
+  key: ORDER_META_KEY
+});
 
-    let data = await shopifyGraphQL(query, {
-      first: limit,
-      q,
-      ns: ORDER_META_NAMESPACE,
-      key: ORDER_META_KEY
-    });
+if (data.errors) {
+  throw new Error('GraphQL error');
+}
 
-    if (data.errors) {
-      throw new Error('GraphQL error');
-    }
+const edges = data?.data?.orders?.edges || [];
 
-    const edges = data?.data?.orders?.edges || [];
+// Bygg output + scope från ORDER_META-JSON
+const out = edges.map(e => {
+  const node = e.node;
+  const base = {
+    id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
+    name: node.name,
+    processedAt: node.processedAt,
+    metafield: node.metafield ? node.metafield.value : null,
+    fulfillmentStatus: node.fulfillmentStatus || null,
+    displayFulfillmentStatus: null
+  };
 
-    // Taggarna behövs inte längre för filtrering;
-    // vi lutar oss på _pf_scope/_pf_team_id + applyWorkspaceScopeFilter.
-    const filteredEdges = edges;
+  const { scope, teamId, teamName } = pfExtractScopeFromOrderProjects(
+    node.metafield ? node.metafield.value : null
+  );
 
+  return { ...base, scope, teamId, teamName };
+});
 
-    const out = filteredEdges.map(e => {
-      const node = e.node;
-      const base = {
-        id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
-        name: node.name,
-        processedAt: node.processedAt,
-        metafield: node.metafield ? node.metafield.value : null,
-        fulfillmentStatus: node.fulfillmentStatus || null,
-        displayFulfillmentStatus: null
-      };
+try {
+  if (WRITE_ORDERS_TO_REDIS) {
+    const cidRaw = String(loggedInCustomerId || '');
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    await seedOrdersToRedis(cidNum, out);
+  }
+} catch {}
 
-      // Pressify: scope/team från order-metafields
-      let scopeVal = 'personal';
-      let teamId = null;
-      let teamName = null;
+// Viktigt: filtrera efter workspace här
+res.setHeader('Cache-Control', 'no-store');
+const scopedOut = applyWorkspaceScopeFilter(out, req.query.scope, req.query.teamId);
+return res.json({ orders: scopedOut });
 
-      const pfMfs = Array.isArray(node.metafields) ? node.metafields : [];
-      const mfScope = pfMfs.find(m => m.key === 'scope');
-      const mfTeamId = pfMfs.find(m => m.key === 'team_id');
-      const mfTeamName = pfMfs.find(m => m.key === 'team_name');
-
-      if (mfScope && typeof mfScope.value === 'string') {
-        const val = mfScope.value.toLowerCase();
-        scopeVal = val === 'team' ? 'team' : 'personal';
-      }
-
-      if (scopeVal === 'team') {
-        if (mfTeamId && mfTeamId.value != null) {
-          teamId = String(mfTeamId.value);
-        }
-        if (mfTeamName && mfTeamName.value != null) {
-          teamName = String(mfTeamName.value);
-        }
-      }
-
-      return { ...base, scope: scopeVal, teamId, teamName };
-    });
-
-    // out används fortfarande till Redis-seed nedan.
-    try {
-      if (WRITE_ORDERS_TO_REDIS) {
-        const cacheIdRaw =
-          scope === 'team' && rawCustomerIdParam
-            ? rawCustomerIdParam
-            : String(loggedInCustomerId || '');
-
-        const cacheIdNum = cacheIdRaw.startsWith('gid://')
-          ? cacheIdRaw.split('/').pop()
-          : cacheIdRaw;
-
-        await seedOrdersToRedis(cacheIdNum, out);
-      }
-    } catch {}
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ orders: out });
       } catch (gqlErr) {
         // REST-FALLBACK: hämta ALLA ordrar utan customer_id
         try {
@@ -3474,18 +3423,18 @@ return res.json({ orders: scopedOut });
   } catch (e) {
     // 🔁 Fallback: befintlig REST-implementation (oförändrad) om något går fel
  try {
-    const scopeParam = String(req.query.scope || '').toLowerCase();
-    const teamIdFilter = String(req.query.teamId || '').trim();
-    const loggedInCustomerId = req.query.logged_in_customer_id;
+   const scopeParam = String(req.query.scope || '').toLowerCase();
+const teamIdFilter = String(req.query.teamId || '').trim();
+const loggedInCustomerId = req.query.logged_in_customer_id;
 
-    if (!loggedInCustomerId) return res.status(204).end();
+if (!loggedInCustomerId) return res.status(204).end();
 
-    const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
+const limit = Math.min(parseInt(req.query.first || '25', 10), 50);
 
-    // 🔑 Viktigt:
-    // - personal / customer-läge => begränsa på customer_id
-    // - team-läge               => hämta senaste ordrarna för hela shoppen
- const baseUrl = `https://${SHOP}/admin/api/2025-07/orders.json`;
+// 🔑 Viktigt:
+// - personal / customer-läge => begränsa på customer_id
+// - team-läge               => hämta senaste ordrarna för hela shoppen
+const baseUrl = `https://${SHOP}/admin/api/2025-07/orders.json`;
 const ordersUrl =
   scopeParam === 'team' && teamIdFilter
     ? `${baseUrl}?limit=${limit}&status=any&order=created_at+desc`
