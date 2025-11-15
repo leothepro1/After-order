@@ -869,9 +869,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // (Ta bort RateLimiter-klassen och adminLimiter-instansen, eller kommentera ut dem)
 
-// Global throttling för Shopify Admin API (request-KÖ + 429-retry)
-// ANVÄNDER befintlig sleep(...) ovan – redeklarera den inte här!
-const ADMIN_MIN_DELAY_MS = 350; // ~1.8 rps (fortfarande under 2 rps)
+// Shopify Admin throttle – håll oss säkert under 2 rps per process
+const ADMIN_MIN_DELAY_MS = 600;       // ca 1.6 rps i snitt
+const ADMIN_JITTER_MS    = 50;        // ±50ms jitter för att sprida anrop
 let __adminLastAt = 0;
 const __adminQueue = [];
 let __adminDraining = false;
@@ -887,10 +887,21 @@ async function __drainQueue() {
   try {
     while (__adminQueue.length) {
       const next = __adminQueue.shift();
-      const wait = Math.max(0, ADMIN_MIN_DELAY_MS - (Date.now() - __adminLastAt));
-      if (wait) await sleep(wait);
-      next.resolve(); // släpp igenom requesten
-      __adminLastAt = Date.now();
+
+      const now     = Date.now();
+      const elapsed = now - __adminLastAt;
+
+      // Lägg på lite jitter så att vi inte ligger *exakt* på gränsen
+      const jitter      = (Math.random() * 2 - 1) * ADMIN_JITTER_MS; // -50 .. +50 ms
+      const targetDelay = ADMIN_MIN_DELAY_MS + jitter;
+      const wait        = Math.max(0, targetDelay - elapsed);
+
+      if (wait > 0) {
+        await sleep(wait);
+      }
+
+      next.resolve();               // släpp igenom requesten
+      __adminLastAt = Date.now();   // uppdatera senast-körning
     }
   } finally {
     __adminDraining = false;
@@ -907,22 +918,30 @@ axios.interceptors.request.use(async (config) => {
   return config;
 });
 
-// Response-interceptor: mjuk retry på 429 med Retry-After
+// Response-interceptor: mjuk retry på 429 med Retry-After (max 1 retry)
 axios.interceptors.response.use(
   (res) => res,
   async (error) => {
     const { response, config } = error || {};
     if (response && response.status === 429 && isShopAdminUrl(config)) {
       config.__retryCount = (config.__retryCount || 0) + 1;
-      if (config.__retryCount <= 3) {
+
+      // Max 1 retry per request för att undvika retry-storm
+      if (config.__retryCount <= 1) {
         const ra = parseFloat(response.headers?.['retry-after']) || 1;
         await sleep(ra * 1000);
         return axios(config);
       }
+
+      console.warn(
+        '[Shopify Admin] 429 trots retry, ger upp för att undvika rate-limit-storm.',
+        { url: config.url, method: config.method, retryCount: config.__retryCount }
+      );
     }
     return Promise.reject(error);
   }
 );
+
 
 
 // Enkel in-memory store för OAuth state & (ev.) tokens per shop
