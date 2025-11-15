@@ -1365,6 +1365,79 @@ function isValidEmail(e) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
 }
 
+// Hjälpare: hitta en befintlig kund i Shopify via e-postadress
+async function findCustomerIdByEmail(email) {
+  if (!isValidEmail(email)) return null;
+
+  try {
+    const q   = 'email:' + email.trim();
+    const url = `https://${SHOP}/admin/api/2025-07/customers/search.json?query=${encodeURIComponent(q)}`;
+    const { data } = await axios.get(url, {
+      headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+    });
+
+    const customers = Array.isArray(data?.customers) ? data.customers : [];
+    if (!customers.length) return null;
+
+    const first = customers[0];
+    return first && first.id ? String(first.id) : null;
+  } catch (err) {
+    console.error('findCustomerIdByEmail error for', email, err?.response?.data || err.message);
+    return null;
+  }
+}
+
+// Hjälpare: se till att befintliga kunder får memberships[] uppdaterat när de bjuds in till ett team
+async function syncTeamMembershipForExistingCustomers(teamCustomerId, teamName, emails) {
+  if (!Array.isArray(emails) || !emails.length) return;
+
+  const unique = Array.from(new Set(
+    emails
+      .map(e => String(e || '').trim().toLowerCase())
+      .filter(isValidEmail)
+  ));
+
+  for (const email of unique) {
+    const cid = await findCustomerIdByEmail(email);
+    if (!cid) continue;
+
+    const cidNum = String(cid).split('/').pop();
+
+    try {
+      const current = await readCustomerTeams(cidNum);
+      let value = current?.value;
+
+      if (!value || typeof value !== 'object') {
+        value = {};
+      }
+      if (!Array.isArray(value.memberships)) {
+        value.memberships = [];
+      }
+
+      const alreadyMember = value.memberships.some(
+        (m) => Number(m.teamCustomerId) === Number(teamCustomerId)
+      );
+      if (alreadyMember) continue;
+
+      const isFirst = value.memberships.length === 0;
+      value.memberships.push({
+        teamCustomerId: teamCustomerId,
+        teamName: teamName || null,
+        role: 'member',
+        isDefault: isFirst
+      });
+
+      await writeCustomerTeams(cidNum, value);
+    } catch (err) {
+      console.error(
+        'syncTeamMembershipForExistingCustomers error for',
+        email,
+        err?.response?.data || err.message
+      );
+    }
+  }
+}
+
 // Ta bort felaktiga email så att Shopify inte försöker koppla kund eller trigga moms/discount-regler fel
 function purgeInvalidEmails(payload) {
   try {
@@ -4180,8 +4253,9 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
 // POST /proxy/orders-meta/teams/invite  (via App Proxy: /apps/orders-meta/teams/invite)
 // Body: { teamCustomerId, emails: ["a@...", "b@..."] }
 //
-// Direkt-effekt: alla giltiga mailadresser läggs in i teamets metafält:
-// teamValue.members.push({ customerId: null, email, role: "member" })
+// Effekt:
+// 1) Alla giltiga mailadresser läggs in i teamets metafält (teamValue.members[])
+// 2) För de mailadresser som matchar en befintlig kund uppdateras kundens metafält med memberships[]
 app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
   try {
     // 1) Verifiera att anropet kommer via Shopify App Proxy
@@ -4254,7 +4328,7 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
 
     const added = [];
 
-    // 6) Lägg in alla nya mailadresser som "member"
+    // 6) Lägg in alla nya mailadresser som "member" på TEAM-kontot
     validEmails.forEach(email => {
       if (existingEmails.has(email)) return;
 
@@ -4280,9 +4354,31 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
       });
     }
 
+    // 7) Spara uppdaterat team-metakonto
     teamValue.members = members;
     await writeCustomerTeams(teamCustomerId, teamValue);
 
+    // 8) För alla mailadresser vi faktiskt la till: försök koppla mot befintliga kunder
+    //    och uppdatera deras personliga metafält med memberships[]
+    const addedEmails = added
+      .map(m => String(m && m.email ? m.email : '').trim().toLowerCase())
+      .filter(Boolean);
+
+    try {
+      await syncTeamMembershipForExistingCustomers(
+        teamCustomerId,
+        teamValue.teamName || null,
+        addedEmails
+      );
+    } catch (e) {
+      // Vi loggar men låter själva inbjudan lyckas ändå
+      console.error(
+        'syncTeamMembershipForExistingCustomers top-level error:',
+        e?.response?.data || e.message
+      );
+    }
+
+    // 9) Svar till frontend – den behöver bara veta att inbjudan är "ok"
     return res.json({
       ok: true,
       added,
@@ -4296,6 +4392,7 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 // ===== END APP PROXY =====
