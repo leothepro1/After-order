@@ -142,14 +142,14 @@ let __ordersSnapshotBackfillStarted = false;
 async function backfillOrdersSnapshotAllOrders() {
   if (!pgPool) {
     console.warn('[orders_snapshot] backfill: pgPool saknas, hoppar över');
-    return;
+    return { processed: 0, skipped: 0, errors: 0, reason: 'no-pg' };
   }
   if (!SHOP || !ACCESS_TOKEN) {
     console.warn('[orders_snapshot] backfill: SHOP/ACCESS_TOKEN saknas, hoppar över');
-    return;
+    return { processed: 0, skipped: 0, errors: 0, reason: 'no-shopify' };
   }
 
-  console.log('[orders_snapshot] backfill: startar (boot)…');
+  console.log('[orders_snapshot] backfill: startar (boot/manuell)…');
 
   let url = `https://${SHOP}/admin/api/2025-07/orders.json?status=any&limit=100`;
   let processed = 0;
@@ -159,7 +159,9 @@ async function backfillOrdersSnapshotAllOrders() {
   while (url) {
     let resp;
     try {
-      resp = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
+      resp = await axios.get(url, {
+        headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
+      });
     } catch (e) {
       console.error('[orders_snapshot] backfill: kunde inte hämta orders:', e?.response?.data || e.message);
       break;
@@ -172,7 +174,6 @@ async function backfillOrdersSnapshotAllOrders() {
       try {
         const orderId = order.id;
 
-        // Läs metafälten för just den här ordern
         const mfResp = await axios.get(
           `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
@@ -183,14 +184,11 @@ async function backfillOrdersSnapshotAllOrders() {
           (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
         );
 
-        // Om ordern inte har ditt order-metafält hoppar vi över den
         if (!mf || !mf.value) {
           skipped++;
           continue;
         }
 
-        // Viktigt: mf.value är EXAKT samma JSON-sträng som frontend redan använder.
-        // upsertOrderSnapshotFromMetafield tar hand om att spara både raw-string + JSONB i Postgres.
         await upsertOrderSnapshotFromMetafield(order, mf.value);
         processed++;
       } catch (e) {
@@ -203,7 +201,6 @@ async function backfillOrdersSnapshotAllOrders() {
       }
     }
 
-    // Paginering via Link-header (Shopify REST)
     const link = resp.headers['link'] || resp.headers['Link'];
     if (!link) {
       url = null;
@@ -221,12 +218,11 @@ async function backfillOrdersSnapshotAllOrders() {
     }
   }
 
-  console.log('[orders_snapshot] backfill: klar', {
-    processed,
-    skipped,
-    errors
-  });
+  const summary = { processed, skipped, errors };
+  console.log('[orders_snapshot] backfill: klar', summary);
+  return summary;
 }
+
 
 // Start-funktion: triggas EN gång vid uppstart, efter att tabellen finns
 function startOrdersSnapshotBackfillOnBoot() {
@@ -2186,7 +2182,7 @@ function buildPrettyProperties(propsMap) {
 
 // ===== Postgres helpers för orders_snapshot =============================
 
-// Normalisera metafältet så vi både får exakt raw-string och JSON–objektet
+// EFTER: robust normalisering för snapshot (raw = exakt Shopify-sträng, json = säkert objekt/array eller null)
 function normalizeOrderMetafieldForSnapshot(metafieldValue) {
   // Fall 1: metafältet är en JSON-sträng (vanligt från Shopify Admin)
   if (typeof metafieldValue === 'string') {
@@ -2194,17 +2190,27 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue) {
     let json = null;
 
     try {
-      const parsed = JSON.parse(raw);
-      // Vi accepterar endast objekt/arrayer som JSONB – om det är en "dubbelencodad" sträng
-      // eller något annat (t.ex. bara en textsträng), sätter vi json = null
-      // för att undvika Postgres-fel.
+      let parsed = JSON.parse(raw);
+
+      // Hantera dubbelencodad JSON: t.ex. "\"{...}\""
+      if (typeof parsed === 'string') {
+        try {
+          const inner = JSON.parse(parsed);
+          if (inner && typeof inner === 'object') {
+            parsed = inner;
+          }
+        } catch {
+          // lämna parsed som string → kommer behandlas som “inte objekt” nedan
+        }
+      }
+
       if (parsed && typeof parsed === 'object') {
-        json = parsed;
+        json = parsed;          // OK för JSONB
       } else {
-        json = null;
+        json = null;            // vi förlitar oss på metafield_raw i läsningen
       }
     } catch {
-      json = null;
+      json = null;              // parse misslyckas → bara raw används
     }
 
     return { raw, json };
@@ -2216,11 +2222,11 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue) {
   }
 
   // Fall 3: metafältet är redan ett objekt/array (t.ex. vår egen "combined" i order-created)
-  // Här kan vi tryggt spara både raw-string och JSONB.
   const json = metafieldValue;
   const raw = JSON.stringify(metafieldValue);
   return { raw, json };
 }
+
 
 
 // Plocka ut tidsstämplar från Shopify-order (fallback till now)
