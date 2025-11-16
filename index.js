@@ -1396,17 +1396,30 @@ function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
+
 function mergeConfig(productCfg, globalsCfg) {
-  const merged = { ...productCfg };
-  merged.options = [ ...(globalsCfg.options || []), ...(productCfg.options || []) ];
+  // Börja med en kopia av produktens config
+  const merged = { ...(productCfg || {}) };
+
+  // Slå ihop options: globala först, sedan produktens
+  const globalOptions = Array.isArray(globalsCfg?.options)
+    ? globalsCfg.options
+    : [];
+  const productOptions = Array.isArray(productCfg?.options)
+    ? productCfg.options
+    : [];
+
+  merged.options = [...globalOptions, ...productOptions];
   return merged;
 }
+
 function sendWithCache(res, cfg, versionHint) {
   const etag = `"cfg-${versionHint || cfg.version || Date.now()}"`;
   res.set('ETag', etag);
   res.set('Cache-Control', 'public, max-age=300');
   res.json(cfg);
 }
+
 /* ====== SLUT config-hjälpare ====== */
 // === ARTWORK TOKEN RESOLVER (PUBLIC VIA APP PROXY) ===
 app.get('/proxy/printed/artwork-token', async (req, res) => {
