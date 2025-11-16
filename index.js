@@ -2982,19 +2982,48 @@ app.post('/proof/upload', async (req, res) => {
       return { ...p, shares: [share, ...superseded].slice(0, 10), latestToken: tid, latestShareUrl: `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}` };
     });
 
-    // 8) Spara tillbaka i SAMMA metafält
-    await writeOrderProjects(metafieldId, rotated);
-    // +++ NYTT: cache till Redis (10 dagar) +++
-    try { await cacheOrderProjects(orderId, rotated); } catch {}
-// ---- NYTT: uppdatera order-sammanfattning i Redis ----
+// 8) Spara tillbaka i SAMMA metafält
+await writeOrderProjects(metafieldId, rotated);
+// +++ NYTT: cache till Redis (10 dagar) +++
+try { await cacheOrderProjects(orderId, rotated); } catch {}
+
+// ---- NYTT: uppdatera order-sammanfattning i Redis + Postgres-snapshot ----
 try {
   const projForCid = rotated.find(p => String(p.lineItemId) === String(lineItemId));
   const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
+
   await touchOrderSummary(customerIdForIndex, Number(orderId), {
     processedAt: new Date().toISOString(),
     metafield: JSON.stringify(rotated || [])
   });
+
+  // 🔁 NYTT: spegla samma metafältvärde till orders_snapshot
+  if (customerIdForIndex && typeof upsertOrderSnapshotFromMetafield === 'function') {
+    const orderStub = {
+      id: Number(orderId),
+      customer: {
+        id: customerIdForIndex,
+        email: projForCid?.customerEmail || null
+      },
+      email: projForCid?.customerEmail || null,
+      // matchar extractOrderTimestamps (klarar snake/camel)
+      created_at: projForCid?.orderProcessedAt || new Date().toISOString(),
+      processed_at: projForCid?.orderProcessedAt || new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    await upsertOrderSnapshotFromMetafield(orderStub, rotated);
+  }
+
+  // 🧹 NYTT: invalidera 20s micro-cachen för den här kunden
+  try {
+    const prefix = `${customerIdForIndex}:`;
+    for (const key of ordersMetaCache.keys()) {
+      if (key.startsWith(prefix)) ordersMetaCache.delete(key);
+    }
+  } catch {}
 } catch {}
+
 
     // 9) Svara med token + URL
     const url = `${STORE_BASE}${PUBLIC_PROOF_PATH}?token=${encodeURIComponent(token)}`;
