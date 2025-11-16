@@ -808,6 +808,77 @@ async function writeOrderProjects(metafieldId, projects) {
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 }
+async function writeOrderProjects(metafieldId, projects) {
+  await axios.put(
+    `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
+    { metafield: { id: metafieldId, type: 'json', value: JSON.stringify(projects) } },
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  );
+}
+
+/**
+ * Håll Postgres-snapshot (orders_snapshot) i sync varje gång vi skriver order-metafältet.
+ * - orderId: Shopify order-id (string eller number)
+ * - projects: själva JSON-arrayen vi skriver i metafältet
+ * - extra: { customerId?, customerEmail?, processedAt? } (valfritt, plockas annars ur projects)
+ */
+async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
+  try {
+    if (!pgPool) return; // om DB är nere, krascha inte requesten
+    if (!orderId || !projects) return;
+
+    const orderIdNum = Number(orderId);
+    if (!orderIdNum || Number.isNaN(orderIdNum)) return;
+
+    let { customerId, customerEmail, processedAt } = extra;
+
+    // Försök hämta kundinfo ur projekten om den inte skickas in
+    if ((!customerId || !customerEmail || !processedAt) && Array.isArray(projects)) {
+      const candidate = projects.find(p =>
+        p && (p.customerId || p.customerEmail || p.orderProcessedAt)
+      );
+      if (candidate) {
+        if (!customerId && candidate.customerId) {
+          customerId = Number(candidate.customerId);
+        }
+        if (!customerEmail && candidate.customerEmail) {
+          customerEmail = candidate.customerEmail;
+        }
+        if (!processedAt && candidate.orderProcessedAt) {
+          processedAt = candidate.orderProcessedAt;
+        }
+      }
+    }
+
+    const baseTs = processedAt || new Date().toISOString();
+
+    const orderStub = {
+      id: orderIdNum,
+      customer: {
+        id: customerId || null,
+        email: customerEmail || null
+      },
+      email: customerEmail || null,
+      created_at: baseTs,
+      processed_at: baseTs,
+      updated_at: new Date().toISOString()
+    };
+
+    await upsertOrderSnapshotFromMetafield(orderStub, projects);
+
+    // Invalidera 20s-microcachen för den här kunden i /proxy/orders-meta
+    if (customerId && typeof ordersMetaCache !== 'undefined') {
+      const prefix = `${customerId}:`;
+      for (const key of ordersMetaCache.keys()) {
+        if (key.startsWith(prefix)) {
+          ordersMetaCache.delete(key);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[syncSnapshotAfterMetafieldWrite] failed:', e?.message || e);
+  }
+}
 
 // ===== UPSTASH REDIS (WRITE-THROUGH CACHE) =====
 const WRITE_ORDERS_TO_REDIS = String(process.env.WRITE_ORDERS_TO_REDIS || 'true') === 'true';
@@ -2983,19 +3054,27 @@ app.post('/proof/upload', async (req, res) => {
     });
 
 // 8) Spara tillbaka i SAMMA metafält
-await writeOrderProjects(metafieldId, rotated);
-// +++ NYTT: cache till Redis (10 dagar) +++
-try { await cacheOrderProjects(orderId, rotated); } catch {}
+    // 8) Spara tillbaka i SAMMA metafält
+    await writeOrderProjects(metafieldId, rotated);
+    // +++ NYTT: cache till Redis (10 dagar) +++
+    try { await cacheOrderProjects(orderId, rotated); } catch {}
+    // ---- NYTT: uppdatera order-sammanfattning i Redis + Postgres-snapshot ----
+    try {
+      const projForCid = rotated.find(p => String(p.lineItemId) === String(lineItemId));
+      const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
+      await touchOrderSummary(customerIdForIndex, Number(orderId), {
+        processedAt: new Date().toISOString(),
+        metafield: JSON.stringify(rotated || [])
+      });
 
-// ---- NYTT: uppdatera order-sammanfattning i Redis + Postgres-snapshot ----
-try {
-  const projForCid = rotated.find(p => String(p.lineItemId) === String(lineItemId));
-  const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
+      // 🔁 NYTT: spegla till orders_snapshot + invalidera /proxy/orders-meta-cache
+      await syncSnapshotAfterMetafieldWrite(orderId, rotated, {
+        customerId: customerIdForIndex
+      });
+    } catch {}
 
-  await touchOrderSummary(customerIdForIndex, Number(orderId), {
-    processedAt: new Date().toISOString(),
-    metafield: JSON.stringify(rotated || [])
-  });
+    // 9) Svara med token + URL
+
 
   // 🔁 NYTT: spegla samma metafältvärde till orders_snapshot
   if (customerIdForIndex && typeof upsertOrderSnapshotFromMetafield === 'function') {
@@ -3178,8 +3257,10 @@ try {
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, projects);
+    } catch {}
 
-    /* ==== ACTIVITY LOG: Kund godkände korrektur ==== */
     try {
       const proj = projects.find(p => String(p.lineItemId) === String(lineItemId)) || {};
       const fileName = (() => {
@@ -3217,7 +3298,13 @@ if (activeIdx >= 0) {
   prj2[idx] = { ...p, shares };
   await writeOrderProjects(metafieldId, prj2);
   try { await cacheOrderProjects(orderId, prj2); } catch {}
+
+  // 🔁 NYTT: snapshot för senaste share-läget
+  try {
+    await syncSnapshotAfterMetafieldWrite(orderId, prj2);
+  } catch {}
 }
+
         }
       }
     } catch (e) {
@@ -3269,24 +3356,29 @@ app.post('/proof/request-changes', async (req, res) => {
       return res.status(404).json({ error: 'Line item hittades inte i metafält' });
     }
 
-    console.log('✨ Projects after update:', projects);
+       console.log('✨ Projects after update:', projects);
     const putRes = await axios.put(
       `https://${SHOP}/admin/api/2025-07/metafields/${metafield.id}.json`,
       { metafield: { id: metafield.id, type: 'json', value: JSON.stringify(projects) } },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
-// +++ NYTT: cache till Redis (10 dagar) +++
-try { await cacheOrderProjects(orderId, projects); } catch {}
+    // +++ NYTT: cache till Redis (10 dagar) +++
+    try { await cacheOrderProjects(orderId, projects); } catch {}
 
-// ---- NYTT: uppdatera order-sammanfattning i Redis ----
-try {
-  const projForCid = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
-  const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
-  await touchOrderSummary(customerIdForIndex, Number(orderId), {
-    processedAt: new Date().toISOString(),
-    metafield: JSON.stringify(projects || [])
-  });
-} catch {}
+    // ---- NYTT: uppdatera order-sammanfattning i Redis + Postgres-snapshot ----
+    try {
+      const projForCid = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+      const customerIdForIndex = projForCid?.customerId ? Number(projForCid.customerId) : null;
+      await touchOrderSummary(customerIdForIndex, Number(orderId), {
+        processedAt: new Date().toISOString(),
+        metafield: JSON.stringify(projects || [])
+      });
+
+      await syncSnapshotAfterMetafieldWrite(orderId, projects, {
+        customerId: customerIdForIndex
+      });
+    } catch {}
+
 
     
     console.log('✅ Shopify response for request-changes:', putRes.status);
@@ -3330,9 +3422,15 @@ try {
               ...shares[activeIdx],
               snapshot: { ...(shares[activeIdx].snapshot || {}), activity: merged }
             };
-            prj2[idx] = { ...p, shares };
+                    prj2[idx] = { ...p, shares };
             await writeOrderProjects(metafieldId, prj2);
+
+            // 🔁 NYTT: snapshot för uppdaterad activity
+            try {
+              await syncSnapshotAfterMetafieldWrite(orderId, prj2);
+            } catch {}
           }
+
         }
       }
     } catch (e) {
@@ -5204,9 +5302,12 @@ app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
 
     await writeProductReviews(productId, revMfId, nextReviews);
 
-    const updated = { ...(p.review || {}), status: 'done', submittedAt: nowIso() };
+      const updated = { ...(p.review || {}), status: 'done', submittedAt: nowIso() };
     projects[idx] = { ...p, review: updated };
     await writeOrderProjects(metafieldId, projects);
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, projects);
+    } catch {}
 
     try {
       await appendActivity(orderId, [{
@@ -5377,19 +5478,24 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
       properties: nextProps,
       ...(Object.prototype.hasOwnProperty.call(proj, 'tryckfil') ? { tryckfil: newName } : {})
     };
-    const nextProjects = projects.slice();
+     const nextProjects = projects.slice();
     nextProjects[idx] = nextProj;
 
     await writeOrderProjects(metafieldId, nextProjects);
-try { await cacheOrderProjects(orderId, nextProjects); } catch {}
-    // ---- NYTT: uppdatera order-sammanfattning i Redis ----
-try {
-  const metaStr = JSON.stringify(nextProjects || []);
-  await touchOrderSummary(cidNum, Number(orderId), {
-    processedAt: new Date().toISOString(),
-    metafield: metaStr
-  });
-} catch {}
+    try { await cacheOrderProjects(orderId, nextProjects); } catch {}
+    // ---- NYTT: uppdatera order-sammanfattning i Redis + Postgres-snapshot ----
+    try {
+      const metaStr = JSON.stringify(nextProjects || []);
+      await touchOrderSummary(cidNum, Number(orderId), {
+        processedAt: new Date().toISOString(),
+        metafield: metaStr
+      });
+
+      await syncSnapshotAfterMetafieldWrite(orderId, nextProjects, {
+        customerId: Number(cidNum)
+      });
+    } catch {}
+
 
     // 5) Activity-logg (kund agerade)
     try {
@@ -5470,12 +5576,16 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
       reviewObj.token_hash = token_hash;
       reviewObj.createdAt = nowIso();
     }
-    projects[idx] = { ...p, review: reviewObj };
+       projects[idx] = { ...p, review: reviewObj };
 
     await writeOrderProjects(metafieldId, projects);
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, projects);
+    } catch {}
 
     const url = `${STORE_BASE}/pages/review?token=${encodeURIComponent(token)}`;
     return res.json({ ok: true, url });
+
   } catch (err) {
     console.error('POST /proxy/orders-meta/reviews/create:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal' });
@@ -5577,9 +5687,13 @@ app.post('/admin/order-created/backfill-artwork-token', async (req, res) => {
 
   if (changed > 0) {
     await writeOrderProjects(metafieldId, next);
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, next);
+    } catch {}
   }
   return { orderId, updated: changed, skipped: false };
 }
+
 
 // ...
 
