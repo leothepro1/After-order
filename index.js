@@ -4182,7 +4182,6 @@ app.get('/proxy/orders-meta', async (req, res) => {
     setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
     }
-  }
 });
 /* ===== NYTT: pending reviews för inloggad kund ===== */
 app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
@@ -5953,8 +5952,6 @@ async function pressifyComputeWindowsFromCart(items = []) {
   return { std, exp, dbg: { variants, products, haveStd: !!std, haveExp: !!exp } };
 }
 
-
-// Global felhanterare – sist i filen (före app.listen), men vi lägger en TIDIG också:
 app.use((err, req, res, next) => {
   try { setCorsOnError(req, res); } catch {}
   const status = err?.status || 500;
