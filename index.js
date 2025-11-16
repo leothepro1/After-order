@@ -800,14 +800,6 @@ async function readOrderProjects(orderId) {
     return { metafieldId: mf.id, projects: [] };
   }
 }
-
-async function writeOrderProjects(metafieldId, projects) {
-  await axios.put(
-    `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
-    { metafield: { id: metafieldId, type: 'json', value: JSON.stringify(projects) } },
-    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-  );
-}
 async function writeOrderProjects(metafieldId, projects) {
   await axios.put(
     `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
@@ -834,8 +826,8 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
 
     // Försök hämta kundinfo ur projekten om den inte skickas in
     if ((!customerId || !customerEmail || !processedAt) && Array.isArray(projects)) {
-      const candidate = projects.find(p =>
-        p && (p.customerId || p.customerEmail || p.orderProcessedAt)
+      const candidate = projects.find(
+        (p) => p && (p.customerId || p.customerEmail || p.orderProcessedAt)
       );
       if (candidate) {
         if (!customerId && candidate.customerId) {
@@ -879,6 +871,7 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
     console.warn('[syncSnapshotAfterMetafieldWrite] failed:', e?.message || e);
   }
 }
+
 
 // ===== UPSTASH REDIS (WRITE-THROUGH CACHE) =====
 const WRITE_ORDERS_TO_REDIS = String(process.env.WRITE_ORDERS_TO_REDIS || 'true') === 'true';
@@ -3186,7 +3179,7 @@ app.post('/proof/approve', async (req, res) => {
     let projects = [];
     try { projects = JSON.parse(metafield.value || '[]'); } catch { projects = []; }
 
- projects = projects.map(p => {
+projects = projects.map((p) => {
   if (String(p.lineItemId) !== String(lineItemId)) return p;
 
   // Samma logik som innan: sätt status + preview_img till godkända bilden
@@ -3195,8 +3188,8 @@ app.post('/proof/approve', async (req, res) => {
 
   // BONUS (minimal): om property "_preview_img" finns → uppdatera dess value
   if (newImg && Array.isArray(p.properties)) {
-    next.properties = p.properties.map(prop =>
-      (prop && prop.name === '_preview_img')
+    next.properties = p.properties.map((prop) =>
+      prop && prop.name === '_preview_img'
         ? { ...prop, value: newImg }
         : prop
     );
@@ -3204,6 +3197,7 @@ app.post('/proof/approve', async (req, res) => {
 
   return next;
 });
+
 
    // 3) === BLOCK C: Frys leveransdatum (behåll MIN–MAX) ===
 try {
@@ -3294,7 +3288,10 @@ try {
           const activeIdx = shares.findIndex(s => s && s.status === 'active');
 if (activeIdx >= 0) {
   const snap = { ...(shares[activeIdx].snapshot || {}) };
-  shares[activeIdx] = { ...shares[activeIdx], snapshot: { ...snap, hideActivity: true } };
+  shares[activeIdx] = {
+    ...shares[activeIdx],
+    snapshot: { ...snap, hideActivity: true }
+  };
   prj2[idx] = { ...p, shares };
   await writeOrderProjects(metafieldId, prj2);
   try { await cacheOrderProjects(orderId, prj2); } catch {}
@@ -3304,6 +3301,7 @@ if (activeIdx >= 0) {
     await syncSnapshotAfterMetafieldWrite(orderId, prj2);
   } catch {}
 }
+
 
         }
       }
@@ -3343,13 +3341,19 @@ app.post('/proof/request-changes', async (req, res) => {
     let projects = JSON.parse(metafield.value || '[]');
     console.log('⏳ Projects before update:', projects);
     let updated = false;
-    projects = projects.map(p => {
-      if (String(p.lineItemId) === String(lineItemId)) {
-        updated = true;
-        return { ...p, instructions, status: 'Tar fram korrektur', tag: 'Tar fram korrektur' };
-      }
-      return p;
-    });
+projects = projects.map((p) => {
+  if (String(p.lineItemId) === String(lineItemId)) {
+    updated = true;
+    return {
+      ...p,
+      instructions,
+      status: 'Tar fram korrektur',
+      tag: 'Tar fram korrektur'
+    };
+  }
+  return p;
+});
+
 
     if (!updated) {
       console.warn('⚠️ Line item hittades inte i metafält vid request-changes:', lineItemId);
@@ -3418,17 +3422,21 @@ app.post('/proof/request-changes', async (req, res) => {
           if (activeIdx >= 0) {
             const { log } = await getActivityLog(orderId);
             const merged = sliceActivityForLine(log, lineItemId); // “första + nya”
-            shares[activeIdx] = {
-              ...shares[activeIdx],
-              snapshot: { ...(shares[activeIdx].snapshot || {}), activity: merged }
-            };
-                    prj2[idx] = { ...p, shares };
-            await writeOrderProjects(metafieldId, prj2);
+          shares[activeIdx] = {
+  ...shares[activeIdx],
+  snapshot: {
+    ...(shares[activeIdx].snapshot || {}),
+    activity: merged
+  }
+};
+prj2[idx] = { ...p, shares };
+await writeOrderProjects(metafieldId, prj2);
 
-            // 🔁 NYTT: snapshot för uppdaterad activity
-            try {
-              await syncSnapshotAfterMetafieldWrite(orderId, prj2);
-            } catch {}
+// 🔁 NYTT: snapshot för uppdaterad activity
+try {
+  await syncSnapshotAfterMetafieldWrite(orderId, prj2);
+} catch {}
+
           }
 
         }
