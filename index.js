@@ -136,20 +136,22 @@ const ORDERS_SNAPSHOT_BACKFILL_ON_BOOT =
 
 let __ordersSnapshotBackfillStarted = false;
 
-function normalizeOrderMetafieldForSnapshot(metafieldValue, order) {
+// Normalisera metafältet så vi både får exakt raw-string och JSON–objektet
+function normalizeOrderMetafieldForSnapshot(metafieldValue) {
   let raw = '';
   let json = null;
 
   try {
     if (metafieldValue == null) {
+      // inget värde → vi sparar tom sträng och ingen JSON
       raw = '';
       json = null;
     } else if (typeof metafieldValue === 'string') {
+      // Vanligast: Shopify-metafältet är en JSON-sträng
       raw = metafieldValue;
       const trimmed = metafieldValue.trim();
       if (trimmed) {
         try {
-          // första parse
           let parsed = JSON.parse(trimmed);
 
           // ibland är det dubbel-encodat: "\"[ {...} ]\""
@@ -160,7 +162,7 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue, order) {
                 parsed = parsed2;
               }
             } catch {
-              // ok, då låter vi parsed vara som det är
+              // då får parsed vara kvar som string, och json blir null
             }
           }
 
@@ -175,11 +177,11 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue, order) {
         }
       }
     } else if (typeof metafieldValue === 'object') {
-      // redan objekt/array
+      // redan objekt/array (t.ex. vår egen combined i kod)
       raw = JSON.stringify(metafieldValue);
       json = metafieldValue;
     } else {
-      // nummer/bool etc → lagra som text, ingen JSON
+      // nummer/bool etc → spara som text, ingen JSONB
       raw = String(metafieldValue);
       json = null;
     }
@@ -191,17 +193,81 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue, order) {
     json = null;
   }
 
-  const { createdAt, updatedAt } = extractOrderTimestamps(order);
-
-  return {
-    raw,
-    json,
-    customerId: extractCustomerIdFromOrder(order),
-    customerEmail: extractCustomerEmailFromOrder(order),
-    createdAt,
-    updatedAt
-  };
+  return { raw, json };
 }
+
+// Plocka ut tidsstämplar från Shopify-order (fallback till now)
+function extractOrderTimestamps(order) {
+  const created =
+    order?.created_at ||
+    order?.processed_at ||
+    new Date().toISOString();
+  const updated = order?.updated_at || created;
+  return { createdAt: created, updatedAt: updated };
+}
+
+// Upsert: spara snapshot av order + metafält i Postgres
+async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
+  if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
+
+  try {
+    const orderId = Number(order?.id);
+    if (!orderId || Number.isNaN(orderId)) return;
+
+    const customerId = order?.customer?.id
+      ? Number(order.customer.id)
+      : null;
+    const customerEmail =
+      order?.email ||
+      order?.customer?.email ||
+      null;
+
+    const { createdAt, updatedAt } = extractOrderTimestamps(order);
+    const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
+
+    // 🔒 Viktigt: JSONB-kolumnen får ALDRIG en trasig JSON-sträng.
+    // Vi skickar bara objekt/array – annars tom array [].
+    const jsonParam =
+      json && typeof json === 'object'
+        ? json
+        : [];
+
+    await pgQuery(
+      `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
+         order_id,
+         customer_id,
+         customer_email,
+         created_at,
+         updated_at,
+         metafield_raw,
+         metafield_json
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (order_id) DO UPDATE SET
+         customer_id    = EXCLUDED.customer_id,
+         customer_email = EXCLUDED.customer_email,
+         created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
+         updated_at     = EXCLUDED.updated_at,
+         metafield_raw  = EXCLUDED.metafield_raw,
+         metafield_json = EXCLUDED.metafield_json`,
+      [
+        orderId,
+        customerId,
+        customerEmail,
+        createdAt,
+        updatedAt,
+        raw,
+        jsonParam
+      ]
+    );
+  } catch (e) {
+    console.warn(
+      '[orders_snapshot] upsertOrderSnapshotFromMetafield failed:',
+      e?.message || e
+    );
+  }
+}
+
 
 // och spegla till Postgres via upsertOrderSnapshotFromMetafield.
 // Metafältets JSON (value) används som exakt sanning – vi rör inte strukturen, vi speglar den bara.
