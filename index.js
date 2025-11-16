@@ -12,6 +12,7 @@ const compression = require('compression');
 const bodyParser = require('body-parser');
 const fs = require('fs');         
 const path = require('path');  
+const { Pool } = require('pg'); // 🔌 Postgres-klient
 
 const app = express(); // ✅ Skapa app INNAN du använder den
 
@@ -39,7 +40,7 @@ function setCorsOnError(req, res) {
   }
 }
 
-// Shopify-info från miljövariabler
+
 const SHOP = process.env.SHOP;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET; 
@@ -57,6 +58,83 @@ const SCOPES = process.env.SCOPES || 'read_orders,read_customers,write_customers
 const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(/\/$/, '');
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
 const ORDER_META_KEY = process.env.ORDER_META_KEY || 'order-created';
+
+// === Postgres (orders_snapshot) =========================================
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const PG_POOL_MAX = parseInt(process.env.PG_POOL_MAX || '10', 10);
+
+let pgPool = null;
+
+if (!DATABASE_URL) {
+  console.warn('[pg] DATABASE_URL saknas – Postgres är inaktiverat');
+} else {
+  pgPool = new Pool({
+    connectionString: DATABASE_URL,
+    max: PG_POOL_MAX,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+    // Render Postgres brukar kräva SSL; du kan styra med PG_SSL=false om du vill stänga av
+    ssl: process.env.PG_SSL === 'false' ? false : { rejectUnauthorized: false }
+  });
+
+  pgPool.on('error', (err) => {
+    console.error('[pg] Ohanterat pool-fel:', err);
+  });
+}
+
+// Generell helper för SELECT/INSERT/UPDATE mot Postgres
+async function pgQuery(text, params) {
+  if (!pgPool) {
+    throw new Error('pgPool inte initialiserad – saknar DATABASE_URL');
+  }
+  const client = await pgPool.connect();
+  try {
+    return await client.query(text, params);
+  } finally {
+    client.release();
+  }
+}
+
+// Tabellnamn för våra snapshots
+const ORDERS_SNAPSHOT_TABLE = 'orders_snapshot';
+
+// Se till att tabellen + index finns vid uppstart
+async function ensureOrdersSnapshotTable() {
+  if (!pgPool) {
+    console.warn('[orders_snapshot] Hoppar över init – pgPool saknas');
+    return;
+  }
+
+  const ddl = `
+    CREATE TABLE IF NOT EXISTS ${ORDERS_SNAPSHOT_TABLE} (
+      order_id       BIGINT PRIMARY KEY,
+      customer_id    BIGINT,
+      customer_email TEXT,
+      created_at     TIMESTAMPTZ NOT NULL,
+      updated_at     TIMESTAMPTZ NOT NULL,
+      metafield_raw  TEXT NOT NULL,
+      metafield_json JSONB NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_customer_id
+      ON ${ORDERS_SNAPSHOT_TABLE}(customer_id);
+
+    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_customer_email
+      ON ${ORDERS_SNAPSHOT_TABLE}(lower(customer_email));
+
+    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_created_at
+      ON ${ORDERS_SNAPSHOT_TABLE}(created_at DESC);
+  `;
+
+  await pgQuery(ddl);
+}
+
+// Kör enkel init/migration vid start
+ensureOrdersSnapshotTable().catch((err) => {
+  console.error('[orders_snapshot] init-fel:', err?.message || err);
+});
+// ========================================================================
+
 // överst bland konfig:
 // Publik butik (för delningslänkar 
 
@@ -67,6 +145,7 @@ const PRESSIFY_TEAM_ID_KEY = 'team_id';
 const PRESSIFY_TEAM_NAME_KEY = 'team_name';
 const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
+
 
 /**
  * Normaliserar scope/team från payloadet som kommer från cart.js
@@ -1883,6 +1962,145 @@ function buildPrettyProperties(propsMap) {
   return out;
 }
 // ---------------- SLUT HELPER-FUNKTIONER ----------------
+
+// ===== Postgres helpers för orders_snapshot =============================
+
+// Normalisera metafältet så vi både får exakt raw-string och JSON–objektet
+function normalizeOrderMetafieldForSnapshot(metafieldValue) {
+  // metafieldValue kan vara redan-parsad array/objekt ELLER en JSON-string
+  if (typeof metafieldValue === 'string') {
+    const raw = metafieldValue;
+    let json;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      json = null;
+    }
+    return { raw, json };
+  }
+
+  if (metafieldValue == null) {
+    return { raw: 'null', json: null };
+  }
+
+  // Bevara EXAKT struktur som Shopify-metafältet använder
+  const json = metafieldValue;
+  const raw = JSON.stringify(metafieldValue);
+  return { raw, json };
+}
+
+// Plocka ut tidsstämplar från Shopify-order (fallback till now)
+function extractOrderTimestamps(order) {
+  const created = order?.created_at || order?.processed_at || new Date().toISOString();
+  const updated = order?.updated_at || created;
+  return { createdAt: created, updatedAt: updated };
+}
+
+// Upsert: spara snapshot av order + metafält i Postgres
+async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
+  if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
+
+  try {
+    const orderId = Number(order?.id);
+    if (!orderId || Number.isNaN(orderId)) return;
+
+    const customerId = order?.customer?.id ? Number(order.customer.id) : null;
+    const customerEmail =
+      order?.email ||
+      order?.customer?.email ||
+      null;
+
+    const { createdAt, updatedAt } = extractOrderTimestamps(order);
+    const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
+
+    await pgQuery(
+      `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
+         order_id,
+         customer_id,
+         customer_email,
+         created_at,
+         updated_at,
+         metafield_raw,
+         metafield_json
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (order_id) DO UPDATE SET
+         customer_id    = EXCLUDED.customer_id,
+         customer_email = EXCLUDED.customer_email,
+         created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
+         updated_at     = EXCLUDED.updated_at,
+         metafield_raw  = EXCLUDED.metafield_raw,
+         metafield_json = EXCLUDED.metafield_json`,
+      [
+        orderId,
+        customerId,
+        customerEmail,
+        createdAt,
+        updatedAt,
+        raw,
+        json
+      ]
+    );
+  } catch (e) {
+    console.warn('[orders_snapshot] upsertOrderSnapshotFromMetafield failed:', e?.message || e);
+  }
+}
+
+// Läs snapshot för en enskild order
+async function readOrderSnapshot(orderId) {
+  if (!pgPool) return null;
+  try {
+    const oid = Number(orderId);
+    const { rows } = await pgQuery(
+      `SELECT
+         order_id,
+         customer_id,
+         customer_email,
+         created_at,
+         updated_at,
+         metafield_raw,
+         metafield_json
+       FROM ${ORDERS_SNAPSHOT_TABLE}
+       WHERE order_id = $1`,
+      [oid]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    console.warn('[orders_snapshot] readOrderSnapshot failed:', e?.message || e);
+    return null;
+  }
+}
+
+// Läs senaste N ordrar för en kund (för t.ex. orders-listor i frontend)
+async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
+  if (!pgPool) return [];
+  try {
+    const cid = Number(customerId);
+    const lim = Number.isFinite(Number(limit)) ? Number(limit) : 50;
+
+    const { rows } = await pgQuery(
+      `SELECT
+         order_id,
+         customer_id,
+         customer_email,
+         created_at,
+         updated_at,
+         metafield_raw,
+         metafield_json
+       FROM ${ORDERS_SNAPSHOT_TABLE}
+       WHERE customer_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [cid, lim]
+    );
+    return rows || [];
+  } catch (e) {
+    console.warn('[orders_snapshot] listOrderSnapshotsForCustomer failed:', e?.message || e);
+    return [];
+  }
+}
+// ========================================================================
+
 
 // Webhook: Order skapad
 app.post('/webhooks/order-created', async (req, res) => {
