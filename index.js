@@ -136,139 +136,7 @@ const ORDERS_SNAPSHOT_BACKFILL_ON_BOOT =
 
 let __ordersSnapshotBackfillStarted = false;
 
-// Normalisera metafältet så vi både får exakt raw-string och JSON–objektet
-function normalizeOrderMetafieldForSnapshot(metafieldValue) {
-  let raw = '';
-  let json = null;
-
-  try {
-    if (metafieldValue == null) {
-      // inget värde → vi sparar tom sträng och ingen JSON
-      raw = '';
-      json = null;
-    } else if (typeof metafieldValue === 'string') {
-      // Vanligast: Shopify-metafältet är en JSON-sträng
-      raw = metafieldValue;
-      const trimmed = metafieldValue.trim();
-      if (trimmed) {
-        try {
-          let parsed = JSON.parse(trimmed);
-
-          // ibland är det dubbel-encodat: "\"[ {...} ]\""
-          if (typeof parsed === 'string') {
-            try {
-              const parsed2 = JSON.parse(parsed);
-              if (parsed2 && typeof parsed2 === 'object') {
-                parsed = parsed2;
-              }
-            } catch {
-              // då får parsed vara kvar som string, och json blir null
-            }
-          }
-
-          if (parsed && typeof parsed === 'object') {
-            json = parsed;
-          } else {
-            json = null;
-          }
-        } catch {
-          // trasig JSON-sträng → vi sparar bara raw
-          json = null;
-        }
-      }
-    } else if (typeof metafieldValue === 'object') {
-      // redan objekt/array (t.ex. vår egen combined i kod)
-      raw = JSON.stringify(metafieldValue);
-      json = metafieldValue;
-    } else {
-      // nummer/bool etc → spara som text, ingen JSONB
-      raw = String(metafieldValue);
-      json = null;
-    }
-  } catch {
-    raw =
-      typeof metafieldValue === 'string'
-        ? metafieldValue
-        : JSON.stringify(metafieldValue ?? '');
-    json = null;
-  }
-
-  return { raw, json };
-}
-
-// Plocka ut tidsstämplar från Shopify-order (fallback till now)
-function extractOrderTimestamps(order) {
-  const created =
-    order?.created_at ||
-    order?.processed_at ||
-    new Date().toISOString();
-  const updated = order?.updated_at || created;
-  return { createdAt: created, updatedAt: updated };
-}
-
-// Upsert: spara snapshot av order + metafält i Postgres
-async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
-  if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
-
-  try {
-    const orderId = Number(order?.id);
-    if (!orderId || Number.isNaN(orderId)) return;
-
-    const customerId = order?.customer?.id
-      ? Number(order.customer.id)
-      : null;
-    const customerEmail =
-      order?.email ||
-      order?.customer?.email ||
-      null;
-
-    const { createdAt, updatedAt } = extractOrderTimestamps(order);
-    const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
-
-    // 🔒 Viktigt: JSONB-kolumnen får ALDRIG en trasig JSON-sträng.
-    // Vi skickar bara objekt/array – annars tom array [].
-    const jsonParam =
-      json && typeof json === 'object'
-        ? json
-        : [];
-
-    await pgQuery(
-      `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
-         order_id,
-         customer_id,
-         customer_email,
-         created_at,
-         updated_at,
-         metafield_raw,
-         metafield_json
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (order_id) DO UPDATE SET
-         customer_id    = EXCLUDED.customer_id,
-         customer_email = EXCLUDED.customer_email,
-         created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
-         updated_at     = EXCLUDED.updated_at,
-         metafield_raw  = EXCLUDED.metafield_raw,
-         metafield_json = EXCLUDED.metafield_json`,
-      [
-        orderId,
-        customerId,
-        customerEmail,
-        createdAt,
-        updatedAt,
-        raw,
-        jsonParam
-      ]
-    );
-  } catch (e) {
-    console.warn(
-      '[orders_snapshot] upsertOrderSnapshotFromMetafield failed:',
-      e?.message || e
-    );
-  }
-}
-
-
+// Backfill: hämta ALLA ordrar från Shopify, läs order-metafältet (ORDER_META_NAMESPACE/ORDER_META_KEY)
 // och spegla till Postgres via upsertOrderSnapshotFromMetafield.
 // Metafältets JSON (value) används som exakt sanning – vi rör inte strukturen, vi speglar den bara.
 async function backfillOrdersSnapshotAllOrders() {
@@ -1396,30 +1264,17 @@ function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
-
 function mergeConfig(productCfg, globalsCfg) {
-  // Börja med en kopia av produktens config
-  const merged = { ...(productCfg || {}) };
-
-  // Slå ihop options: globala först, sedan produktens
-  const globalOptions = Array.isArray(globalsCfg?.options)
-    ? globalsCfg.options
-    : [];
-  const productOptions = Array.isArray(productCfg?.options)
-    ? productCfg.options
-    : [];
-
-  merged.options = [...globalOptions, ...productOptions];
+  const merged = { ...productCfg };
+  merged.options = [ ...(globalsCfg.options || []), ...(productCfg.options || []) ];
   return merged;
 }
-
 function sendWithCache(res, cfg, versionHint) {
   const etag = `"cfg-${versionHint || cfg.version || Date.now()}"`;
   res.set('ETag', etag);
   res.set('Cache-Control', 'public, max-age=300');
   res.json(cfg);
 }
-
 /* ====== SLUT config-hjälpare ====== */
 // === ARTWORK TOKEN RESOLVER (PUBLIC VIA APP PROXY) ===
 app.get('/proxy/printed/artwork-token', async (req, res) => {
@@ -2328,7 +2183,7 @@ function buildPrettyProperties(propsMap) {
 // ===== Postgres helpers för orders_snapshot =============================
 
 // EFTER: robust normalisering för snapshot (raw = exakt Shopify-sträng, json = säkert objekt/array eller null)
-function ) {
+function normalizeOrderMetafieldForSnapshot(metafieldValue) {
   // Fall 1: metafältet är en JSON-sträng (vanligt från Shopify Admin)
   if (typeof metafieldValue === 'string') {
     const raw = metafieldValue;
@@ -2381,73 +2236,51 @@ function extractOrderTimestamps(order) {
   return { createdAt: created, updatedAt: updated };
 }
 
+// Upsert: spara snapshot av order + metafält i Postgres
 async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
-  if (!pgPool) {
-    console.warn('[orders_snapshot] upsert: pgPool saknas – skippar');
-    return;
-  }
+  if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
 
-  const orderId =
-    (order && (order.id || order.order_id || order.orderId)) || null;
+  try {
+    const orderId = Number(order?.id);
+    if (!orderId || Number.isNaN(orderId)) return;
 
-  if (!orderId) {
-    console.warn('[orders_snapshot] upsert: order saknar id, skippar', {
-      order
-    });
-    return;
-  }
+    const customerId = order?.customer?.id ? Number(order.customer.id) : null;
+    const customerEmail =
+      order?.email ||
+      order?.customer?.email ||
+      null;
 
-  const {
-    raw,
-    json,
-    customerId,
-    customerEmail,
-    createdAt,
-    updatedAt
-  } = normalizeOrderMetafieldForSnapshot(metafieldValue, order);
+    const { createdAt, updatedAt } = extractOrderTimestamps(order);
+    const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
 
-  // ✅ SISTA GUARDEN:
-  //  - Postgres får ALDRIG en trasig JSON-sträng.
-  //  - Om json saknas eller inte är ett objekt/array → vi sparar tom array [].
-  let jsonParam = json;
-  if (!jsonParam || typeof jsonParam !== 'object') {
-    jsonParam = []; // frontend läser ändå från raw vid behov
-  }
-
-  const sql = `
-    INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
-      order_id,
-      customer_id,
-      customer_email,
-      created_at,
-      updated_at,
-      metafield_raw,
-      metafield_json
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-    ON CONFLICT (order_id) DO UPDATE SET
-      customer_id    = EXCLUDED.customer_id,
-      customer_email = EXCLUDED.customer_email,
-      created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
-      updated_at     = EXCLUDED.updated_at,
-      metafield_raw  = EXCLUDED.metafield_raw,
-      metafield_json = EXCLUDED.metafield_json
-  `;
-
-  // 👇 INGEN try/catch här – om något går fel ska backfill se felet.
-  await pgQuery(sql, [
-    Number(orderId),
-    customerId ? Number(customerId) : null,
-    customerEmail || null,
-    createdAt,
-    updatedAt,
-    raw,
-    jsonParam
-  ]);
-}
-
-
-
+    await pgQuery(
+      `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
+         order_id,
+         customer_id,
+         customer_email,
+         created_at,
+         updated_at,
+         metafield_raw,
+         metafield_json
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (order_id) DO UPDATE SET
+         customer_id    = EXCLUDED.customer_id,
+         customer_email = EXCLUDED.customer_email,
+         created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
+         updated_at     = EXCLUDED.updated_at,
+         metafield_raw  = EXCLUDED.metafield_raw,
+         metafield_json = EXCLUDED.metafield_json`,
+      [
+        orderId,
+        customerId,
+        customerEmail,
+        createdAt,
+        updatedAt,
+        raw,
+        json
+      ]
+    );
   } catch (e) {
     console.warn('[orders_snapshot] upsertOrderSnapshotFromMetafield failed:', e?.message || e);
   }
@@ -5591,25 +5424,6 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
 app.post('/proxy/order/cancel', forward('/proxy/orders-meta/order/cancel'));
 
 /* ====== END SIMPLE CANCEL VIA APP PROXY ====== */
-// ===== ADMIN: Manuell backfill av orders_snapshot =====
-// Använd samma BACKFILL_SECRET-header som övriga backfills.
-app.post('/admin/orders-snapshot/backfill', async (req, res) => {
-  try {
-    if (!BACKFILL_SECRET || req.get('x-backfill-secret') !== BACKFILL_SECRET) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-
-    const summary = await backfillOrdersSnapshotAllOrders();
-
-    return res.json({
-      ok: true,
-      summary
-    });
-  } catch (e) {
-    console.error('POST /admin/orders-snapshot/backfill:', e?.message || e);
-    return res.status(500).json({ error: 'internal' });
-  }
-});
 
 // ===== ADMIN: Backfill för alla kunder (skapa referlink om saknas) =====
 app.post('/admin/referlink/backfill', async (req, res) => {
