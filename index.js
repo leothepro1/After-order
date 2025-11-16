@@ -1399,6 +1399,10 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
 //   Obs: legacy utan orderId blir "best effort": vi försöker hitta i senaste snapshoten/Redis-index om tillgängligt.
 // === PUBLIC RESOLVER: /public/printed/artwork-token ==================
 // Accepterar ?artwork=, ?token= eller ?id=
+// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
+// Accepterar ?artwork=, ?token= eller ?id=
+// - Signerad token (p64url.<sig>): verifieras → hämtar projekt + aktiv snapshot.
+// - Legacy (t.ex. gammalt filnamn): söker i senaste ordrar.
 app.get('/public/printed/artwork-token', async (req, res) => {
   function sendErr(status, msg) {
     res.setHeader('Cache-Control', 'no-store');
@@ -1410,7 +1414,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
   }
 
   try {
-    // ⬇️ NYTT: samma som i /proxy/printed/artwork-token
+    // ✅ Stöd för artwork/token/id i query
     const raw = String(
       req.query.artwork ||
       req.query.token   ||
@@ -1427,8 +1431,21 @@ app.get('/public/printed/artwork-token', async (req, res) => {
       const { orderId, lineItemId } = payload || {};
       if (!orderId || !lineItemId) return sendErr(400, 'bad_payload');
 
-      // 🔄 DB/Redis först
-      const { projects } = await readOrderProjectsForRead(orderId);
+      let projects = [];
+      // 🔄 FÖRST: DB/Redis
+      try {
+        const fromDb = await readOrderProjectsForRead(orderId);
+        projects = Array.isArray(fromDb?.projects) ? fromDb.projects : [];
+      } catch {}
+
+      // 🔁 FALLBACK: direkt från Shopify-metafält om DB saknar datan
+      if (!projects.length) {
+        try {
+          const fromShopify = await readOrderProjects(orderId);
+          projects = Array.isArray(fromShopify?.projects) ? fromShopify.projects : [];
+        } catch {}
+      }
+
       const proj = (projects || []).find(
         (p) => String(p.lineItemId) === String(lineItemId)
       );
@@ -1450,18 +1467,25 @@ app.get('/public/printed/artwork-token', async (req, res) => {
       return sendOk({ preview, filename, token: raw });
     }
 
-    // 2) Legacy-hex / filnamn – här behåller du din nuvarande kod
-    // ...
-
-
-    // 2) Legacy-hex / filnamn → här kan du också byta till readOrderProjectsForRead
+    // 2) Legacy-hex / filnamn → “best effort” via senaste ordrar
     const legacy = decodeURIComponent(raw).toLowerCase();
 
     try {
       const recentOrders = await getRecentOrdersFromCache?.(50);
       if (Array.isArray(recentOrders)) {
         for (const o of recentOrders) {
-          const { projects } = await readOrderProjectsForRead(o.id);
+          let projects = [];
+          try {
+            const fromDb = await readOrderProjectsForRead(o.id);
+            projects = Array.isArray(fromDb?.projects) ? fromDb.projects : [];
+          } catch {}
+          if (!projects.length) {
+            try {
+              const fromShopify = await readOrderProjects(o.id);
+              projects = Array.isArray(fromShopify?.projects) ? fromShopify.projects : [];
+            } catch {}
+          }
+
           const hit = (projects || []).find((p) => {
             const fn = (() => {
               try {
@@ -1476,6 +1500,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
             })().toLowerCase() || (p.tryckfil || '').toLowerCase();
             return fn && fn === legacy;
           });
+
           if (hit) {
             const preview = hit.previewUrl || hit.preview_img || null;
             let filename = '';
@@ -1506,6 +1531,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
+
 
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
 // Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
