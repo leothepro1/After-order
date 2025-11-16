@@ -98,52 +98,36 @@ async function pgQuery(text, params) {
 // Tabellnamn för våra snapshots
 const ORDERS_SNAPSHOT_TABLE = 'orders_snapshot';
 
+// BACKFILL: snapshot-tabell för ordrar (utökad med scope/team mm)
 async function ensureOrdersSnapshotTable() {
-  if (!pgPool) {
-    console.warn('[orders_snapshot] Hoppar över init – pgPool saknas');
-    return;
-  }
+  if (!pgPool) return;
 
-  const ddl = `
-    -- Bas-snapshot-tabell (oförändrad struktur)
-    CREATE TABLE IF NOT EXISTS ${ORDERS_SNAPSHOT_TABLE} (
-      order_id       BIGINT PRIMARY KEY,
-      customer_id    BIGINT,
-      customer_email TEXT,
-      created_at     TIMESTAMPTZ NOT NULL,
-      updated_at     TIMESTAMPTZ NOT NULL,
-      metafield_raw  TEXT NOT NULL,
-      metafield_json JSONB NOT NULL
+  await pgQuery(`
+    CREATE TABLE IF NOT EXISTS orders_snapshot (
+      order_id                 BIGINT PRIMARY KEY,
+      customer_id              BIGINT,
+      customer_email           TEXT,
+      order_name               TEXT,
+      created_at               TIMESTAMPTZ NOT NULL,
+      updated_at               TIMESTAMPTZ NOT NULL,
+      processed_at             TIMESTAMPTZ,
+      fulfillment_status       TEXT,
+      display_fulfillment_status TEXT,
+      scope                    TEXT NOT NULL DEFAULT 'personal',
+      team_id                  TEXT,
+      metafield_raw            TEXT,
+      metafield_json           JSONB
     );
 
-    -- Nya kolumner för scout/Teams (läggs bara om de saknas)
-    ALTER TABLE ${ORDERS_SNAPSHOT_TABLE}
-      ADD COLUMN IF NOT EXISTS order_name                 TEXT,
-      ADD COLUMN IF NOT EXISTS processed_at              TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS fulfillment_status        TEXT,
-      ADD COLUMN IF NOT EXISTS display_fulfillment_status TEXT,
-      ADD COLUMN IF NOT EXISTS pressify_scope            TEXT,
-      ADD COLUMN IF NOT EXISTS pressify_team_id          TEXT;
+    -- Index för personliga ordrar (kundhistorik)
+    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_customer
+      ON orders_snapshot (customer_id, created_at DESC);
 
-    -- Befintliga index (kund + e-post + tid)
-    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_customer_id
-      ON ${ORDERS_SNAPSHOT_TABLE}(customer_id);
-
-    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_customer_email
-      ON ${ORDERS_SNAPSHOT_TABLE}(lower(customer_email));
-
-    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_created_at
-      ON ${ORDERS_SNAPSHOT_TABLE}(created_at DESC);
-
-    -- Nytt index för team-vyer: scope + team + tid
-    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_scope_team_time
-      ON ${ORDERS_SNAPSHOT_TABLE}(
-        pressify_scope,
-        pressify_team_id,
-        COALESCE(processed_at, created_at) DESC
-      );
-  `;
-
+    -- Index för teams (scout-lösningen)
+    CREATE INDEX IF NOT EXISTS idx_orders_snapshot_scope_team
+      ON orders_snapshot (scope, team_id, processed_at DESC);
+  `);
+}
   await pgQuery(ddl);
 }
 
@@ -2380,7 +2364,7 @@ function extractOrderTimestamps(order) {
   return { createdAt: created, updatedAt: updated };
 }
 
-// EFTER: upsertOrderSnapshotFromMetafield – JSONB-safe och låter fel bubbla upp
+// EFTER: upsertOrderSnapshotFromMetafield – skriver även scope/team + processed/status
 async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
   if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
 
@@ -2393,95 +2377,131 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
     order?.customer?.email ||
     null;
 
-  const { createdAt, updatedAt } = extractOrderTimestamps(order);
-  const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
+  const orderName = order?.name || null;
 
-  // JSONB-kolumnen vill ha en giltig JSON-sträng – fall back till [] om något går fel
-  let jsonText;
-  try {
-    jsonText = JSON.stringify(json ?? []);
-  } catch {
-    jsonText = '[]';
-  }
-
-  // Ordernamn (t.ex. "#1001")
-  const orderName =
-    order?.name ||
-    order?.order_name ||
-    null;
-
-  // processed_at (fall back: created_at)
   const processedAt =
     order?.processed_at ||
-    order?.processedAt ||
-    createdAt ||
-    new Date().toISOString();
-
-  // Fulfillment-status (REST/GraphQL-kompatibelt)
-  const fulfillmentStatus =
-    order?.fulfillment_status ||
-    order?.fulfillmentStatus ||
+    order?.created_at ||
     null;
 
+  const fulfillmentStatus = order?.fulfillment_status || null;
   const displayFulfillmentStatus =
-    order?.displayFulfillmentStatus ||
-    fulfillmentStatus ||
+    (order?.fulfillments && order.fulfillments.length
+      ? order.fulfillments[0].status
+      : null) ||
+    order?.fulfillment_status ||
     null;
 
-  // Plocka Pressify scope/team ur metafältet (samma logik som frontend)
-  const scopeInfo = pfExtractScopeFromOrderProjects(raw);
-  const pressifyScope   = scopeInfo.scope  || 'personal';
-  const pressifyTeamId  = scopeInfo.teamId || null;
+  const { createdAt, updatedAt } = getOrderSnapshotTimestamps(order);
 
+  // ----- Parse pressify-metafält -----
+  let metafieldJson = null;
+  try {
+    metafieldJson = metafieldValue ? JSON.parse(metafieldValue) : null;
+  } catch (e) {
+    metafieldJson = null;
+  }
+
+  // Vi förväntar oss att pressify-metafältet är antingen:
+  //  - en array med projekt [{...}, {...}]
+  //  - ett objekt { scope: 'team', team_id: '123', projects: [...] }
+  //
+  // Så vi normaliserar till ett objekt + försöker plocka scope/team_id med samma heuristik
+  // som på frontend (pfyGetActiveWorkspace).
+  let pressifyRoot = {};
+  if (metafieldJson && typeof metafieldJson === 'object') {
+    if (Array.isArray(metafieldJson)) {
+      pressifyRoot = { projects: metafieldJson };
+    } else {
+      pressifyRoot = metafieldJson;
+    }
+  }
+
+  // Default: personal
+  let pressifyScope = 'personal';
+  let pressifyTeamId = null;
+
+  // 1) scope
+  if (typeof pressifyRoot.scope === 'string') {
+    pressifyScope = pressifyRoot.scope === 'team' ? 'team' : 'personal';
+  }
+
+  // 2) teamId – försök med flera nycklar, precis som pfyGetActiveWorkspace
+  const teamIdCandidates = [
+    pressifyRoot.team_id,
+    pressifyRoot.teamId,
+    pressifyRoot.teamCustomerId,
+    pressifyRoot.team_customer_id,
+    pressifyRoot.customerId,
+    pressifyRoot.customer_id,
+    pressifyRoot.team && pressifyRoot.team.id,
+    pressifyRoot.team && pressifyRoot.team.customerId
+  ];
+
+  for (const cand of teamIdCandidates) {
+    if (cand != null && cand !== '') {
+      pressifyTeamId = String(cand);
+      break;
+    }
+  }
+
+  // Om scope=team men vi inte hittade något ID → logiskt fel, men vi sparar ändå,
+  // dock med null team_id. Selecten för teamId kommer då inte matcha den ordern.
+  if (pressifyScope !== 'team') {
+    pressifyTeamId = null;
+  }
+
+  // ----- Upsert -----
   await pgQuery(
     `
-    INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
-      order_id,
-      customer_id,
-      customer_email,
-      created_at,
-      updated_at,
-      metafield_raw,
-      metafield_json,
-      order_name,
-      processed_at,
-      fulfillment_status,
-      display_fulfillment_status,
-      pressify_scope,
-      pressify_team_id
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-    ON CONFLICT (order_id) DO UPDATE SET
-      customer_id                = EXCLUDED.customer_id,
-      customer_email             = EXCLUDED.customer_email,
-      created_at                 = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
-      updated_at                 = EXCLUDED.updated_at,
-      metafield_raw              = EXCLUDED.metafield_raw,
-      metafield_json             = EXCLUDED.metafield_json,
-      order_name                 = COALESCE(EXCLUDED.order_name, ${ORDERS_SNAPSHOT_TABLE}.order_name),
-      processed_at               = COALESCE(EXCLUDED.processed_at, ${ORDERS_SNAPSHOT_TABLE}.processed_at),
-      fulfillment_status         = COALESCE(EXCLUDED.fulfillment_status, ${ORDERS_SNAPSHOT_TABLE}.fulfillment_status),
-      display_fulfillment_status = COALESCE(EXCLUDED.display_fulfillment_status, ${ORDERS_SNAPSHOT_TABLE}.display_fulfillment_status),
-      pressify_scope             = COALESCE(EXCLUDED.pressify_scope, ${ORDERS_SNAPSHOT_TABLE}.pressify_scope),
-      pressify_team_id           = COALESCE(EXCLUDED.pressify_team_id, ${ORDERS_SNAPSHOT_TABLE}.pressify_team_id)
+      INSERT INTO orders_snapshot (
+        order_id,
+        customer_id,
+        customer_email,
+        order_name,
+        created_at,
+        updated_at,
+        processed_at,
+        fulfillment_status,
+        display_fulfillment_status,
+        scope,
+        team_id,
+        metafield_raw,
+        metafield_json
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      ON CONFLICT (order_id) DO UPDATE SET
+        customer_id              = EXCLUDED.customer_id,
+        customer_email           = EXCLUDED.customer_email,
+        order_name               = EXCLUDED.order_name,
+        created_at               = LEAST(orders_snapshot.created_at, EXCLUDED.created_at),
+        updated_at               = GREATEST(orders_snapshot.updated_at, EXCLUDED.updated_at),
+        processed_at             = COALESCE(EXCLUDED.processed_at, orders_snapshot.processed_at),
+        fulfillment_status       = COALESCE(EXCLUDED.fulfillment_status, orders_snapshot.fulfillment_status),
+        display_fulfillment_status = COALESCE(EXCLUDED.display_fulfillment_status, orders_snapshot.display_fulfillment_status),
+        scope                    = EXCLUDED.scope,
+        team_id                  = EXCLUDED.team_id,
+        metafield_raw            = EXCLUDED.metafield_raw,
+        metafield_json           = EXCLUDED.metafield_json
     `,
     [
       orderId,
       customerId,
       customerEmail,
+      orderName,
       createdAt,
       updatedAt,
-      raw,        // 1:1 Shopify-sträng
-      jsonText,   // alltid giltig JSON-text
-      orderName,
       processedAt,
       fulfillmentStatus,
       displayFulfillmentStatus,
       pressifyScope,
-      pressifyTeamId
+      pressifyTeamId,
+      metafieldValue || null,
+      metafieldJson
     ]
   );
 }
+
 
 
 
@@ -2497,20 +2517,58 @@ async function readOrderSnapshot(orderId) {
          order_id,
          customer_id,
          customer_email,
+         order_name,
          created_at,
          updated_at,
+         processed_at,
+         fulfillment_status,
+         display_fulfillment_status,
+         scope,
+         team_id,
          metafield_raw,
          metafield_json
-       FROM ${ORDERS_SNAPSHOT_TABLE}
+       FROM orders_snapshot
        WHERE order_id = $1`,
       [oid]
     );
     return rows[0] || null;
   } catch (e) {
-    console.warn('[orders_snapshot] readOrderSnapshot failed:', e?.message || e);
+    console.error('readOrderSnapshot error', e);
     return null;
   }
 }
+
+// NY: lista ordrar för ett team-workspace
+async function listOrderSnapshotsForTeam(teamId, limit) {
+  if (!pgPool) return [];
+  const max = Math.min(Number(limit) || 50, 200);
+
+  try {
+    const { rows } = await pgQuery(
+      `
+        SELECT
+          order_id                 AS id,
+          order_name               AS name,
+          processed_at             AS "processedAt",
+          fulfillment_status       AS "fulfillmentStatus",
+          display_fulfillment_status AS "displayFulfillmentStatus",
+          metafield_raw            AS metafield,
+          metafield_json           AS metafield_json
+        FROM orders_snapshot
+        WHERE scope = 'team'
+          AND team_id = $1
+        ORDER BY processed_at DESC NULLS LAST, created_at DESC
+        LIMIT $2
+      `,
+      [String(teamId), max]
+    );
+    return rows;
+  } catch (e) {
+    console.error('listOrderSnapshotsForTeam error', e);
+    return [];
+  }
+}
+
 
 async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
   if (!pgPool) return [];
