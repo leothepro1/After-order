@@ -771,6 +771,7 @@ function verifyAndParseToken(token){
 function newTid(){ return crypto.randomBytes(8).toString('hex'); } // per-token id
 function nowIso(){ return new Date().toISOString(); }
 // === Artwork-token helper (återanvänder exakt samma format/signatur som övriga tokens)
+// === Artwork-token helper (återanvänder exakt samma format/signatur som övriga tokens)
 function generateArtworkToken(orderId, lineItemId) {
   const tid = newTid();
   const token = signTokenPayload({
@@ -784,17 +785,26 @@ function generateArtworkToken(orderId, lineItemId) {
   return { token, tid, token_hash };
 }
 
-// Läs/skriv order-created
+// ==== KÄRNAN: Shopify-läsning, används fortfarande för alla writes ====
 async function readOrderProjects(orderId) {
   const { data } = await axios.get(
     `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
-  const mf = (data.metafields || []).find(m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY);
+  const mf = (data.metafields || []).find(
+    m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+  );
   if (!mf) return { metafieldId: null, projects: [] };
-  try { return { metafieldId: mf.id, projects: JSON.parse(mf.value || '[]') || [] }; }
-  catch { return { metafieldId: mf.id, projects: [] }; }
+  try {
+    return {
+      metafieldId: mf.id,
+      projects: JSON.parse(mf.value || '[]') || []
+    };
+  } catch {
+    return { metafieldId: mf.id, projects: [] };
+  }
 }
+
 async function writeOrderProjects(metafieldId, projects) {
   await axios.put(
     `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
@@ -802,9 +812,13 @@ async function writeOrderProjects(metafieldId, projects) {
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 }
+
 // ===== UPSTASH REDIS (WRITE-THROUGH CACHE) =====
 const WRITE_ORDERS_TO_REDIS = String(process.env.WRITE_ORDERS_TO_REDIS || 'true') === 'true';
-const ORDER_PROJECTS_TTL_SECONDS = parseInt(process.env.ORDER_PROJECTS_TTL_SECONDS || '864000', 10); // 10 dagar
+const ORDER_PROJECTS_TTL_SECONDS = parseInt(
+  process.env.ORDER_PROJECTS_TTL_SECONDS || '864000',
+  10
+); // 10 dagar
 const UPSTASH_REDIS_REST_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -813,7 +827,7 @@ async function redisCmd(commandArray) {
   try {
     const r = await axios.post(
       UPSTASH_REDIS_REST_URL,
-      commandArray, // ⬅️ Viktigt: skicka själva arrayen, inte { command: [...] }
+      commandArray, // ⬅️ Viktigt: skicka själva arrayen, inte { command: [.] }
       {
         headers: {
           Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
@@ -828,6 +842,99 @@ async function redisCmd(commandArray) {
     return null;
   }
 }
+
+/* ===================== NYTT: DB-FIRST FÖR READ ===================== */
+
+// 1) Plocka ut projekt-array från en orders_snapshot–rad
+function extractProjectsFromSnapshotRow(snap) {
+  if (!snap) return [];
+
+  // Postgres JSONB – vi speglar exakt samma struktur som i metafältet
+  const j = snap.metafield_json;
+
+  if (Array.isArray(j)) {
+    return j;
+  }
+  if (j && typeof j === 'object') {
+    if (Array.isArray(j.projects)) return j.projects;
+  }
+
+  // Fallback: tolka raw-strängen
+  const raw = snap.metafield_raw;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === 'object' && Array.isArray(parsed.projects)) {
+        return parsed.projects;
+      }
+    } catch {
+      // ignorera parse-fel, vi returnerar tom array
+    }
+  }
+
+  return [];
+}
+
+// 2) Försök läsa från Redis-cache (order:{orderId}:projects:v1)
+async function tryReadOrderProjectsFromCache(orderId) {
+  if (!WRITE_ORDERS_TO_REDIS) return null;
+  const key = `order:${orderId}:projects:v1`;
+  try {
+    const res = await redisCmd(['GET', key]);
+    const raw = res && (res.result ?? res);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.projects)) {
+      return parsed.projects;
+    }
+    return null;
+  } catch (e) {
+    console.warn('[readOrderProjectsForRead] cache parse error:', e?.message || e);
+    return null;
+  }
+}
+
+// 3) DB-first helper: används av ALLA READ-ENDPOINTS (ingen metafieldId behövs)
+async function readOrderProjectsForRead(orderId) {
+  const oid = Number(orderId);
+  if (!oid || Number.isNaN(oid)) {
+    return { projects: [], source: 'invalid' };
+  }
+
+  // a) Redis → billigast
+  try {
+    const cached = await tryReadOrderProjectsFromCache(oid);
+    if (Array.isArray(cached) && cached.length) {
+      return { projects: cached, source: 'redis' };
+    }
+  } catch {}
+
+  // b) Postgres-snapshot → huvudkälla
+  try {
+    if (typeof readOrderSnapshot === 'function') {
+      const snap = await readOrderSnapshot(oid);
+      if (snap) {
+        const projects = extractProjectsFromSnapshotRow(snap);
+        if (Array.isArray(projects) && projects.length) {
+          // värm cache, men ignorera ev. fel
+          try { await cacheOrderProjects(oid, projects); } catch {}
+          return { projects, source: 'snapshot' };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[readOrderProjectsForRead] snapshot failed:', e?.message || e);
+  }
+
+  // c) Fallback → Shopify (samma logik som tidigare)
+  const { projects } = await readOrderProjects(oid);
+  const safe = Array.isArray(projects) ? projects : [];
+  try { await cacheOrderProjects(oid, safe); } catch {}
+  // DB-snapshot för dessa ordrar fylls via webhooks/backfill → vi undviker extra Admin-kall här.
+  return { projects: safe, source: 'shopify' };
+}
+
 
 // ===== PASS-BY-REFERENCE TOKEN REGISTRY (Upstash Redis) =====
 const ARTWORK_TOKEN_TTL_SECONDS = parseInt(process.env.ARTWORK_TOKEN_TTL_SECONDS || '2592000', 10); // 30 dagar
@@ -1231,83 +1338,69 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
 // - Legacy (t.ex. "071ea4..." eller ett gammalt filnamn): söker i orderns projekt om möjligt.
 //   Obs: legacy utan orderId blir "best effort": vi försöker hitta i senaste snapshoten/Redis-index om tillgängligt.
 app.get('/public/printed/artwork-token', async (req, res) => {
+  function sendErr(status, msg) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(status).json({ error: msg });
+  }
+  function sendOk(body) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json(body);
+  }
+
   try {
-    const raw =
-      (req.query.artwork || req.query.token || req.query.id || '').toString().trim();
-    if (!raw) return res.status(400).json({ error: 'missing_param' });
+    const raw = String(req.query.token || '').trim();
+    if (!raw) return sendErr(400, 'missing_token');
 
-    // Helper: normalisera svar
-    const sendOk = ({ preview, filename, token }) => {
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({
-        preview,
-        filename,
-        tryckfil: filename,
-        name: filename,
-        ...(token ? { token } : {}) // gör det lättare för frontend att använda rätt suffix
-      });
-    };
+    const payload = verifyAndParseToken(raw);
 
-    // 1) Är det en signerad token? (innehåller en punkt)
-    if (raw.includes('.')) {
-      const payload = verifyAndParseToken(raw);
-      // Tillåt äldre tokens utan "kind", men om "kind" finns måste den vara 'artwork' eller 'proof'
-      if (!payload || (payload.kind && !/^artwork|proof$/.test(payload.kind))) {
-        return res.status(401).json({ error: 'invalid_token' });
-      }
+    // 1) Nyare tokens med kind:'artwork'
+    if (payload && payload.kind === 'artwork') {
+      const { orderId, lineItemId } = payload || {};
+      if (!orderId || !lineItemId) return sendErr(400, 'bad_payload');
 
-      const { orderId, lineItemId, tid } = payload || {};
-      if (!orderId || !lineItemId) {
-        return res.status(400).json({ error: 'bad_payload' });
-      }
+      // 🔄 NYTT: DB/Redis först
+      const { projects } = await readOrderProjectsForRead(orderId);
+      const proj = (projects || []).find(
+        (p) => String(p.lineItemId) === String(lineItemId)
+      );
+      if (!proj) return sendErr(404, 'not_found');
 
-      // Läs projekten
-      const { projects } = await readOrderProjects(orderId);
-      const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
-      if (!proj) return res.status(404).json({ error: 'not_found' });
-
-      // Om tokenen är en "share" (proof) – använd snapshot först
-      const shares = Array.isArray(proj.shares) ? proj.shares : [];
-      const active = shares.find(s => s && s.status === 'active' && (!tid || String(s.tid) === String(tid)));
-
+      // preview + filnamn = EXAKT samma logik som tidigare
       const preview =
-        (active?.snapshot?.previewUrl) ||
-        proj.previewUrl ||
-        proj.preview_img ||
-        null;
+        proj.previewUrl || proj.preview_img || null;
 
-      // Försök plocka ut filnamn ("Tryckfil") från properties
       let filename = '';
       try {
         filename =
-          (proj.properties || []).find(x => x && x.name && x.name.toLowerCase() === 'tryckfil')?.value || '';
+          (proj.properties || []).find(
+            (x) => x && x.name && x.name.toLowerCase() === 'tryckfil'
+          )?.value || '';
       } catch {}
       if (!filename) filename = proj.tryckfil || '';
 
-      if (!preview) return res.status(404).json({ error: 'preview_missing' });
+      if (!preview) return sendErr(404, 'preview_missing');
       return sendOk({ preview, filename, token: raw });
     }
 
-    // 2) Legacy: HEX/filnamn etc. (delbar bakåtkompatibilitet)
-    // För legacy försöker vi:
-    //  a) leta i senaste ordern där samma "Tryckfil" förekommer (via caches/summary om tillgängligt),
-    //  b) annars (om du har Redis-index) kan du lägga in din egen lookup här.
+    // 2) Legacy-hex / filnamn → här kan du också byta till readOrderProjectsForRead
     const legacy = decodeURIComponent(raw).toLowerCase();
 
-    // === Minimal, säker fallback: sök i "senaste skrivna snapshoten" i order-projektens cache (Redis) ===
-    // Notera: om du inte har ett centralt index – kommentera blocket nedan och ersätt med din egen lookup.
     try {
-      // Hämta *senaste* aktiva share via order-sammanfattning om du har det indexerat
-      // (vi använder dina redan existerande hjälpmetoder om de finns; om inte, hoppa över try-blocket)
-      const recentOrders = await getRecentOrdersFromCache?.(50); // valfritt helper i din kodbas
+      const recentOrders = await getRecentOrdersFromCache?.(50);
       if (Array.isArray(recentOrders)) {
         for (const o of recentOrders) {
-          const { projects } = await readOrderProjects(o.id);
-          const hit = (projects || []).find(p => {
+          const { projects } = await readOrderProjectsForRead(o.id);
+          const hit = (projects || []).find((p) => {
             const fn = (() => {
               try {
-                return (p.properties || []).find(x => x && x.name?.toLowerCase() === 'tryckfil')?.value || '';
-              } catch { return ''; }
+                return (
+                  (p.properties || []).find(
+                    (x) => x && x.name?.toLowerCase() === 'tryckfil'
+                  )?.value || ''
+                );
+              } catch {
+                return '';
+              }
             })().toLowerCase() || (p.tryckfil || '').toLowerCase();
             return fn && fn === legacy;
           });
@@ -1316,25 +1409,32 @@ app.get('/public/printed/artwork-token', async (req, res) => {
             let filename = '';
             try {
               filename =
-                (hit.properties || []).find(x => x && x.name?.toLowerCase() === 'tryckfil')?.value || '';
+                (hit.properties || []).find(
+                  (x) => x && x.name?.toLowerCase() === 'tryckfil'
+                )?.value || '';
             } catch {}
             if (!filename) filename = hit.tryckfil || '';
             if (preview) return sendOk({ preview, filename });
           }
         }
       }
-    } catch {
-      // Ignorera – vi har en sista fallback nedan
+    } catch (e) {
+      console.warn(
+        '/public/printed/artwork-token legacy lookup failed:',
+        e?.response?.data || e.message
+      );
     }
 
-    // 2c) Sista utväg: legacy utan träff
-    return res.status(401).json({ error: 'invalid_or_legacy_unresolved' });
+    return sendErr(404, 'not_found');
   } catch (e) {
-    console.error('GET /public/printed/artwork-token error:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ error: 'internal' });
+    console.error(
+      'GET /public/printed/artwork-token error:',
+      e?.response?.data || e.message
+    );
+    return sendErr(500, 'internal_error');
   }
 });
+
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
 // Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
 app.post('/public/printed/artwork-register', async (req, res) => {
@@ -4192,7 +4292,84 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
     const loggedInCustomerId = req.query.logged_in_customer_id;
     if (!loggedInCustomerId) return res.status(204).end();
 
-    const q = `customer_id:${loggedInCustomerId} status:any`;
+    // Normalisera kund-id (GID → numeriskt) precis som i andra routes
+    const cidRaw = String(loggedInCustomerId).trim();
+    const cidNum = cidRaw.startsWith('gid://')
+      ? cidRaw.split('/').pop()
+      : cidRaw;
+
+    // ===== 1) Försök läsa pending reviews från Postgres-snapshots =====
+    let out = [];
+    let snapshotsOk = false;
+
+    try {
+      if (typeof listOrderSnapshotsForCustomer === 'function') {
+        const snaps = await listOrderSnapshotsForCustomer(cidNum, 50);
+        if (Array.isArray(snaps) && snaps.length) {
+          snapshotsOk = true;
+          for (const snap of snaps) {
+            const orderId = Number(snap.order_id);
+            const metaRaw = snap.metafield_raw;
+            let items = [];
+
+            try {
+              if (snap.metafield_json && Array.isArray(snap.metafield_json)) {
+                items = snap.metafield_json;
+              } else if (
+                snap.metafield_json &&
+                typeof snap.metafield_json === 'object' &&
+                Array.isArray(snap.metafield_json.projects)
+              ) {
+                items = snap.metafield_json.projects;
+              } else if (metaRaw) {
+                const parsed = JSON.parse(metaRaw);
+                if (Array.isArray(parsed)) items = parsed;
+                else if (
+                  parsed &&
+                  typeof parsed === 'object' &&
+                  Array.isArray(parsed.projects)
+                ) {
+                  items = parsed.projects;
+                }
+              }
+            } catch {
+              items = [];
+            }
+
+            (items || []).forEach((p) => {
+              const isDone = p?.review?.status === 'done';
+              if (!isDone) {
+                out.push({
+                  orderId,
+                  // vi har inte order.name i snapshot → håll fältet men använd null
+                  orderNumber: p.orderNumber || null,
+                  processedAt: snap.created_at,
+                  lineItemId: p.lineItemId,
+                  productId: p.productId,
+                  productTitle: p.productTitle,
+                  preview_img: p.previewUrl || p.preview_img || null
+                });
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(
+        '/proxy/orders-meta/reviews/pending snapshot-fel:',
+        e?.response?.data || e.message
+      );
+      snapshotsOk = false;
+      out = [];
+    }
+
+    if (snapshotsOk) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ items: out });
+    }
+
+    // ===== 2) Fallback: befintlig Shopify GraphQL-implementation =====
+    const q = `customer_id:${cidNum} status:any`;
     const query = `
       query OrdersWithMeta($first:Int!,$q:String!,$ns:String!,$key:String!){
         orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
@@ -4206,16 +4383,27 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
           }
         }
       }`;
-    let data = await shopifyGraphQL(query, { first: 50, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+    const data = await shopifyGraphQL(query, {
+      first: 50,
+      q,
+      ns: ORDER_META_NAMESPACE,
+      key: ORDER_META_KEY
+    });
     if (data.errors) throw new Error('GraphQL error');
 
     const edges = data?.data?.orders?.edges || [];
-    const out = [];
+    out = [];
     for (const e of edges) {
       const orderId = parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id);
       let items = [];
-      try { items = e.node.metafield?.value ? JSON.parse(e.node.metafield.value) : []; } catch { items = []; }
-      (items || []).forEach(p => {
+      try {
+        items = e.node.metafield?.value
+          ? JSON.parse(e.node.metafield.value)
+          : [];
+      } catch {
+        items = [];
+      }
+      (items || []).forEach((p) => {
         const isDone = p?.review?.status === 'done';
         if (!isDone) {
           out.push({
@@ -4232,12 +4420,16 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
     }
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ pending: out });
+    return res.json({ items: out });
   } catch (err) {
-    console.error('GET /proxy/orders-meta/reviews/pending:', err?.response?.data || err.message);
+    console.error(
+      'GET /proxy/orders-meta/reviews/pending:',
+      err?.response?.data || err.message
+    );
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 // ===== NYA APP PROXY-ROUTER FÖR PROFILUPPDATERING =====
 app.post('/proxy/profile/update', async (req, res) => {
   try {
@@ -4892,29 +5084,36 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
 
 
 // ===== END APP PROXY =====
-
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
-const payload = verifyAndParseToken(token);
-// Bakåtkompatibilitet: acceptera tokens utan 'kind' (äldre länkar), men kräva kind:'proof' om den finns
-if (!payload || (payload.kind && payload.kind !== 'proof')) {
-  return res.status(401).json({ error: 'invalid_token' });
-}
+    const payload = verifyAndParseToken(token);
+    // Bakåtkompatibilitet: acceptera tokens utan 'kind' (äldre länkar),
+    // men kräva kind:'proof' om den finns
+    if (!payload || (payload.kind && payload.kind !== 'proof')) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
 
     const { orderId, lineItemId, tid } = payload || {};
-    if (!orderId || !lineItemId || !tid) return res.status(400).json({ error: 'Bad payload' });
+    if (!orderId || !lineItemId || !tid) {
+      return res.status(400).json({ error: 'Bad payload' });
+    }
 
-    const { projects } = await readOrderProjects(orderId);
-    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+    // 🔄 NYTT: DB/Redis först, Shopify endast fallback
+    const { projects } = await readOrderProjectsForRead(orderId);
+    const proj = (projects || []).find(
+      (p) => String(p.lineItemId) === String(lineItemId)
+    );
     if (!proj) return res.status(404).json({ error: 'Not found' });
 
-    const share = (Array.isArray(proj.shares) ? proj.shares : []).find(s =>
-      s && s.status === 'active' && String(s.tid) === String(tid)
+    const share = (Array.isArray(proj.shares) ? proj.shares : []).find(
+      (s) => s && s.status === 'active' && String(s.tid) === String(tid)
     );
-    if (!share) return res.status(410).json({ error: 'Superseded or revoked' });
+    if (!share) {
+      return res.status(410).json({ error: 'Superseded or revoked' });
+    }
 
-    // Hämta ordersammanfattning (frivilligt)
+    // Hämta ordersammanfattning (frivilligt) – fortsatt direkt mot Shopify
     let summary = null;
     try {
       const { data: oRes } = await axios.get(
@@ -4923,9 +5122,14 @@ if (!payload || (payload.kind && payload.kind !== 'proof')) {
       );
       const o = oRes?.order || {};
       const ship =
-        (o.total_shipping_price_set?.presentment_money?.amount) ??
-        (o.total_shipping_price_set?.shop_money?.amount) ??
-        (Array.isArray(o.shipping_lines) ? o.shipping_lines.reduce((s,ln)=> s + parseFloat(ln.price||0), 0) : 0);
+        o.total_shipping_price_set?.presentment_money?.amount ??
+        o.total_shipping_price_set?.shop_money?.amount ??
+        (Array.isArray(o.shipping_lines)
+          ? o.shipping_lines.reduce(
+              (s, ln) => s + parseFloat(ln.price || 0),
+              0
+            )
+          : 0);
 
       summary = {
         name: o.name || null,
@@ -4934,8 +5138,11 @@ if (!payload || (payload.kind && payload.kind !== 'proof')) {
         shipping_price: ship != null ? String(ship) : null,
         total_price: o.total_price || null
       };
-    } catch(e) {
-      console.warn('share summary fetch failed:', e?.response?.data || e.message);
+    } catch (e) {
+      console.warn(
+        'share summary fetch failed:',
+        e?.response?.data || e.message
+      );
     }
 
     res.setHeader('Cache-Control', 'no-store');
@@ -4949,31 +5156,44 @@ if (!payload || (payload.kind && payload.kind !== 'proof')) {
       snapshot: share.snapshot || {},
       ...(summary ? { summary } : {})
     });
-
   } catch (e) {
-    console.error('GET /proof/share/:token error:', e?.response?.data || e.message);
+    console.error(
+      'GET /proof/share/:token error:',
+      e?.response?.data || e.message
+    );
     return res.status(500).json({ error: 'Kunde inte hämta projekt' });
   }
 });
 
 
-/* ===== NYTT: hämta review-form data via token ===== */
+
 app.get('/review/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
     const payload = verifyAndParseToken(token);
-    if (!payload || payload.kind !== 'review') return res.status(401).json({ error: 'invalid_token' });
+    if (!payload || payload.kind !== 'review') {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
 
     const { orderId, lineItemId, tid } = payload || {};
-    if (!orderId || !lineItemId || !tid) return res.status(400).json({ error: 'bad_payload' });
+    if (!orderId || !lineItemId || !tid) {
+      return res.status(400).json({ error: 'bad_payload' });
+    }
 
-    const { projects } = await readOrderProjects(orderId);
-    const proj = (projects || []).find(p => String(p.lineItemId) === String(lineItemId));
+    // 🔄 NYTT: DB/Redis först
+    const { projects } = await readOrderProjectsForRead(orderId);
+    const proj = (projects || []).find(
+      (p) => String(p.lineItemId) === String(lineItemId)
+    );
     if (!proj) return res.status(404).json({ error: 'not_found' });
 
     const r = proj.review || {};
-    if (r.status === 'done') return res.status(410).json({ error: 'already_submitted' });
-    if (!r || String(r.tid || '') !== String(tid)) return res.status(410).json({ error: 'token_superseded' });
+    if (r.status === 'done') {
+      return res.status(410).json({ error: 'already_submitted' });
+    }
+    if (!r || String(r.tid || '') !== String(tid)) {
+      return res.status(410).json({ error: 'token_superseded' });
+    }
 
     return res.json({
       orderId,
@@ -4984,10 +5204,14 @@ app.get('/review/share/:token', async (req, res) => {
       preview_img: proj.previewUrl || proj.preview_img || null
     });
   } catch (err) {
-    console.error('GET /review/share/:token:', err?.response?.data || err.message);
+    console.error(
+      'GET /review/share/:token:',
+      err?.response?.data || err.message
+    );
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 /* ======= SIMPLE CANCEL VIA APP PROXY (MVP) ======= */
 /* POST /apps/orders-meta/order/cancel  (Shopify App Proxy → server: /proxy/orders-meta/order/cancel)
    Body: { orderId }
