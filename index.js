@@ -2251,36 +2251,41 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
       null;
 
     const { createdAt, updatedAt } = extractOrderTimestamps(order);
-    const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
+  const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
 
-    await pgQuery(
-      `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
-         order_id,
-         customer_id,
-         customer_email,
-         created_at,
-         updated_at,
-         metafield_raw,
-         metafield_json
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (order_id) DO UPDATE SET
-         customer_id    = EXCLUDED.customer_id,
-         customer_email = EXCLUDED.customer_email,
-         created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
-         updated_at     = EXCLUDED.updated_at,
-         metafield_raw  = EXCLUDED.metafield_raw,
-         metafield_json = EXCLUDED.metafield_json`,
-      [
-        orderId,
-        customerId,
-        customerEmail,
-        createdAt,
-        updatedAt,
-        raw,
-        json
-      ]
-    );
+// Viktigt: Postgres-kolumnen är JSONB NOT NULL → ge alltid ett giltigt JSON-värde
+const safeJson = (json === null || typeof json === 'undefined') ? {} : json;
+
+await pgQuery(
+  `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
+     order_id,
+     customer_id,
+     customer_email,
+     created_at,
+     updated_at,
+     metafield_raw,
+     metafield_json
+   )
+   VALUES ($1, $2, $3, $4, $5, $6, $7)
+   ON CONFLICT (order_id) DO UPDATE SET
+     customer_id    = EXCLUDED.customer_id,
+     customer_email = EXCLUDED.customer_email,
+     created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
+     updated_at     = EXCLUDED.updated_at,
+     metafield_raw  = EXCLUDED.metafield_raw,
+     metafield_json = EXCLUDED.metafield_json`,
+  [
+    orderId,
+    customerId,
+    customerEmail,
+    createdAt,
+    updatedAt,
+    raw,
+    safeJson
+  ]
+);
+
+
   } catch (e) {
     console.warn('[orders_snapshot] upsertOrderSnapshotFromMetafield failed:', e?.message || e);
   }
