@@ -3066,35 +3066,6 @@ app.post('/proof/upload', async (req, res) => {
       });
     } catch {}
 
-    // 9) Svara med token + URL
-
-
-  // 🔁 NYTT: spegla samma metafältvärde till orders_snapshot
-  if (customerIdForIndex && typeof upsertOrderSnapshotFromMetafield === 'function') {
-    const orderStub = {
-      id: Number(orderId),
-      customer: {
-        id: customerIdForIndex,
-        email: projForCid?.customerEmail || null
-      },
-      email: projForCid?.customerEmail || null,
-      // matchar extractOrderTimestamps (klarar snake/camel)
-      created_at: projForCid?.orderProcessedAt || new Date().toISOString(),
-      processed_at: projForCid?.orderProcessedAt || new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    await upsertOrderSnapshotFromMetafield(orderStub, rotated);
-  }
-
-  // 🧹 NYTT: invalidera 20s micro-cachen för den här kunden
-  try {
-    const prefix = `${customerIdForIndex}:`;
-    for (const key of ordersMetaCache.keys()) {
-      if (key.startsWith(prefix)) ordersMetaCache.delete(key);
-    }
-  } catch {}
-} catch {}
 
 
     // 9) Svara med token + URL
