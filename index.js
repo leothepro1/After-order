@@ -3985,53 +3985,52 @@ function normalizeCustomerId(cidRaw) {
   return s.startsWith('gid://') ? s.split('/').pop() : s;
 }
 
+// EFTER – kund-/team-läge går alltid mot Postgres, admin-läge oförändrat
 app.get('/proxy/orders-meta', async (req, res) => {
   try {
-    // 1) Säkerställ att anropet kommer från Shopify App Proxy
+    // 1) Verifiera App Proxy-signatur
     const search = req.url.split('?')[1] || '';
     if (!verifyAppProxySignature(search)) {
-      return res.status(403).json({ error: 'Invalid signature' });
+      return res.status(403).json({ error: 'invalid_signature' });
     }
 
-    const loggedInCustomerIdRaw = req.query.logged_in_customer_id; // sätts av Shopify
-    if (!loggedInCustomerIdRaw) return res.status(204).end();      // ej inloggad kund
+    // 2) logged_in_customer_id från Shopify App Proxy
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(204).end();
+    }
 
-    const cidNum = normalizeCustomerId(loggedInCustomerIdRaw);
-    if (!cidNum) return res.status(400).json({ error: 'invalid_customer_id' });
+    const normalizeCustomerId = (cid) => {
+      if (!cid) return null;
+      const s = String(cid);
+      return s.startsWith('gid://') ? s.split('/').pop() : s;
+    };
 
-    const limit      = Math.min(parseInt(req.query.first || '25', 10), 50);
-    const scopeParam = String(req.query.scope || '').toLowerCase();
-    const teamIdFilter = String(req.query.teamId || '').trim();
+    const cidNum   = normalizeCustomerId(loggedInCustomerIdRaw);
+    const limit    = Math.max(1, Math.min(100, parseInt(req.query.first, 10) || 50));
+    const scopeParam   = String(req.query.scope || 'personal');
+    const teamIdFilter = req.query.teamId ? String(req.query.teamId) : null;
 
-    // ===== ADMIN-LÄGE (scope=all) – oförändrat, kör Shopify Admin =====
+    // ===== ADMIN-LÄGE: /apps/orders-meta?scope=all → Shopify Admin (oförändrat) =====
     if (scopeParam === 'all') {
-      const ok = await isAdminCustomer(cidNum);
-      if (!ok) return res.status(403).json({ error: 'Forbidden' });
-
       try {
+        const q = 'status:any';
         const query = `
-          query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
-            orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
-              edges {
-                node {
+          query OrdersWithMetafield($first:Int!,$q:String!,$ns:String!,$key:String!){
+            orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
+              edges{
+                node{
                   id
                   name
                   processedAt
                   fulfillmentStatus
                   displayFulfillmentStatus
-                  tags
-                  metafield(namespace: $ns, key: $key) { value }
-                  metafields(namespace: "pressify", keys: ["scope", "team_id", "team_name"]) {
-                    key
-                    value
-                  }
+                  metafield(namespace:$ns, key:$key){ value }
                 }
               }
             }
           }
         `;
-
-        const q = `status:any`;
 
         const data = await shopifyGraphQL(query, {
           first: limit,
@@ -4040,51 +4039,24 @@ app.get('/proxy/orders-meta', async (req, res) => {
           key: ORDER_META_KEY
         });
 
-        if (data.errors) {
-          throw new Error('GraphQL error');
-        }
+        if (data.errors) throw new Error('GraphQL error');
 
         const edges = data?.data?.orders?.edges || [];
-        const out   = [];
-
-        for (const e of edges) {
+        const adminOrders = edges.map((e) => {
           const node = e.node;
-          const base = {
+          const metafieldValue = node.metafield ? node.metafield.value : null;
+
+          return {
             id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
             name: node.name,
             processedAt: node.processedAt,
-            metafield: node.metafield ? node.metafield.value : null,
+            metafield: metafieldValue,
             fulfillmentStatus: node.fulfillmentStatus || null,
             displayFulfillmentStatus: node.displayFulfillmentStatus || null
           };
+        });
 
-          let scopeVal = 'personal';
-          let teamId   = null;
-          let teamName = null;
-
-          const pfMfs = Array.isArray(node.metafields) ? node.metafields : [];
-          const scopeMf    = pfMfs.find(m => m && m.key === 'scope');
-          const teamIdMf   = pfMfs.find(m => m && m.key === 'team_id');
-          const teamNameMf = pfMfs.find(m => m && m.key === 'team_name');
-
-          if (scopeMf && typeof scopeMf.value === 'string') {
-            const v = scopeMf.value.toLowerCase();
-            scopeVal = v === 'team' ? 'team' : 'personal';
-          }
-          if (scopeVal === 'team') {
-            if (teamIdMf && teamIdMf.value != null) {
-              teamId = pfNormalizeTeamId(teamIdMf.value);
-            }
-            if (teamNameMf && teamNameMf.value != null) {
-              teamName = String(teamNameMf.value);
-            }
-          }
-
-          out.push({ ...base, scope: scopeVal, teamId, teamName });
-        }
-
-        const nonDelivered = out.filter(o => !isDeliveredOrderShape(o));
-
+        const nonDelivered = adminOrders.filter(o => !isDeliveredOrderShape(o));
         res.setHeader('Cache-Control', 'no-store');
         return res.json({ orders: nonDelivered, admin: true });
       } catch (err) {
@@ -4094,195 +4066,64 @@ app.get('/proxy/orders-meta', async (req, res) => {
       }
     }
 
-    // ===== KUND-/TEAM-LÄGE: Försök Postgres-snapshot först =====
-    const canUseSnapshots =
-      typeof listOrderSnapshotsForCustomer === 'function' &&
-      scopeParam !== 'all';
-
-    if (canUseSnapshots) {
-      try {
-        const snapshots = await listOrderSnapshotsForCustomer(cidNum, limit);
-
-        if (Array.isArray(snapshots) && snapshots.length > 0) {
-          console.log('[orders-meta] ✅ använder Postgres orders_snapshot för customer', cidNum);
-
-          const out = snapshots.map(row => {
-            const orderId   = Number(row.order_id);
-            const metaRaw   = row.metafield_raw; // exakt samma JSON-sträng som i Shopify-order-metafältet
-            const createdAt = row.created_at;
-
-            // Härled scope/team från project-JSON (ORDER_META_NAMESPACE)
-            const info = pfExtractScopeFromOrderProjects(metaRaw);
-
-            return {
-              id: orderId,
-              // OBS: snapshot-tabellen innehåller i dagsläget inte order.name.
-              // Om du vill ha exakt ordernummer här, lägg till kolumn order_name i tabellen
-              // och fyll den i upsertOrderSnapshotFromMetafield.
-              name: null, // behåll property, men låt värdet vara null tills DB utökas
-              processedAt: createdAt,
-              metafield: metaRaw,
-              // fulfillmentStatus och displayFulfillmentStatus finns inte i snapshot ännu
-              fulfillmentStatus: null,
-              displayFulfillmentStatus: null,
-              scope: info.scope || 'personal',
-              teamId: info.teamId || null,
-              teamName: info.teamName || null
-            };
-          });
-
-          const scopedOut = applyWorkspaceScopeFilter(out, scopeParam, teamIdFilter);
-          res.setHeader('Cache-Control', 'no-store');
-          return res.json({ orders: scopedOut });
-        } else {
-          console.log('[orders-meta] ℹ️ inga snapshots hittades för customer', cidNum, '– fall back till Shopify');
-        }
-      } catch (e) {
-        console.warn('[orders-meta] ⚠️ snapshot-läsning misslyckades, fall back till Shopify:', e?.message || e);
-      }
+    // ===== KUND-/TEAM-LÄGE: Postgres ONLY =====
+    if (typeof listOrderSnapshotsForCustomer !== 'function') {
+      console.error('[orders-meta] listOrderSnapshotsForCustomer saknas – kan inte svara i kundläge');
+      return res.status(500).json({ error: 'snapshot_not_available' });
     }
 
-    // ===== Om vi kommer hit → Postgres gav inget → Shopify GraphQL + REST-fallback (som tidigare) =====
-    try {
-      console.log('[orders-meta] ▶ fall back till Shopify GraphQL för customer', cidNum);
+    const snapshots = await listOrderSnapshotsForCustomer(cidNum, limit);
 
-      const rawCustomerIdParam = String(req.query.customerId || '').trim();
-      const scopeForQ          = scopeParam;
-      const teamIdForQ         = teamIdFilter;
+    // Här kan du välja strategi vid "inga snapshots":
+    //  a) returnera tom lista (ingen fallback → 0 Shopify-anrop, max prestanda)
+    //  b) eller – om du MÅSTE se gamla ordrar – införa en *kontrollerad* engångs-backfill här.
+    //
+    // För att hållas 100% Shopify-fri för läsningar kör vi a):
 
-      let q;
-      if (scopeForQ === 'team' && rawCustomerIdParam) {
-        q = `status:any`;
-      } else {
-        q = `customer_id:${cidNum} status:any`;
-      }
-
-      const query = `
-        query OrdersWithMetafield($first: Int!, $q: String!, $ns: String!, $key: String!) {
-          orders(first: $first, query: $q, sortKey: CREATED_AT, reverse: true) {
-            edges {
-              node {
-                id
-                name
-                processedAt
-                fulfillmentStatus
-                displayFulfillmentStatus
-                metafield(namespace: $ns, key: $key) { value }
-              }
-            }
-          }
-        }
-      `;
-
-      const data = await shopifyGraphQL(query, {
-        first: limit,
-        q,
-        ns: ORDER_META_NAMESPACE,
-        key: ORDER_META_KEY
-      });
-
-      if (data.errors) {
-        throw new Error('GraphQL error');
-      }
-
-      const edges = data?.data?.orders?.edges || [];
-      const out   = edges.map(e => {
-        const node = e.node;
-        const metafieldValue = node.metafield ? node.metafield.value : null;
-
-        const base = {
-          id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
-          name: node.name,
-          processedAt: node.processedAt,
-          metafield: metafieldValue,
-          fulfillmentStatus: node.fulfillmentStatus || null,
-          displayFulfillmentStatus: node.displayFulfillmentStatus || null
-        };
-
-        const scopeInfo = pfExtractScopeFromOrderProjects(metafieldValue);
-        return {
-          ...base,
-          scope: scopeInfo.scope || 'personal',
-          teamId: scopeInfo.teamId || null,
-          teamName: scopeInfo.teamName || null
-        };
-      });
-
-      const scopedOut = applyWorkspaceScopeFilter(out, scopeForQ, teamIdForQ);
+    if (!Array.isArray(snapshots) || snapshots.length === 0) {
+      console.log('[orders-meta] 📭 inga snapshots i DB för customer', cidNum, '- returnerar tom orders-lista');
       res.setHeader('Cache-Control', 'no-store');
-      return res.json({ orders: scopedOut });
-    } catch (err) {
-      // 🔁 Fallback: befintlig REST-implementation – nu även med snapshot-upsert
-      console.warn('proxy/orders-meta GraphQL fallback → REST:', err?.response?.data || err.message);
-
-      try {
-        const url = `https://${SHOP}/admin/api/2025-07/orders.json?status=any&customer_id=${encodeURIComponent(cidNum)}&limit=${limit}`;
-        const { data } = await axios.get(url, {
-          headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
-        });
-
-        const orders = data?.orders || [];
-        const out    = [];
-
-        for (const o of orders) {
-          const mfResp = await axios.get(
-            `https://${SHOP}/admin/api/2025-07/orders/${o.id}/metafields.json`,
-            { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-          );
-          const metafields = mfResp.data?.metafields || [];
-          const projectMf  = metafields.find(
-            m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
-          );
-
-          let scopeVal = 'personal';
-          let teamId   = null;
-          let teamName = null;
-
-          try {
-            const value = projectMf ? projectMf.value : null;
-            const info  = pfExtractScopeFromOrderProjects(value);
-            scopeVal    = info.scope || 'personal';
-            teamId      = info.teamId || null;
-            teamName    = info.teamName || null;
-
-            // 🟢 NYTT: spegla in i Postgres så framtida läsningar kan gå mot DB
-            if (value != null && typeof upsertOrderSnapshotFromMetafield === 'function') {
-              try {
-                await upsertOrderSnapshotFromMetafield(o, value);
-              } catch (upErr) {
-                console.warn('[orders-meta] upsertOrderSnapshotFromMetafield misslyckades för order', o.id, upErr?.message || upErr);
-              }
-            }
-          } catch {}
-
-          out.push({
-            id: o.id,
-            name: o.name,
-            processedAt: o.processed_at || o.created_at,
-            metafield: projectMf ? projectMf.value : null,
-            fulfillmentStatus: o.fulfillment_status || null,
-            displayFulfillmentStatus: null,
-            scope: scopeVal,
-            teamId,
-            teamName
-          });
-        }
-
-        const scopedOut = applyWorkspaceScopeFilter(out, scopeParam, teamIdFilter);
-        res.setHeader('Cache-Control', 'no-store');
-        return res.json({ orders: scopedOut });
-      } catch (err2) {
-        console.error('proxy/orders-meta REST fallback error:', err2?.response?.data || err2.message);
-        setCorsOnError(req, res);
-        return res.status(500).json({ error: 'Internal error' });
-      }
+      return res.json({ orders: [] });
     }
+
+    const out = snapshots.map((row) => {
+      const orderId   = Number(row.order_id);
+      const metaRaw   = row.metafield_raw;      // EXAKT samma JSON-sträng som i Shopify-order-metafältet
+      const createdAt = row.created_at;
+
+      // om du redan lagt in order_name i tabellen – använd den
+      const orderName = row.order_name || null;
+
+      const info = pfExtractScopeFromOrderProjects(metaRaw);
+
+      return {
+        id: orderId,
+        // 🔑 Viktigt: behåll samma keys som Shopify-responsen
+        name: orderName,              // kan vara null om kolumnen saknas – frontend får fortfarande samma property
+        processedAt: createdAt,
+        metafield: metaRaw,
+        fulfillmentStatus: null,      // finns inte i snapshot ännu – men key måste finnas
+        displayFulfillmentStatus: null,
+        scope: info.scope || 'personal',
+        teamId: info.teamId || null,
+        teamName: info.teamName || null
+      };
+    });
+
+    const scopedOut = applyWorkspaceScopeFilter(out, scopeParam, teamIdFilter);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ orders: scopedOut });
+
+    // OBS: INGEN GraphQL / REST-fallback längre i kund-/team-scope.
+    // Shopify anropas bara i admin-läge och på andra routes (checkout, webhooks, osv).
+
   } catch (err) {
     console.error('proxy/orders-meta error (outer):', err?.response?.data || err.message);
     setCorsOnError(req, res);
     return res.status(500).json({ error: 'Internal error' });
-    }
+  }
 });
+
 /* ===== NYTT: pending reviews för inloggad kund ===== */
 app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
   try {
