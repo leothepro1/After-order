@@ -2504,7 +2504,7 @@ try {
 
     await appendActivity(orderId, firstEntries);
   } catch (e) {
-    console.warn('order-created → appendActivity misslyckades:', e?.response?.data || e.message);
+     console.warn('order-created → appendActivity misslyckades:', e?.response?.data || e.message);
   }
 
   res.sendStatus(200);
@@ -2515,12 +2515,145 @@ try {
 
 });
 
-// Hämta korrektur-status för kund
-app.get('/pages/korrektur', async (req, res) => {
-  const customerId = req.query.customerId;
-  if (!customerId) return res.status(400).json({ error: 'customerId krävs' });
+app.post('/webhooks/order-updated', async (req, res) => {
+  console.log('📬 Webhook order-updated mottagen');
+
+  if (!verifyShopifyRequest(req)) {
+    console.warn('❌ Ogiltig Shopify-signatur (order-updated)!');
+    return res.sendStatus(401);
+  }
 
   try {
+    const order = req.body;
+    const orderId = order && order.id;
+
+    if (!orderId) {
+      console.warn('[orders_snapshot] order-updated: saknar order.id i payload');
+      return res.sendStatus(400);
+    }
+
+    // Hämta det aktuella order-metafältet från Shopify – metafältet är alltid sanningen
+    const mfResp = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+
+    const metafields = (mfResp.data && mfResp.data.metafields) || [];
+    const mf = metafields.find(
+      (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+    );
+
+    if (!mf || !mf.value) {
+      console.log('[orders_snapshot] order-updated: inget order-metafält att spegla, hoppar över', orderId);
+      return res.sendStatus(200);
+    }
+
+    // Spegla exakt samma metafält-value till vår Postgres-snapshot
+    try {
+      await upsertOrderSnapshotFromMetafield(order, mf.value);
+      console.log('[orders_snapshot] order-updated: snapshot uppdaterad', orderId);
+    } catch (e) {
+      console.warn('[orders_snapshot] order-updated → snapshot misslyckades:', e?.message || e);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('[orders_snapshot] Fel vid webhook/order-updated:', err?.response?.data || err.message);
+    res.sendStatus(500);
+  }
+});
+
+// Hämta korrektur-status för kund
+// Hämta korrektur-status för kund (Postgres först, Shopify fallback)
+app.get('/pages/korrektur', async (req, res) => {
+  const customerId = req.query.customerId;
+  if (!customerId) {
+    return res.status(400).json({ error: 'customerId krävs' });
+  }
+
+  try {
+    const customerIdNum = Number(customerId);
+
+    /* ==========================================================
+     * 1) Försök läsa från Postgres / orders_snapshot först
+     * ========================================================== */
+    let snapshotProjects = [];
+    try {
+      const snapshots = await listOrderSnapshotsForCustomer(customerIdNum, 50);
+      if (snapshots && snapshots.length) {
+        console.log(
+          '[orders_snapshot] /pages/korrektur: använder snapshots för kund',
+          customerIdNum,
+          'count=',
+          snapshots.length
+        );
+
+        for (const snap of snapshots) {
+          const orderId = Number(snap.order_id || snap.orderId);
+          let arr = [];
+
+          // Föredra JSONB om den finns
+          if (snap.metafield_json && Array.isArray(snap.metafield_json)) {
+            arr = snap.metafield_json;
+          } else if (snap.metafield_json && typeof snap.metafield_json === 'object') {
+            // Om du någon gång skulle spara som { projects:[...] } etc.
+            if (Array.isArray(snap.metafield_json.projects)) {
+              arr = snap.metafield_json.projects;
+            } else {
+              arr = [];
+            }
+          } else if (snap.metafield_raw) {
+            try {
+              arr = JSON.parse(snap.metafield_raw);
+            } catch {
+              arr = [];
+            }
+          } else {
+            arr = [];
+          }
+
+          const awaiting = (arr || [])
+            .filter((p) => String(p?.status) === 'Korrektur redo')
+            .map((p) => ({
+              ...p,
+              orderId
+            }));
+
+          if (awaiting.length) {
+            snapshotProjects.push(...awaiting);
+          }
+        }
+
+        if (snapshotProjects.length === 0) {
+          // Det finns snapshots, men inget med status "Korrektur redo"
+          return res.json({
+            message: 'Just nu har du ingenting att godkänna',
+            projects: []
+          });
+        }
+
+        // ✅ Returnera direkt från Postgres – ingen Shopify-läsning
+        return res.json({
+          message: 'Godkänn korrektur',
+          projects: snapshotProjects
+        });
+      }
+    } catch (e) {
+      console.warn(
+        '[orders_snapshot] /pages/korrektur: listOrderSnapshotsForCustomer misslyckades – faller tillbaka till Shopify',
+        e?.message || e
+      );
+      // vi faller vidare till Shopify-fallback nedan
+    }
+
+    /* ==========================================================
+     * 2) Fallback: hämta från Shopify GraphQL + fyll snapshots
+     * ========================================================== */
+    console.warn(
+      '[orders_snapshot] /pages/korrektur: inga snapshots för kund – använder Shopify-fallback första gången',
+      { customerId: customerIdNum }
+    );
+
     const q = `customer_id:${customerId} status:any`;
     const query = `
       query OrdersWithProof($first:Int!,$q:String!,$ns:String!,$key:String!){
@@ -2530,35 +2663,109 @@ app.get('/pages/korrektur', async (req, res) => {
               id
               name
               processedAt
+              createdAt
+              updatedAt
+              customer {
+                id
+                email
+              }
               metafield(namespace:$ns, key:$key){ value }
             }
           }
         }
-      }`;
-    const data = await shopifyGraphQL(query, { first: 50, q, ns: ORDER_META_NAMESPACE, key: ORDER_META_KEY });
+      }
+    `;
+
+    const data = await shopifyGraphQL(query, {
+      first: 50,
+      q,
+      ns: ORDER_META_NAMESPACE,
+      key: ORDER_META_KEY
+    });
     if (data.errors) throw new Error('GraphQL error');
 
     const edges = data?.data?.orders?.edges || [];
     const results = [];
+
     for (const e of edges) {
-      const orderId = Number(gidToId(e.node.id));
+      const node = e.node;
+      const orderId = Number(gidToId(node.id));
       let arr = [];
-      try { arr = e.node.metafield?.value ? JSON.parse(e.node.metafield.value) : []; } catch { arr = []; }
+      try {
+        arr = node.metafield?.value ? JSON.parse(node.metafield.value) : [];
+      } catch {
+        arr = [];
+      }
+
+      // 🔄 Seeda snapshot i Postgres om vi har ett metafältsvärde
+      if (node.metafield && typeof node.metafield.value === 'string' && node.metafield.value.trim()) {
+        const customerIdForOrder = node.customer?.id
+          ? Number(gidToId(node.customer.id))
+          : customerIdNum || null;
+
+        const orderStub = {
+          id: orderId,
+          customer: {
+            id: customerIdForOrder,
+            email: node.customer?.email || null
+          },
+          email: node.customer?.email || null,
+          // Anpassa till extractOrderTimestamps-helpern (klarar både snake/camel i praktiken)
+          created_at: node.createdAt || node.processedAt || new Date().toISOString(),
+          processed_at: node.processedAt || node.createdAt || new Date().toISOString(),
+          updated_at:
+            node.updatedAt ||
+            node.processedAt ||
+            node.createdAt ||
+            new Date().toISOString()
+        };
+
+        try {
+          await upsertOrderSnapshotFromMetafield(orderStub, node.metafield.value);
+          console.log(
+            '[orders_snapshot] /pages/korrektur: snapshot upsert via Shopify-fallback',
+            orderId
+          );
+        } catch (e2) {
+          console.warn(
+            '[orders_snapshot] /pages/korrektur: upsertOrderSnapshotFromMetafield misslyckades i fallback',
+            e2?.message || e2
+          );
+        }
+      }
+
       const awaiting = (arr || [])
-        .filter(p => String(p?.status) === 'Korrektur redo')
-        .map(p => ({ ...p, orderId }));
-      results.push(...awaiting);
+        .filter((p) => String(p?.status) === 'Korrektur redo')
+        .map((p) => ({
+          ...p,
+          orderId
+        }));
+
+      if (awaiting.length) {
+        results.push(...awaiting);
+      }
     }
 
     if (results.length === 0) {
-      return res.json({ message: 'Just nu har du ingenting att godkänna', projects: [] });
+      return res.json({
+        message: 'Just nu har du ingenting att godkänna',
+        projects: []
+      });
     }
-    return res.json({ message: 'Godkänn korrektur', projects: results });
+
+    return res.json({
+      message: 'Godkänn korrektur',
+      projects: results
+    });
   } catch (err) {
-    console.error('❌ Fel vid hämtning av korrektur (GraphQL):', err?.response?.data || err.message);
+    console.error(
+      '❌ Fel vid hämtning av korrektur (/pages/korrektur):',
+      err?.response?.data || err.message || err
+    );
     return res.status(500).json({ error: 'Internt serverfel' });
   }
 });
+
 
 // Uppdatera korrektur-status (när du laddar upp korrekturbild) — TOKENS + SNAPSHOT (inkluderar senaste eventet)
 app.post('/proof/upload', async (req, res) => {
