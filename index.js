@@ -129,10 +129,128 @@ async function ensureOrdersSnapshotTable() {
   await pgQuery(ddl);
 }
 
-// Kör enkel init/migration vid start
-ensureOrdersSnapshotTable().catch((err) => {
-  console.error('[orders_snapshot] init-fel:', err?.message || err);
-});
+// Styr om backfill ska köras automatiskt när servern startar
+// (du kan sätta ORDERS_SNAPSHOT_BACKFILL_ON_BOOT=false i Render om du vill pausa den)
+const ORDERS_SNAPSHOT_BACKFILL_ON_BOOT =
+  String(process.env.ORDERS_SNAPSHOT_BACKFILL_ON_BOOT || 'true') === 'true';
+
+let __ordersSnapshotBackfillStarted = false;
+
+// Backfill: hämta ALLA ordrar från Shopify, läs order-metafältet (ORDER_META_NAMESPACE/ORDER_META_KEY)
+// och spegla till Postgres via upsertOrderSnapshotFromMetafield.
+// Metafältets JSON (value) används som exakt sanning – vi rör inte strukturen, vi speglar den bara.
+async function backfillOrdersSnapshotAllOrders() {
+  if (!pgPool) {
+    console.warn('[orders_snapshot] backfill: pgPool saknas, hoppar över');
+    return;
+  }
+  if (!SHOP || !ACCESS_TOKEN) {
+    console.warn('[orders_snapshot] backfill: SHOP/ACCESS_TOKEN saknas, hoppar över');
+    return;
+  }
+
+  console.log('[orders_snapshot] backfill: startar (boot)…');
+
+  let url = `https://${SHOP}/admin/api/2025-07/orders.json?status=any&limit=100`;
+  let processed = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  while (url) {
+    let resp;
+    try {
+      resp = await axios.get(url, { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } });
+    } catch (e) {
+      console.error('[orders_snapshot] backfill: kunde inte hämta orders:', e?.response?.data || e.message);
+      break;
+    }
+
+    const orders = resp.data?.orders || [];
+    if (!orders.length) break;
+
+    for (const order of orders) {
+      try {
+        const orderId = order.id;
+
+        // Läs metafälten för just den här ordern
+        const mfResp = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+
+        const metafields = mfResp.data?.metafields || [];
+        const mf = metafields.find(
+          (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+        );
+
+        // Om ordern inte har ditt order-metafält hoppar vi över den
+        if (!mf || !mf.value) {
+          skipped++;
+          continue;
+        }
+
+        // Viktigt: mf.value är EXAKT samma JSON-sträng som frontend redan använder.
+        // upsertOrderSnapshotFromMetafield tar hand om att spara både raw-string + JSONB i Postgres.
+        await upsertOrderSnapshotFromMetafield(order, mf.value);
+        processed++;
+      } catch (e) {
+        errors++;
+        console.warn(
+          '[orders_snapshot] backfill: misslyckades för order',
+          (order && order.id) || '?',
+          e?.response?.data || e.message
+        );
+      }
+    }
+
+    // Paginering via Link-header (Shopify REST)
+    const link = resp.headers['link'] || resp.headers['Link'];
+    if (!link) {
+      url = null;
+    } else {
+      const nextPart = link
+        .split(',')
+        .map((p) => p.trim())
+        .find((p) => p.includes('rel="next"'));
+      if (!nextPart) {
+        url = null;
+      } else {
+        const m = nextPart.match(/<([^>]+)>/);
+        url = m ? m[1] : null;
+      }
+    }
+  }
+
+  console.log('[orders_snapshot] backfill: klar', {
+    processed,
+    skipped,
+    errors
+  });
+}
+
+// Start-funktion: triggas EN gång vid uppstart, efter att tabellen finns
+function startOrdersSnapshotBackfillOnBoot() {
+  if (!ORDERS_SNAPSHOT_BACKFILL_ON_BOOT) {
+    console.log('[orders_snapshot] backfill: ORDERS_SNAPSHOT_BACKFILL_ON_BOOT=false – hoppar över vid boot');
+    return;
+  }
+  if (__ordersSnapshotBackfillStarted) return;
+  __ordersSnapshotBackfillStarted = true;
+
+  // Kör i bakgrunden – blockar inte serverstarten
+  backfillOrdersSnapshotAllOrders().catch((err) => {
+    console.error('[orders_snapshot] backfill: oväntat fel:', err?.message || err);
+  });
+}
+
+// Kör init/migration vid start, och därefter backfill (en gång)
+ensureOrdersSnapshotTable()
+  .then(() => {
+    startOrdersSnapshotBackfillOnBoot();
+  })
+  .catch((err) => {
+    console.error('[orders_snapshot] init-fel:', err?.message || err);
+  });
 // ========================================================================
 
 // överst bland konfig:
@@ -145,6 +263,7 @@ const PRESSIFY_TEAM_ID_KEY = 'team_id';
 const PRESSIFY_TEAM_NAME_KEY = 'team_name';
 const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
+
 
 
 /**
@@ -2313,7 +2432,7 @@ try {
     combined = upsertProjects([], enrichedProjects);
   }
 
-  // 3) Spara combined
+   // 3) Spara combined
   if (currentMetafield) {
     await axios.put(
       `https://${SHOP}/admin/api/2025-07/metafields/${currentMetafield.id}.json`,
@@ -2323,13 +2442,28 @@ try {
   } else {
     await axios.post(
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
-     { metafield: { namespace: ORDER_META_NAMESPACE, key: ORDER_META_KEY, type: 'json', value: JSON.stringify(combined) } },
+      {
+        metafield: {
+          namespace: ORDER_META_NAMESPACE,
+          key: ORDER_META_KEY,
+          type: 'json',
+          value: JSON.stringify(combined)
+        }
+      },
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
   }
 
   console.log('✅ Metafält sparat!');
   try { await cacheOrderProjects(orderId, combined); } catch {}
+
+  // 🔄 NYTT: spegla order + metafält till Postgres-snapshot
+  try {
+    // metafältet (combined) är fortfarande "sanningen" – vi använder samma struktur här
+    await upsertOrderSnapshotFromMetafield(order, combined);
+  } catch (e) {
+    console.warn('[orders_snapshot] order-created → snapshot misslyckades:', e?.message || e);
+  }
 
   // 4) Activity-log använder samma combined (som nu innehåller productHandle)
   try {
