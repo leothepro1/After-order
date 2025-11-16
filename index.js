@@ -2182,7 +2182,10 @@ function buildPrettyProperties(propsMap) {
 
 // ===== Postgres helpers för orders_snapshot =============================
 
-// EFTER: robust normalisering för snapshot (raw = exakt Shopify-sträng, json = säkert objekt/array eller null)
+// EFTER: robust normalisering för snapshot
+//  - raw  = alltid EXAKT Shopify-strängen om value är sträng
+//  - json = bara objekt/array (annars null)
+//  - hanterar dubbelencodad JSON (sträng som i sig innehåller JSON)
 function normalizeOrderMetafieldForSnapshot(metafieldValue) {
   // Fall 1: metafältet är en JSON-sträng (vanligt från Shopify Admin)
   if (typeof metafieldValue === 'string') {
@@ -2200,17 +2203,20 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue) {
             parsed = inner;
           }
         } catch {
-          // lämna parsed som string → kommer behandlas som “inte objekt” nedan
+          // lämna parsed som string → behandlas som “inte objekt” nedan
         }
       }
 
       if (parsed && typeof parsed === 'object') {
-        json = parsed;          // OK för JSONB
+        // ✅ Endast objekt/array får landa här → alltid JSONB-safe
+        json = parsed;
       } else {
-        json = null;            // vi förlitar oss på metafield_raw i läsningen
+        // t.ex. parsed === "hej" → använd bara raw
+        json = null;
       }
     } catch {
-      json = null;              // parse misslyckas → bara raw används
+      // JSON.parse failar → vi litar bara på raw
+      json = null;
     }
 
     return { raw, json };
@@ -2221,11 +2227,12 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue) {
     return { raw: 'null', json: null };
   }
 
-  // Fall 3: metafältet är redan ett objekt/array (t.ex. vår egen "combined" i order-created)
+  // Fall 3: metafältet är redan ett objekt/array (t.ex. vår egen "combined")
   const json = metafieldValue;
   const raw = JSON.stringify(metafieldValue);
   return { raw, json };
 }
+
 
 
 
@@ -2236,55 +2243,62 @@ function extractOrderTimestamps(order) {
   return { createdAt: created, updatedAt: updated };
 }
 
-// Upsert: spara snapshot av order + metafält i Postgres
+// FÖRE: upsertOrderSnapshotFromMetafield – maskerar fel och skickar json “as is”
+// EFTER: upsertOrderSnapshotFromMetafield – JSONB-safe och låter fel bubbla upp
 async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
   if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
 
-  try {
-    const orderId = Number(order?.id);
-    if (!orderId || Number.isNaN(orderId)) return;
+  const orderId = Number(order?.id);
+  if (!orderId || Number.isNaN(orderId)) return;
 
-    const customerId = order?.customer?.id ? Number(order.customer.id) : null;
-    const customerEmail =
-      order?.email ||
-      order?.customer?.email ||
-      null;
+  const customerId = order?.customer?.id ? Number(order.customer.id) : null;
+  const customerEmail =
+    order?.email ||
+    order?.customer?.email ||
+    null;
 
-    const { createdAt, updatedAt } = extractOrderTimestamps(order);
-    const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
+  const { createdAt, updatedAt } = extractOrderTimestamps(order);
+  const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
 
-    await pgQuery(
-      `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
-         order_id,
-         customer_id,
-         customer_email,
-         created_at,
-         updated_at,
-         metafield_raw,
-         metafield_json
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (order_id) DO UPDATE SET
-         customer_id    = EXCLUDED.customer_id,
-         customer_email = EXCLUDED.customer_email,
-         created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
-         updated_at     = EXCLUDED.updated_at,
-         metafield_raw  = EXCLUDED.metafield_raw,
-         metafield_json = EXCLUDED.metafield_json`,
-      [
-        orderId,
-        customerId,
-        customerEmail,
-        createdAt,
-        updatedAt,
-        raw,
-        json
-      ]
-    );
-  } catch (e) {
-    console.warn('[orders_snapshot] upsertOrderSnapshotFromMetafield failed:', e?.message || e);
-  }
+  // ✅ Garantera att det vi skickar till JSONB är en giltig JS-struktur
+  //    (aldrig en rå / trasig JSON-sträng)
+  const jsonParam =
+    json && typeof json === 'object'
+      ? json
+      : []; // fallback – valid JSONB [] (NOT NULL-kolumnen är nöjd)
+
+  // Inget try/catch här – vi VILL att backfill/webhook ser felet
+  await pgQuery(
+    `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
+       order_id,
+       customer_id,
+       customer_email,
+       created_at,
+       updated_at,
+       metafield_raw,
+       metafield_json
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (order_id) DO UPDATE SET
+       customer_id    = EXCLUDED.customer_id,
+       customer_email = EXCLUDED.customer_email,
+       created_at     = LEAST(${ORDERS_SNAPSHOT_TABLE}.created_at, EXCLUDED.created_at),
+       updated_at     = EXCLUDED.updated_at,
+       metafield_raw  = EXCLUDED.metafield_raw,
+       metafield_json = EXCLUDED.metafield_json`,
+    [
+      orderId,
+      customerId,
+      customerEmail,
+      createdAt,
+      updatedAt,
+      raw,       // exakt Shopify-sträng
+      jsonParam  // ✅ alltid JSONB-safe (objekt/array), aldrig trasig sträng
+    ]
+  );
 }
+
+
 
 // Läs snapshot för en enskild order
 async function readOrderSnapshot(orderId) {
