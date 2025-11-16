@@ -1397,6 +1397,8 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
 // - Signerad token (p64url.<sig>): verifieras → hämtar projekt + aktiv share-snapshot.
 // - Legacy (t.ex. "071ea4..." eller ett gammalt filnamn): söker i orderns projekt om möjligt.
 //   Obs: legacy utan orderId blir "best effort": vi försöker hitta i senaste snapshoten/Redis-index om tillgängligt.
+// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
+// Accepterar ?artwork=, ?token= eller ?id=
 app.get('/public/printed/artwork-token', async (req, res) => {
   function sendErr(status, msg) {
     res.setHeader('Cache-Control', 'no-store');
@@ -1408,7 +1410,14 @@ app.get('/public/printed/artwork-token', async (req, res) => {
   }
 
   try {
-    const raw = String(req.query.token || '').trim();
+    // ⬇️ NYTT: samma som i /proxy/printed/artwork-token
+    const raw = String(
+      req.query.artwork ||
+      req.query.token   ||
+      req.query.id      ||
+      ''
+    ).trim();
+
     if (!raw) return sendErr(400, 'missing_token');
 
     const payload = verifyAndParseToken(raw);
@@ -1418,14 +1427,13 @@ app.get('/public/printed/artwork-token', async (req, res) => {
       const { orderId, lineItemId } = payload || {};
       if (!orderId || !lineItemId) return sendErr(400, 'bad_payload');
 
-      // 🔄 NYTT: DB/Redis först
+      // 🔄 DB/Redis först
       const { projects } = await readOrderProjectsForRead(orderId);
       const proj = (projects || []).find(
         (p) => String(p.lineItemId) === String(lineItemId)
       );
       if (!proj) return sendErr(404, 'not_found');
 
-      // preview + filnamn = EXAKT samma logik som tidigare
       const preview =
         proj.previewUrl || proj.preview_img || null;
 
@@ -1441,6 +1449,10 @@ app.get('/public/printed/artwork-token', async (req, res) => {
       if (!preview) return sendErr(404, 'preview_missing');
       return sendOk({ preview, filename, token: raw });
     }
+
+    // 2) Legacy-hex / filnamn – här behåller du din nuvarande kod
+    // ...
+
 
     // 2) Legacy-hex / filnamn → här kan du också byta till readOrderProjectsForRead
     const legacy = decodeURIComponent(raw).toLowerCase();
