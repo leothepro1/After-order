@@ -2084,29 +2084,44 @@ function buildPrettyProperties(propsMap) {
 
 // ===== Postgres helpers för orders_snapshot =============================
 
+// ===== Postgres helpers för orders_snapshot =============================
+
 // Normalisera metafältet så vi både får exakt raw-string och JSON–objektet
 function normalizeOrderMetafieldForSnapshot(metafieldValue) {
-  // metafieldValue kan vara redan-parsad array/objekt ELLER en JSON-string
+  // Fall 1: metafältet är en JSON-sträng (vanligt från Shopify Admin)
   if (typeof metafieldValue === 'string') {
     const raw = metafieldValue;
-    let json;
+    let json = null;
+
     try {
-      json = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      // Vi accepterar endast objekt/arrayer som JSONB – om det är en "dubbelencodad" sträng
+      // eller något annat (t.ex. bara en textsträng), sätter vi json = null
+      // för att undvika Postgres-fel.
+      if (parsed && typeof parsed === 'object') {
+        json = parsed;
+      } else {
+        json = null;
+      }
     } catch {
       json = null;
     }
+
     return { raw, json };
   }
 
+  // Fall 2: inget värde alls – vi sparar 'null' som text och NULL som JSONB
   if (metafieldValue == null) {
     return { raw: 'null', json: null };
   }
 
-  // Bevara EXAKT struktur som Shopify-metafältet använder
+  // Fall 3: metafältet är redan ett objekt/array (t.ex. vår egen "combined" i order-created)
+  // Här kan vi tryggt spara både raw-string och JSONB.
   const json = metafieldValue;
   const raw = JSON.stringify(metafieldValue);
   return { raw, json };
 }
+
 
 // Plocka ut tidsstämplar från Shopify-order (fallback till now)
 function extractOrderTimestamps(order) {
