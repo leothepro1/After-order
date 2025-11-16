@@ -2186,6 +2186,12 @@ function buildPrettyProperties(propsMap) {
 //  - raw  = alltid EXAKT Shopify-strängen om value är sträng
 //  - json = bara objekt/array (annars null)
 //  - hanterar dubbelencodad JSON (sträng som i sig innehåller JSON)
+// ===== Postgres helpers för orders_snapshot =============================
+
+// EFTER: robust normalisering för snapshot
+//  - raw  = alltid EXAKT Shopify-strängen om value är sträng
+//  - json = bara objekt/array (annars null)
+//  - hanterar dubbelencodad JSON (sträng som i sig innehåller JSON)
 function normalizeOrderMetafieldForSnapshot(metafieldValue) {
   // Fall 1: metafältet är en JSON-sträng (vanligt från Shopify Admin)
   if (typeof metafieldValue === 'string') {
@@ -2236,6 +2242,7 @@ function normalizeOrderMetafieldForSnapshot(metafieldValue) {
 
 
 
+
 // Plocka ut tidsstämplar från Shopify-order (fallback till now)
 function extractOrderTimestamps(order) {
   const created = order?.created_at || order?.processed_at || new Date().toISOString();
@@ -2244,6 +2251,14 @@ function extractOrderTimestamps(order) {
 }
 
 // FÖRE: upsertOrderSnapshotFromMetafield – maskerar fel och skickar json “as is”
+// EFTER: upsertOrderSnapshotFromMetafield – JSONB-safe och låter fel bubbla upp
+// Plocka ut tidsstämplar från Shopify-order (fallback till now)
+function extractOrderTimestamps(order) {
+  const created = order?.created_at || order?.processed_at || new Date().toISOString();
+  const updated = order?.updated_at || created;
+  return { createdAt: created, updatedAt: updated };
+}
+
 // EFTER: upsertOrderSnapshotFromMetafield – JSONB-safe och låter fel bubbla upp
 async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
   if (!pgPool) return; // om DB är nere vill vi INTE krascha webhooks
@@ -2260,14 +2275,17 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
   const { createdAt, updatedAt } = extractOrderTimestamps(order);
   const { raw, json } = normalizeOrderMetafieldForSnapshot(metafieldValue);
 
-  // ✅ Garantera att det vi skickar till JSONB är en giltig JS-struktur
-  //    (aldrig en rå / trasig JSON-sträng)
-  const jsonParam =
+  // ✅ Garantera att vi *alltid* skickar giltig JSON-text till JSONB-kolumnen
+  //    (aldrig en trasig rå-sträng från Shopify)
+  const jsonSafeValue =
     json && typeof json === 'object'
-      ? json
-      : []; // fallback – valid JSONB [] (NOT NULL-kolumnen är nöjd)
+      ? json              // giltigt objekt/array
+      : [];               // fallback – NOT NULL-kolumnen är nöjd, frontend kan läsa raw
 
-  // Inget try/catch här – vi VILL att backfill/webhook ser felet
+  // Gör explicit JSON.stringify innan vi skickar till Postgres
+  const jsonText = JSON.stringify(jsonSafeValue); // t.ex. "[]" eller "[{...}]"
+
+  // Inget try/catch här – vi vill att backfill/webhook ska se felet
   await pgQuery(
     `INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
        order_id,
@@ -2292,11 +2310,12 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
       customerEmail,
       createdAt,
       updatedAt,
-      raw,       // exakt Shopify-sträng
-      jsonParam  // ✅ alltid JSONB-safe (objekt/array), aldrig trasig sträng
+      raw,      // EXAKT Shopify-sträng (1:1)
+      jsonText  // ✅ alltid giltig JSON-text ([], eller serialiserat objekt/array)
     ]
   );
 }
+
 
 
 
