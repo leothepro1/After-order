@@ -5869,9 +5869,7 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
     const teamCustomerIdRaw =
       req.query.teamCustomerId ||
       req.query.team_customer_id ||
-      null;
-    const teamCustomerId = teamCustomerIdRaw
-      ? String(teamCustomerIdRaw).split('/').pop()
+.
       : null;
 
     if (!teamCustomerId) {
@@ -5897,8 +5895,9 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
         role: r.role,
         status: r.status,
         email: r.member_email || null,
-        // 🔁 Viktigt: visa alltid PERSONLIG avatar i "medlemslistan”
-        avatarUrl: r.member_avatar_url || r.team_avatar_url || null,
+        // ⬅️ NU: avatarUrl = PERSONLIGA avataren
+        avatarUrl: r.member_avatar_url || null,
+        // Teamets gemensamma avatar skickas separat
         teamAvatarUrl: r.team_avatar_url || null,
         memberAvatarUrl: r.member_avatar_url || null
       }))
@@ -5909,6 +5908,342 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   }
 });
 
+// NYTT: Byt roll på en befintlig teammedlem
+// POST /proxy/orders-meta/teams/role (via App Proxy: /apps/orders-meta/teams/role)
+// Body: { teamCustomerId, memberCustomerId, role }
+app.post('/proxy/orders-meta/teams/role', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
+
+    const body = req.body || {};
+
+    const teamCustomerIdRaw =
+      body.teamCustomerId ||
+      body.team_customer_id ||
+      req.query.teamCustomerId ||
+      req.query.team_customer_id ||
+      null;
+
+    const memberCustomerIdRaw =
+      body.memberCustomerId ||
+      body.member_customer_id ||
+      null;
+
+    const roleRaw =
+      body.role ||
+      body.newRole ||
+      body.new_role ||
+      null;
+
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
+      : null;
+
+    const memberCustomerId = memberCustomerIdRaw
+      ? String(memberCustomerIdRaw).split('/').pop()
+      : null;
+
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'missing_team_customer_id' });
+    }
+    if (!memberCustomerId) {
+      return res.status(400).json({ error: 'missing_member_customer_id' });
+    }
+    if (!roleRaw || typeof roleRaw !== 'string') {
+      return res.status(400).json({ error: 'missing_role' });
+    }
+
+    const newRole = String(roleRaw).trim().toLowerCase();
+    const allowedRoles = ['owner', 'member'];
+    if (!allowedRoles.includes(newRole)) {
+      return res.status(400).json({ error: 'invalid_role' });
+    }
+
+    // 1) Läs teamets metafält och verifiera ägare
+    const teamMeta = await readCustomerTeams(teamCustomerId);
+    const teamValue = teamMeta?.value || null;
+
+    if (!teamValue || !teamValue.isTeam) {
+      return res.status(400).json({ error: 'not_a_team_account' });
+    }
+
+    if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
+      return res.status(403).json({ error: 'not_team_owner' });
+    }
+
+    if (Number(teamValue.ownerCustomerId) === Number(memberCustomerId) && newRole !== 'owner') {
+      return res.status(400).json({ error: 'cannot_change_owner_role' });
+    }
+
+    // 2) Säkerställ att medlemmen finns i DB-projektionen
+    const rows = await listTeamMembersForTeam(teamCustomerId);
+    const dbMember = (Array.isArray(rows) ? rows : []).find(
+      (r) => String(r.customer_id) === String(memberCustomerId)
+    );
+
+    if (!dbMember) {
+      return res.status(404).json({ error: 'member_not_found' });
+    }
+
+    const memberEmail =
+      dbMember.member_email ? String(dbMember.member_email).trim().toLowerCase() : null;
+
+    // 3) Uppdatera teamets metafält (team-kontot)
+    const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
+    let updatedInTeamMeta = false;
+
+    for (const m of members) {
+      const mid = m && m.customerId != null ? String(m.customerId) : null;
+      const mail = m && m.email ? String(m.email).trim().toLowerCase() : null;
+
+      const matchById = mid && mid === String(memberCustomerId);
+      const matchByEmail = memberEmail && mail === memberEmail;
+
+      if (matchById || matchByEmail) {
+        // Sätt customerId om den inte redan finns
+        if (m.customerId == null) {
+          m.customerId = Number(memberCustomerId);
+        }
+        m.role = newRole;
+        updatedInTeamMeta = true;
+      }
+    }
+
+    if (!updatedInTeamMeta) {
+      return res.status(404).json({ error: 'member_not_in_team_metafield' });
+    }
+
+    teamValue.members = members;
+    await writeCustomerTeams(teamCustomerId, teamValue);
+
+    // 4) Uppdatera medlems personliga metafält (memberships[])
+    try {
+      const memberMeta = await readCustomerTeams(memberCustomerId);
+      let mv = memberMeta?.value;
+
+      if (!mv || typeof mv !== 'object') {
+        mv = {};
+      }
+      if (!Array.isArray(mv.memberships)) {
+        mv.memberships = [];
+      }
+
+      let changedMembership = false;
+      mv.memberships = mv.memberships.map((m) => {
+        const teamIdCandidate =
+          m.teamCustomerId ??
+          m.team_customer_id ??
+          m.teamId ??
+          null;
+
+        if (Number(teamIdCandidate) === Number(teamCustomerId)) {
+          changedMembership = true;
+          return {
+            ...m,
+            teamCustomerId: teamCustomerId,
+            role: newRole
+          };
+        }
+        return m;
+      });
+
+      if (changedMembership) {
+        await writeCustomerTeams(memberCustomerId, mv);
+      }
+    } catch (e) {
+      console.warn(
+        '[teams] role: kunde inte uppdatera medlems-metafält',
+        e?.response?.data || e.message
+      );
+    }
+
+    // 5) Uppdatera DB-projektionen
+    try {
+      await upsertTeamMemberRow({
+        teamId: teamCustomerId,
+        customerId: memberCustomerId,
+        role: newRole,
+        status: dbMember.status || 'active',
+        email: null,
+        avatarUrl: null
+      });
+    } catch (e) {
+      console.warn(
+        '[team_members] role: kunde inte uppdatera row',
+        e?.message || e
+      );
+    }
+
+    return res.json({
+      ok: true,
+      teamId: pfNormalizeTeamId(teamCustomerId),
+      member: {
+        customerId: String(memberCustomerId),
+        role: newRole
+      }
+    });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/teams/role error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// NYTT: Ta bort en medlem från teamet
+// POST /proxy/orders-meta/teams/remove (via App Proxy: /apps/orders-meta/teams/remove)
+// Body: { teamCustomerId, memberCustomerId }
+app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
+  try {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
+
+    const body = req.body || {};
+
+    const teamCustomerIdRaw =
+      body.teamCustomerId ||
+      body.team_customer_id ||
+      req.query.teamCustomerId ||
+      req.query.team_customer_id ||
+      null;
+
+    const memberCustomerIdRaw =
+      body.memberCustomerId ||
+      body.member_customer_id ||
+      null;
+
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
+      : null;
+
+    const memberCustomerId = memberCustomerIdRaw
+      ? String(memberCustomerIdRaw).split('/').pop()
+      : null;
+
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'missing_team_customer_id' });
+    }
+    if (!memberCustomerId) {
+      return res.status(400).json({ error: 'missing_member_customer_id' });
+    }
+
+    // 1) Läs teamets metafält och verifiera ägare
+    const teamMeta = await readCustomerTeams(teamCustomerId);
+    const teamValue = teamMeta?.value || null;
+
+    if (!teamValue || !teamValue.isTeam) {
+      return res.status(400).json({ error: 'not_a_team_account' });
+    }
+
+    if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
+      return res.status(403).json({ error: 'not_team_owner' });
+    }
+
+    if (Number(teamValue.ownerCustomerId) === Number(memberCustomerId)) {
+      return res.status(400).json({ error: 'cannot_remove_owner' });
+    }
+
+    // 2) Säkerställ att medlemmen finns i DB-projektionen
+    const rows = await listTeamMembersForTeam(teamCustomerId);
+    const dbMember = (Array.isArray(rows) ? rows : []).find(
+      (r) => String(r.customer_id) === String(memberCustomerId)
+    );
+
+    if (!dbMember) {
+      return res.status(404).json({ error: 'member_not_found' });
+    }
+
+    const memberEmail =
+      dbMember.member_email ? String(dbMember.member_email).trim().toLowerCase() : null;
+
+    // 3) Ta bort medlemmen ur teamets metafält (team-kontot)
+    const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
+    const beforeCount = members.length;
+
+    const filteredMembers = members.filter((m) => {
+      const mid = m && m.customerId != null ? String(m.customerId) : null;
+      const mail = m && m.email ? String(m.email).trim().toLowerCase() : null;
+
+      const matchById = mid && mid === String(memberCustomerId);
+      const matchByEmail = memberEmail && mail === memberEmail;
+
+      return !(matchById || matchByEmail);
+    });
+
+    if (beforeCount !== filteredMembers.length) {
+      teamValue.members = filteredMembers;
+      await writeCustomerTeams(teamCustomerId, teamValue);
+    }
+
+    // 4) Ta bort membership från medlemmens personliga metafält
+    try {
+      const memberMeta = await readCustomerTeams(memberCustomerId);
+      let mv = memberMeta?.value;
+
+      if (!mv || typeof mv !== 'object') {
+        mv = {};
+      }
+      if (!Array.isArray(mv.memberships)) {
+        mv.memberships = [];
+      }
+
+      const beforeMemberships = mv.memberships.length;
+      mv.memberships = mv.memberships.filter((m) => {
+        const teamIdCandidate =
+          m.teamCustomerId ??
+          m.team_customer_id ??
+          m.teamId ??
+          null;
+
+        return Number(teamIdCandidate) !== Number(teamCustomerId);
+      });
+
+      if (mv.memberships.length !== beforeMemberships) {
+        await writeCustomerTeams(memberCustomerId, mv);
+      }
+    } catch (e) {
+      console.warn(
+        '[teams] remove: kunde inte uppdatera medlems-metafält',
+        e?.response?.data || e.message
+      );
+    }
+
+    // 5) Markera medlemmen som removed i DB-projektionen
+    try {
+      await markTeamMemberRemoved(teamCustomerId, memberCustomerId);
+    } catch (e) {
+      console.warn(
+        '[team_members] remove: kunde inte markera removed',
+        e?.message || e
+      );
+    }
+
+    return res.json({
+      ok: true,
+      removed: true,
+      teamId: pfNormalizeTeamId(teamCustomerId),
+      member: {
+        customerId: String(memberCustomerId)
+      }
+    });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/teams/remove error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
 
 
 
@@ -5986,13 +6321,11 @@ app.get('/proof/share/:token', async (req, res) => {
       ...(summary ? { summary } : {})
     });
   } catch (e) {
-    console.error(
-      'GET /proof/share/:token error:',
-      e?.response?.data || e.message
-    );
-    return res.status(500).json({ error: 'Kunde inte hämta projekt' });
+    console.error('share token error:', e?.response?.data || e.message);
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 
 
 
