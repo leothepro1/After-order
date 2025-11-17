@@ -5869,9 +5869,7 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
     const teamCustomerIdRaw =
       req.query.teamCustomerId ||
       req.query.team_customer_id ||
-      null;
-    const teamCustomerId = teamCustomerIdRaw
-      ? String(teamCustomerIdRaw).split('/').pop()
+...
       : null;
 
     if (!teamCustomerId) {
@@ -5897,7 +5895,9 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
         role: r.role,
         status: r.status,
         email: r.member_email || null,
-        avatarUrl: r.team_avatar_url || r.member_avatar_url || null,
+        // ⬅️ NU: avatarUrl = PERSONLIGA avataren
+        avatarUrl: r.member_avatar_url || null,
+        // Teamets gemensamma avatar skickas separat
         teamAvatarUrl: r.team_avatar_url || null,
         memberAvatarUrl: r.member_avatar_url || null
       }))
@@ -5907,6 +5907,7 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 // ===== END APP PROXY =====
