@@ -5716,14 +5716,22 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
 // Effekt:
 // 1) Alla giltiga mailadresser läggs in i teamets metafält (teamValue.members[])
 // 2) För de mailadresser som matchar en befintlig kund uppdateras kundens metafält med memberships[]
+// NYTT: Bjud in medlemmar till ett befintligt teamkonto
 app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
+  ...
+});
+
+// NYTT: Uppdatera roll för en medlem i ETT specifikt teamkonto
+// POST /proxy/orders-meta/teams/role  (via App Proxy: /apps/orders-meta/teams/role)
+// Body: { teamCustomerId, memberCustomerId?, memberEmail?, role }
+app.post('/proxy/orders-meta/teams/role', async (req, res) => {
   try {
-    // 1) Verifiera att anropet kommer via Shopify App Proxy
+    // 1) Verifiera App Proxy-signatur
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
 
-    // 2) Kräver inloggad kund (ägare av teamet)
+    // 2) Kräver inloggad kund
     const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
     if (!loggedInCustomerIdRaw) {
       return res.status(401).json({ error: 'not_logged_in' });
@@ -5748,26 +5756,40 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
       return res.status(400).json({ error: 'missing_team_customer_id' });
     }
 
-    // 4) Plocka ut emails från body
-    let emails = Array.isArray(body.emails) ? body.emails : [];
-    emails = emails
-      .map(e => String(e || '').trim().toLowerCase())
-      .filter(Boolean);
+    // 4) Ny roll
+    let roleRaw = body.role || body.newRole || null;
+    if (!roleRaw) {
+      return res.status(400).json({ error: 'missing_role' });
+    }
+    const roleKey = String(roleRaw).toUpperCase() === 'OWNER' ? 'OWNER' : 'MEMBER';
 
-    // Ta bort dubbletter
-    emails = Array.from(new Set(emails));
+    // 5) Medlemsidentifiering (id / email)
+    let memberCustomerIdRaw =
+      body.memberCustomerId ||
+      body.member_customer_id ||
+      null;
 
-    if (!emails.length) {
-      return res.status(400).json({ error: 'no_emails' });
+    let memberCustomerId = null;
+    if (memberCustomerIdRaw != null) {
+      const tmp = String(memberCustomerIdRaw).split('/').pop().trim();
+      if (tmp && tmp !== 'null' && tmp !== 'undefined') {
+        memberCustomerId = tmp;
+      }
     }
 
-    // Extra: filtrera bort uppenbart ogiltiga mail här också
-    const validEmails = emails.filter(isValidEmail);
-    if (!validEmails.length) {
-      return res.status(400).json({ error: 'no_valid_emails' });
+    const memberEmailRaw =
+      body.memberEmail ||
+      body.member_email ||
+      null;
+    const memberEmail = memberEmailRaw
+      ? String(memberEmailRaw).trim().toLowerCase()
+      : null;
+
+    if (!memberCustomerId && !memberEmail) {
+      return res.status(400).json({ error: 'missing_member_identifier' });
     }
 
-    // 5) Läs teamets metafält och kontrollera att inloggad kund är ägare
+    // 6) Läs teamets metafält och kolla behörighet
     const teamMeta = await readCustomerTeams(teamCustomerId);
     const teamValue = teamMeta?.value || null;
 
@@ -5775,92 +5797,120 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
       return res.status(400).json({ error: 'not_a_team_account' });
     }
 
-    if (Number(teamValue.ownerCustomerId) !== Number(loggedInCustomerId)) {
+    const isOwner = Number(teamValue.ownerCustomerId) === Number(loggedInCustomerId);
+    const isAdmin = await isAdminCustomer(loggedInCustomerId);
+
+    if (!isOwner && !isAdmin) {
       return res.status(403).json({ error: 'not_team_owner' });
     }
 
     const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
-    const existingEmails = new Set(
-      members
-        .map(m => String(m && m.email ? m.email : '').trim().toLowerCase())
-        .filter(Boolean)
-    );
+    let targetMember = null;
 
-    const added = [];
+    for (let i = 0; i < members.length; i++) {
+      const m = members[i];
+      if (!m) continue;
 
-    // 6) Lägg in alla nya mailadresser som "member" på TEAM-kontot
-    validEmails.forEach(email => {
-      if (existingEmails.has(email)) return;
+      const cid = m.customerId != null ? String(m.customerId) : null;
+      const email = m.email ? String(m.email).trim().toLowerCase() : null;
 
-      const member = {
-        customerId: null, // vi känner inte mottagarens customer-id ännu
-        email,
-        role: 'member'
-      };
+      const matchByCustomerId =
+        memberCustomerId && cid && cid === memberCustomerId;
+      const matchByEmail =
+        memberEmail && email && email === memberEmail;
 
-      members.push(member);
-      existingEmails.add(email);
-      added.push(member);
-    });
-
-    if (!added.length) {
-      return res.json({
-        ok: true,
-        added: [],
-        team: {
-          id: teamCustomerId,
-          teamName: teamValue.teamName || null
-        }
-      });
+      if (matchByCustomerId || matchByEmail) {
+        targetMember = m;
+        members[i] = { ...m, role: roleKey }; // uppdatera roll i teamets metafält
+        break;
+      }
     }
+
+    if (!targetMember) {
+      return res.status(404).json({ error: 'member_not_found' });
+    }
+
+    // (valfritt) Hindra att man tar bort ALLA ägare etc.
+    // Här låter vi det gå igenom – du kan lägga in extra regler om du vill.
 
     // 7) Spara uppdaterat team-metakonto
     teamValue.members = members;
     await writeCustomerTeams(teamCustomerId, teamValue);
 
-    // 8) För alla mailadresser vi faktiskt la till: försök koppla mot befintliga kunder
-    //    och uppdatera deras personliga metafält med memberships[]
-    const addedEmails = added
-      .map(m => String(m && m.email ? m.email : '').trim().toLowerCase())
-      .filter(Boolean);
-
-    try {
-      await syncTeamMembershipForExistingCustomers(
-        teamCustomerId,
-        teamValue.teamName || null,
-        addedEmails
-      );
-    } catch (e) {
-      // Vi loggar men låter själva inbjudan lyckas ändå
-      console.error(
-        'syncTeamMembershipForExistingCustomers top-level error:',
-        e?.response?.data || e.message
-      );
+    // 8) Uppdatera DB-projektionen för JUST DETTA TEAM (team_members)
+    if (targetMember.customerId != null) {
+      try {
+        await pool.query(
+          `UPDATE team_members
+           SET role = $1,
+               updated_at = NOW()
+           WHERE team_id = $2
+             AND customer_id = $3`,
+          [roleKey, Number(teamCustomerId), Number(targetMember.customerId)]
+        );
+      } catch (e) {
+        console.warn('[team_members] update role failed', e?.message || e);
+      }
     }
 
-    // 9) Svar till frontend – den behöver bara veta att inbjudan är "ok"
+    // 9) Uppdatera medlemmens PERSONAL metafält för just DETTA TEAM
+    if (targetMember.customerId != null) {
+      try {
+        const memberId = targetMember.customerId;
+        const memberMeta = await readCustomerTeams(memberId);
+        let memberValue = memberMeta.value;
+        if (!memberValue || typeof memberValue !== 'object') {
+          memberValue = {};
+        }
+
+        if (Array.isArray(memberValue.memberships) && memberValue.memberships.length > 0) {
+          for (let i = 0; i < memberValue.memberships.length; i++) {
+            const ms = memberValue.memberships[i];
+            const rawTeamId =
+              ms.teamCustomerId ??
+              ms.team_customer_id ??
+              (ms.team && ms.team.id) ??
+              null;
+
+            if (!rawTeamId) continue;
+
+            const a = String(rawTeamId).split('/').pop();
+            const b = String(teamCustomerId).split('/').pop();
+
+            if (a === b) {
+              memberValue.memberships[i] = { ...ms, role: roleKey };
+              break;
+            }
+          }
+
+          await writeCustomerTeams(memberId, memberValue);
+        }
+      } catch (e) {
+        console.warn('[teams/role] kunde inte uppdatera medlems personliga metafält', e?.message || e);
+      }
+    }
+
     return res.json({
       ok: true,
-      added,
+      member: {
+        customerId: targetMember.customerId || null,
+        email: targetMember.email || memberEmail || null,
+        role: roleKey
+      },
       team: {
         id: teamCustomerId,
         teamName: teamValue.teamName || null
       }
     });
   } catch (err) {
-    console.error('POST /proxy/orders-meta/teams/invite error:', err?.response?.data || err.message);
+    console.error('POST /proxy/orders-meta/teams/role error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
   }
 });
 
-// NYTT: Ta bort medlem från ett befintligt teamkonto
-// POST /proxy/orders-meta/teams/remove  (via App Proxy: /apps/orders-meta/teams/remove)
-// Body: { teamCustomerId, memberCustomerId?, memberEmail? }
-//
-// Effekt:
-// 1) Tar bort medlemmen ur teamets metafält (teamValue.members[])
-// 2) Markerar medlemmen som 'removed' i team_members-tabellen (DB-projektion)
-// 3) Försöker ta bort teamet från medlemmens egna memberships[]-metafält
+
+
+
 app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
   try {
     // 1) Verifiera att anropet kommer via Shopify App Proxy
