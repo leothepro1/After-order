@@ -4849,22 +4849,22 @@ app.get('/proxy/orders-meta', async (req, res) => {
     }
 
     const q = 'status:any'; // OBS: ingen customer_id-filter här
-    const query = `
-      query OrdersWithMetafield($first:Int!,$q:String!,$ns:String!,$key:String!){
-        orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
-          edges{
-            node{
-              id
-              name
-              processedAt
-              fulfillmentStatus
-              displayFulfillmentStatus
-              metafield(namespace:$ns, key:$key){ value }
-            }
-          }
+  const query = `
+  query OrdersWithMetafield($first:Int!,$q:String!,$ns:String!,$key:String!){
+    orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
+      edges{
+        node{
+          id
+          name
+          processedAt
+          displayFulfillmentStatus
+          metafield(namespace:$ns, key:$key){ value }
         }
       }
-    `;
+    }
+  }
+`;
+
 
     const data = await shopifyGraphQL(query, {
       first: limit,
