@@ -6047,10 +6047,18 @@ return res.json({
     teamName: teamValue.teamName || null
   }
 });
-
+  } catch (err) {
+    console.error(
+      'POST /proxy/orders-meta/teams/remove error:',
+      err?.response?.data || err.message
+    );
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
 
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   try {
+
     // 1) Verifiera App Proxy-signatur
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
