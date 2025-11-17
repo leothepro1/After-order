@@ -2515,38 +2515,79 @@ async function readOrderSnapshot(orderId) {
 
 async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
   if (!pgPool) return [];
+
   try {
-    const cid = Number(customerId);
-    const lim = Number.isFinite(Number(limit)) ? Number(limit) : 50;
-
-    const { rows } = await pgQuery(
-      `SELECT
-         order_id,
-         customer_id,
-         customer_email,
-         created_at,
-         updated_at,
-         metafield_raw,
-         metafield_json,
-         order_name,
-         processed_at,
-         fulfillment_status,
-         display_fulfillment_status,
-         pressify_scope,
-         pressify_team_id
-       FROM ${ORDERS_SNAPSHOT_TABLE}
-       WHERE customer_id = $1
-       ORDER BY COALESCE(processed_at, created_at) DESC
-       LIMIT $2`,
-      [cid, lim]
-    );
-
+    const first = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
+    const sql = `
+      SELECT
+        order_id,
+        customer_id,
+        customer_email,
+        processed_at,
+        created_at,
+        order_name,
+        metafield_raw,
+        metafield_json,
+        fulfillment_status,
+        display_fulfillment_status,
+        pressify_scope,
+        pressify_team_id,
+        pressify_team_name
+      FROM ${ORDERS_SNAPSHOT_TABLE}
+      WHERE customer_id = $1
+      ORDER BY COALESCE(processed_at, created_at) DESC
+      LIMIT $2
+    `;
+    const { rows } = await pgQuery(sql, [customerId, first]);
     return rows || [];
   } catch (e) {
-    console.warn('[orders_snapshot] listOrderSnapshotsForCustomer failed:', e?.message || e);
+    console.error('[orders_snapshot] listOrderSnapshotsForCustomer error:', e?.response?.data || e.message);
     return [];
   }
 }
+
+/**
+ * Hämta snapshots för ett TEAM:
+ *  - pressify_scope = 'team'
+ *  - pressify_team_id = teamId (normaliserat)
+ */
+async function listOrderSnapshotsForTeam(teamId, limit = 50) {
+  if (!pgPool) return [];
+
+  try {
+    const normTeamId = pfNormalizeTeamId(teamId);
+    if (!normTeamId) return [];
+
+    const first = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
+    const sql = `
+      SELECT
+        order_id,
+        customer_id,
+        customer_email,
+        processed_at,
+        created_at,
+        order_name,
+        metafield_raw,
+        metafield_json,
+        fulfillment_status,
+        display_fulfillment_status,
+        pressify_scope,
+        pressify_team_id,
+        pressify_team_name
+      FROM ${ORDERS_SNAPSHOT_TABLE}
+      WHERE pressify_scope = 'team'
+        AND pressify_team_id = $1
+      ORDER BY COALESCE(processed_at, created_at) DESC
+      LIMIT $2
+    `;
+    const { rows } = await pgQuery(sql, [normTeamId, first]);
+    return rows || [];
+  } catch (e) {
+    console.error('[orders_snapshot] listOrderSnapshotsForTeam error:', e?.response?.data || e.message);
+    return [];
+  }
+}
+
 
 // ========================================================================
 
@@ -4197,6 +4238,35 @@ async function writeCustomerTeams(customerId, valueObj) {
   return saved;
 }
 
+/**
+ * Kontrollera om en kund är medlem i ett givet team-konto
+ *  - customerId: personlig kund (inloggad)
+ *  - teamId: Shopify customer-id för team-kontot (kan vara GID eller siffra)
+ */
+async function isCustomerMemberOfTeam(customerId, teamId) {
+  const cid = normalizeCustomerId(customerId);
+  const normTeamId = pfNormalizeTeamId(teamId);
+  if (!cid || !normTeamId) return false;
+
+  try {
+    const { value } = await readCustomerTeams(cid);
+    if (!value || typeof value !== 'object') return false;
+
+    const memberships = Array.isArray(value.memberships) ? value.memberships : [];
+    return memberships.some((m) => {
+      const rawTeamId =
+        m.teamCustomerId ??
+        m.team_customer_id ??
+        (m.team && m.team.id) ??
+        null;
+      return pfNormalizeTeamId(rawTeamId) === normTeamId;
+    });
+  } catch (e) {
+    console.warn('isCustomerMemberOfTeam():', e?.response?.data || e.message);
+    return false;
+  }
+}
+
 
 // 🔹 NYTT: Admin-kontroll via kundtaggar
 async function isAdminCustomer(customerId) {
@@ -4213,6 +4283,7 @@ async function isAdminCustomer(customerId) {
     return false;
   }
 }
+
 
 // 🔹 Hjälp: bestäm om order ska räknas som levererad (oförändrad)
 function isDeliveredOrderShape(o) {
@@ -4323,53 +4394,91 @@ app.get('/proxy/orders-meta', async (req, res) => {
       }
     }
 
-    // ===== KUND-/TEAM-LÄGE: Postgres ONLY =====
-    if (typeof listOrderSnapshotsForCustomer !== 'function') {
-      console.error('[orders-meta] listOrderSnapshotsForCustomer saknas – kan inte svara i kundläge');
-      return res.status(500).json({ error: 'snapshot_not_available' });
-    }
+// ===== KUND-/TEAM-LÄGE: Postgres ONLY =====
+if (typeof listOrderSnapshotsForCustomer !== 'function') {
+  console.error('[orders-meta] listOrderSnapshotsForCustomer saknas – kan inte svara i kundläge');
+  return res.status(500).json({ error: 'snapshot_not_available' });
+}
 
-    const snapshots = await listOrderSnapshotsForCustomer(cidNum, limit);
+let snapshots = [];
 
-    // Här kan du välja strategi vid "inga snapshots":
-    //  a) returnera tom lista (ingen fallback → 0 Shopify-anrop, max prestanda)
-    //  b) eller – om du MÅSTE se gamla ordrar – införa en *kontrollerad* engångs-backfill här.
-    //
-    // För att hållas 100% Shopify-fri för läsningar kör vi a):
+// TEAM-SCOPE: /apps/orders-meta?scope=team&teamId=XYZ
+if (scopeParam === 'team') {
+  const normTeamId = pfNormalizeTeamId(teamIdFilter);
 
-    if (!Array.isArray(snapshots) || snapshots.length === 0) {
-      console.log('[orders-meta] 📭 inga snapshots i DB för customer', cidNum, '- returnerar tom orders-lista');
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ orders: [] });
-    }
-
-    const out = snapshots.map((row) => {
-      const orderId   = Number(row.order_id);
-      const metaRaw   = row.metafield_raw;      // EXAKT samma JSON-sträng som i Shopify-order-metafältet
-      const createdAt = row.created_at;
-
-      // om du redan lagt in order_name i tabellen – använd den
-      const orderName = row.order_name || null;
-
-      const info = pfExtractScopeFromOrderProjects(metaRaw);
-
-      return {
-        id: orderId,
-        // 🔑 Viktigt: behåll samma keys som Shopify-responsen
-        name: orderName,              // kan vara null om kolumnen saknas – frontend får fortfarande samma property
-        processedAt: createdAt,
-        metafield: metaRaw,
-        fulfillmentStatus: null,      // finns inte i snapshot ännu – men key måste finnas
-        displayFulfillmentStatus: null,
-        scope: info.scope || 'personal',
-        teamId: info.teamId || null,
-        teamName: info.teamName || null
-      };
-    });
-
-    const scopedOut = applyWorkspaceScopeFilter(out, scopeParam, teamIdFilter);
+  if (!normTeamId) {
+    // frontend ska alltid skicka teamId i team-läge → treat as bad request
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ orders: scopedOut });
+    return res.status(400).json({ error: 'missing_team_id', orders: [] });
+  }
+
+  // Säkerhet: verifiera att inloggad kund är medlem i teamet
+  const isMember = await isCustomerMemberOfTeam(cidNum, normTeamId);
+  if (!isMember) {
+    console.warn('[orders-meta] team-scope access denied for customer', cidNum, 'team', normTeamId);
+    res.setHeader('Cache-Control', 'no-store');
+    // du kan byta till 204 om du hellre vill “låtsas tomt”
+    return res.status(403).json({ orders: [] });
+  }
+
+  if (typeof listOrderSnapshotsForTeam === 'function') {
+    snapshots = await listOrderSnapshotsForTeam(normTeamId, limit);
+  } else {
+    // Fallback om helpern inte finns av någon anledning – behåll gammalt beteende
+    const base = await listOrderSnapshotsForCustomer(cidNum, limit);
+    const baseArr = Array.isArray(base) ? base : [];
+    snapshots = baseArr.filter((row) => {
+      const info = pfExtractScopeFromOrderProjects(row.metafield_raw || row.metafield_json);
+      if ((info.scope || 'personal') !== 'team') return false;
+      const orderTeamId = pfNormalizeTeamId(info.teamId);
+      return orderTeamId === normTeamId;
+    });
+  }
+} else {
+  // PERSONAL-SCOPE (default): Kundens egna ordrar
+  snapshots = await listOrderSnapshotsForCustomer(cidNum, limit);
+}
+
+// Strategi vid "inga snapshots":
+if (!Array.isArray(snapshots) || snapshots.length === 0) {
+  console.log('[orders-meta] 📭 inga snapshots i DB för scope', scopeParam, 'customer', cidNum, 'teamId', teamIdFilter, '- returnerar tom orders-lista');
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ orders: [] });
+}
+
+const out = snapshots.map((row) => {
+  const orderId   = Number(row.order_id);
+  const metaRaw   = row.metafield_raw;      // EXAKT samma JSON-sträng som i Shopify-order-metafältet
+  const createdAt = row.processed_at || row.created_at;
+  const orderName = row.order_name || null;
+
+  const info = pfExtractScopeFromOrderProjects(
+    row.metafield_json && Array.isArray(row.metafield_json)
+      ? row.metafield_json
+      : metaRaw
+  );
+
+  return {
+    id: orderId,
+    // 🔑 Viktigt: behåll samma keys som Shopify-responsen
+    name: orderName,              // kan vara null om kolumnen saknas – frontend får fortfarande samma property
+    processedAt: createdAt,
+    metafield: metaRaw,
+    fulfillmentStatus: null,      // finns inte i snapshot ännu – men key måste finnas
+    displayFulfillmentStatus: null,
+    scope: info.scope || 'personal',
+    teamId: info.teamId || null,
+    teamName: info.teamName || null
+  };
+});
+
+// applyWorkspaceScopeFilter gör fortfarande sista säkerhets-filtret:
+//  - personal → släng ev. team-ordrar som råkat komma med
+//  - team     → dubbel-check på teamId
+const scopedOut = applyWorkspaceScopeFilter(out, scopeParam, teamIdFilter);
+res.setHeader('Cache-Control', 'no-store');
+return res.json({ orders: scopedOut });
+
 
     // OBS: INGEN GraphQL / REST-fallback längre i kund-/team-scope.
     // Shopify anropas bara i admin-läge och på andra routes (checkout, webhooks, osv).
