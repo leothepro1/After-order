@@ -4247,7 +4247,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
 
     valueObj.teams = valueObj.teams || {};
 
-    // ==== DELETE ====
+        // ==== DELETE ====
     if (action === 'delete') {
       const deletingPersonal = !(tType === 'team' && teamCustomerId);
 
@@ -4301,8 +4301,22 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
         }
       }
 
+      // 🆕 NYTT: om vi raderar TEAMETS avatar → nolla team_avatar_url i DB
+      if (!deletingPersonal && tType === 'team' && teamCustomerId) {
+        try {
+          await clearTeamAvatarInMembers(teamCustomerId);
+        } catch (e) {
+          console.warn(
+            '[team_members] clearTeamAvatarInMembers failed for team',
+            teamCustomerId,
+            e?.message || e
+          );
+        }
+      }
+
       return res.json({ ok: true });
     }
+
 
     // ==== SAVE ====
     if (action === 'save') {
@@ -4373,7 +4387,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
         }
       };
 
-      if (existing) {
+          if (existing) {
         await axios.put(
           `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
           { metafield: payload.metafield },
@@ -4400,8 +4414,29 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
         }
       }
 
+      // 🆕 NYTT: om vi uppdaterar TEAMETS avatar → synca URL → team_avatar_url i DB
+      if (tType === 'team' && teamCustomerId) {
+        try {
+          const tid = String(teamCustomerId);
+          const teamMeta = (valueObj.teams && valueObj.teams[tid]) || {};
+          const urlForDb =
+            teamMeta.secure_url ||
+            (meta && meta.secure_url) ||
+            null;
+
+          await syncTeamAvatarToMembers(teamCustomerId, urlForDb);
+        } catch (e) {
+          console.warn(
+            '[team_members] syncTeamAvatarToMembers failed for team',
+            teamCustomerId,
+            e?.message || e
+          );
+        }
+      }
+
       return res.json({ ok: true, value: valueObj });
     }
+
 
     return res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
