@@ -6119,13 +6119,10 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
 
 
 
-// ===== END APP PROXY =====
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
     const payload = verifyAndParseToken(token);
-    // Bakåtkompatibilitet: acceptera tokens utan 'kind' (äldre länkar),
-    // men kräva kind:'proof' om den finns
     if (!payload || (payload.kind && payload.kind !== 'proof')) {
       return res.status(401).json({ error: 'invalid_token' });
     }
@@ -6135,7 +6132,6 @@ app.get('/proof/share/:token', async (req, res) => {
       return res.status(400).json({ error: 'Bad payload' });
     }
 
-    // 🔄 NYTT: DB/Redis först, Shopify endast fallback
     const { projects } = await readOrderProjectsForRead(orderId);
     const proj = (projects || []).find(
       (p) => String(p.lineItemId) === String(lineItemId)
@@ -6147,19 +6143,21 @@ app.get('/proof/share/:token', async (req, res) => {
     );
     if (!share) return res.status(404).json({ error: 'Not found' });
 
-    return res.render('proof-share', {
-      layout: false,
+    // 👇 ENDA RADDEN SOM ÄNDRAS
+    return res.json({
       orderId,
       lineItemId,
       tid,
       project: proj,
       share
     });
+
   } catch (err) {
     console.error('GET /proof/share/:token error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
