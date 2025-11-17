@@ -84,6 +84,7 @@ if (!DATABASE_URL) {
 }
 
 // Generell helper för SELECT/INSERT/UPDATE mot Postgres
+// Generell helper för SELECT/INSERT/UPDATE mot Postgres
 async function pgQuery(text, params) {
   if (!pgPool) {
     throw new Error('pgPool inte initialiserad – saknar DATABASE_URL');
@@ -98,6 +99,8 @@ async function pgQuery(text, params) {
 
 // Tabellnamn för våra snapshots
 const ORDERS_SNAPSHOT_TABLE = 'orders_snapshot';
+// 🔹 NYTT: tabell för Pressify Teams-medlemmar
+const TEAM_MEMBERS_TABLE = 'team_members';
 
 async function ensureOrdersSnapshotTable() {
   if (!pgPool) {
@@ -150,6 +153,37 @@ async function ensureOrdersSnapshotTable() {
 
   await pgQuery(ddl);
 }
+
+// 🔹 NYTT: tabell för team-medlemmar + avatar
+async function ensureTeamMembersTable() {
+  if (!pgPool) {
+    console.warn('[team_members] Hoppar över init – pgPool saknas');
+    return;
+  }
+
+  const ddl = `
+    CREATE TABLE IF NOT EXISTS ${TEAM_MEMBERS_TABLE} (
+      team_id           BIGINT NOT NULL,
+      customer_id       BIGINT NOT NULL,
+      role              TEXT   NOT NULL,
+      status            TEXT   NOT NULL DEFAULT 'active',
+      member_email      TEXT,
+      member_avatar_url TEXT,
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (team_id, customer_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_team_members_team
+      ON ${TEAM_MEMBERS_TABLE}(team_id);
+
+    CREATE INDEX IF NOT EXISTS idx_team_members_customer
+      ON ${TEAM_MEMBERS_TABLE}(customer_id);
+  `;
+
+  await pgQuery(ddl);
+}
+
 
 
 
@@ -265,6 +299,7 @@ function startOrdersSnapshotBackfillOnBoot() {
 
 // Kör init/migration vid start, och därefter backfill (en gång)
 ensureOrdersSnapshotTable()
+  .then(() => ensureTeamMembersTable())          // 🔹 NYTT
   .then(() => {
     startOrdersSnapshotBackfillOnBoot();
   })
@@ -272,6 +307,7 @@ ensureOrdersSnapshotTable()
     console.error('[orders_snapshot] init-fel:', err?.message || err);
   });
 // ========================================================================
+
 
 // överst bland konfig:
 // Publik butik (för delningslänkar 
@@ -1827,6 +1863,7 @@ async function findCustomerIdByEmail(email) {
 }
 
 // Hjälpare: se till att befintliga kunder får memberships[] uppdaterat när de bjuds in till ett team
+// Hjälpare: se till att befintliga kunder får memberships[] uppdaterat när de bjuds in till ett team
 async function syncTeamMembershipForExistingCustomers(teamCustomerId, teamName, emails) {
   if (!Array.isArray(emails) || !emails.length) return;
 
@@ -1867,6 +1904,25 @@ async function syncTeamMembershipForExistingCustomers(teamCustomerId, teamName, 
       });
 
       await writeCustomerTeams(cidNum, value);
+
+      // 🔹 NYTT: spegla medlemmen till team_members-tabellen
+      try {
+        const avatarUrl = await getCustomerAvatarUrl(cidNum);
+        await upsertTeamMemberRow({
+          teamId: teamCustomerId,
+          customerId: cidNum,
+          role: 'member',
+          status: 'active',
+          email,
+          avatarUrl: avatarUrl || null
+        });
+      } catch (e2) {
+        console.warn(
+          '[team_members] sync: kunde inte uppdatera row för',
+          email,
+          e2?.message || e2
+        );
+      }
     } catch (err) {
       console.error(
         'syncTeamMembershipForExistingCustomers error for',
@@ -1876,6 +1932,7 @@ async function syncTeamMembershipForExistingCustomers(teamCustomerId, teamName, 
     }
   }
 }
+
 
 // Ta bort felaktiga email så att Shopify inte försöker koppla kund eller trigga moms/discount-regler fel
 function purgeInvalidEmails(payload) {
@@ -2672,6 +2729,122 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
   }
 }
 
+async function listOrderSnapshotsForTeam(teamId, limit = 50) {
+  if (!pgPool) return [];
+
+  try {
+    const normTeamId = pfNormalizeTeamId(teamId);
+    if (!normTeamId) return [];
+
+    const first = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
+    const sql = `
+      SELECT
+        order_id,
+        customer_id,
+        customer_email,
+        processed_at,
+        created_at,
+        order_name,
+        metafield_raw,
+        metafield_json,
+        fulfillment_status,
+        display_fulfillment_status,
+        pressify_scope,
+        pressify_team_id
+      FROM ${ORDERS_SNAPSHOT_TABLE}
+      WHERE pressify_scope = 'team'
+        AND pressify_team_id = $1
+      ORDER BY COALESCE(processed_at, created_at) DESC
+      LIMIT $2
+    `;
+    const { rows } = await pgQuery(sql, [normTeamId, first]);
+    return rows || [];
+  } catch (e) {
+    console.error('[orders_snapshot] listOrderSnapshotsForTeam error:', e?.response?.data || e.message);
+    return [];
+  }
+}
+
+
+
+// 🔹 NYTT: Helpers för Pressify Teams-medlemmar i Postgres
+async function upsertTeamMemberRow({
+  teamId,
+  customerId,
+  role = 'member',
+  status = 'active',
+  email = null,
+  avatarUrl = null
+} = {}) {
+  if (!pgPool) return;
+
+  const tId = Number(pfNormalizeTeamId(teamId));
+  const cId = Number(normalizeCustomerId(customerId));
+  if (!tId || !cId) return;
+
+  const sql = `
+    INSERT INTO ${TEAM_MEMBERS_TABLE} (
+      team_id,
+      customer_id,
+      role,
+      status,
+      member_email,
+      member_avatar_url,
+      created_at,
+      updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+    ON CONFLICT (team_id, customer_id) DO UPDATE SET
+      role              = EXCLUDED.role,
+      status            = EXCLUDED.status,
+      member_email      = COALESCE(EXCLUDED.member_email,      ${TEAM_MEMBERS_TABLE}.member_email),
+      member_avatar_url = COALESCE(EXCLUDED.member_avatar_url, ${TEAM_MEMBERS_TABLE}.member_avatar_url),
+      updated_at        = NOW()
+  `;
+
+  await pgQuery(sql, [tId, cId, role, status, email, avatarUrl]);
+}
+
+async function markTeamMemberRemoved(teamId, customerId) {
+  if (!pgPool) return;
+
+  const tId = Number(pfNormalizeTeamId(teamId));
+  const cId = Number(normalizeCustomerId(customerId));
+  if (!tId || !cId) return;
+
+  const sql = `
+    UPDATE ${TEAM_MEMBERS_TABLE}
+    SET status = 'removed',
+        updated_at = NOW()
+    WHERE team_id = $1 AND customer_id = $2
+  `;
+  await pgQuery(sql, [tId, cId]);
+}
+
+async function listTeamMembersForTeam(teamId) {
+  if (!pgPool) return [];
+
+  const tId = Number(pfNormalizeTeamId(teamId));
+  if (!tId) return [];
+
+  const sql = `
+    SELECT
+      team_id,
+      customer_id,
+      role,
+      status,
+      member_email,
+      member_avatar_url,
+      created_at,
+      updated_at
+    FROM ${TEAM_MEMBERS_TABLE}
+    WHERE team_id = $1
+      AND status <> 'removed'
+    ORDER BY created_at ASC
+  `;
+  const { rows } = await pgQuery(sql, [tId]);
+  return rows || [];
+}
 
 
 // ========================================================================
@@ -4369,9 +4542,49 @@ async function isAdminCustomer(customerId) {
   }
 }
 
+// 🔹 NYTT: hämta avatar-URL från Profilbild.Profilbild-metafältet
+async function getCustomerAvatarUrl(customerId) {
+  if (!SHOP || !ACCESS_TOKEN) return null;
+  const cid = normalizeCustomerId(customerId);
+  if (!cid) return null;
+
+  try {
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/customers/${cid}/metafields.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+
+    const mf = (data.metafields || []).find(
+      (m) => m.namespace === 'Profilbild' && m.key === 'Profilbild'
+    );
+    if (!mf || !mf.value) return null;
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(mf.value);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const personal = parsed.personal || parsed;
+    const url =
+      personal.secure_url ||
+      parsed.secure_url ||
+      personal.url ||
+      null;
+
+    return url || null;
+  } catch (e) {
+    console.warn('getCustomerAvatarUrl(): kunde inte läsa metafält', e?.response?.data || e.message);
+    return null;
+  }
+}
+
 
 // 🔹 Hjälp: bestäm om order ska räknas som levererad (oförändrad)
 function isDeliveredOrderShape(o) {
+
   const disp = String(o.displayFulfillmentStatus || o.display_delivery_status || '').toUpperCase();
   const fs   = String(o.fulfillmentStatus || '').toUpperCase();
   if (disp === 'DELIVERED' || fs === 'FULFILLED') return true;
@@ -5164,7 +5377,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
     //   "teamName": "ICA Maxi",
     //   "ownerCustomerId": 11111,
     //   "members": [
-    //     { "customerId": 11111, "email": "agare@...", "role": "owner" }
+    //     { "customerId": 11111, "email": "agare@.", "role": "owner" }
     //   ]
     // }
     const teamMetaValue = {
@@ -5212,7 +5425,22 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
       });
     }
 
-       await writeCustomerTeams(ownerIdNum, ownerValue);
+    await writeCustomerTeams(ownerIdNum, ownerValue);
+
+    // 🔹 NYTT: Spegla ägaren till team_members-tabellen (DB-projektion)
+    try {
+      const avatarUrl = await getCustomerAvatarUrl(ownerIdNum);
+      await upsertTeamMemberRow({
+        teamId: teamCustomerId,
+        customerId: ownerIdNum,
+        role: 'owner',
+        status: 'active',
+        email: ownerEmail || finalTeamEmail,
+        avatarUrl: avatarUrl || null
+      });
+    } catch (e) {
+      console.warn('[team_members] create: kunde inte uppdatera owner-row', e?.message || e);
+    }
 
     // 8) Svar till frontend – UI läser sedan från metafält
     return res.json({
@@ -5223,6 +5451,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
         ownerCustomerId: ownerIdNum
       }
     });
+
   } catch (err) {
     console.error('POST /proxy/orders-meta/teams/create error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
@@ -5373,6 +5602,60 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
   }
 });
 
+// NYTT: Hämta medlemmar för ett team från DB-projektionen
+// GET /proxy/orders-meta/teams/members?teamCustomerId=123&logged_in_customer_id=...
+app.get('/proxy/orders-meta/teams/members', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
+
+    const teamCustomerIdRaw =
+      req.query.teamCustomerId ||
+      req.query.team_customer_id ||
+      null;
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
+      : null;
+
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'missing_team_customer_id' });
+    }
+
+    // 2) Säkerhet: bara medlemmar/admin får läsa
+    const isMember = await isCustomerMemberOfTeam(loggedInCustomerId, teamCustomerId);
+    const isAdmin  = await isAdminCustomer(loggedInCustomerId);
+    if (!isMember && !isAdmin) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    // 3) Läs från Postgres
+    const rows = await listTeamMembersForTeam(teamCustomerId);
+
+    return res.json({
+      ok: true,
+      teamId: pfNormalizeTeamId(teamCustomerId),
+      members: rows.map(r => ({
+        teamId: String(r.team_id),
+        customerId: String(r.customer_id),
+        role: r.role,
+        status: r.status,
+        email: r.member_email || null,
+        avatarUrl: r.member_avatar_url || null
+      }))
+    });
+  } catch (err) {
+    console.error('GET /proxy/orders-meta/teams/members error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
 
 
 // ===== END APP PROXY =====
