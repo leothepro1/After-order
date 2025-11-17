@@ -318,14 +318,6 @@ function pfNormalizeTeamId(raw) {
   }
 }
 
-/**
- * Läser ORDER_META-JSON (array med projekt) och plockar ut:
- *  - _pf_scope ("personal" | "team")
- *  - _pf_team_id (som ren siffra)
- *  - _pf_team_name
- *
- * Default: { scope: "personal", teamId: null, teamName: null }
- */
 function pfExtractScopeFromOrderProjects(projectsRaw) {
   let scope = 'personal';
   let teamId = null;
@@ -356,28 +348,54 @@ function pfExtractScopeFromOrderProjects(projectsRaw) {
   for (const p of arr) {
     if (!p || typeof p !== 'object') continue;
 
-    const rawScope = String(
-      p._pf_scope ||
-      p.scope ||
-      p.pressify_scope ||
-      ''
-    ).toLowerCase();
+    // 1) Försök läsa direkt på objektet (bakåtkompatibelt)
+    let rawScope =
+      p._pf_scope ??
+      p.scope ??
+      p.pressify_scope ??
+      null;
 
-    if (rawScope !== 'team') continue;
-
-    const rawTeamId =
+    let rawTeamId =
       p._pf_team_id ??
       p.teamId ??
       p.team_id ??
       p.pressify_team_id ??
       null;
 
-    const rawTeamName =
+    let rawTeamName =
       p._pf_team_name ??
       p.teamName ??
       p.team_name ??
       p.pressify_team_name ??
       null;
+
+    // 2) Om inget hittades – försök i p.properties (array med { name, value })
+    if ((!rawScope || rawScope === '') || !rawTeamId || !rawTeamName) {
+      if (Array.isArray(p.properties)) {
+        for (const prop of p.properties) {
+          if (!prop || typeof prop !== 'object') continue;
+          const key = String(prop.name || prop.key || '').trim();
+          const val = prop.value;
+
+          if (!key) continue;
+
+          if (!rawScope && (key === '_pf_scope' || key === 'pf_scope' || key === 'scope')) {
+            rawScope = val;
+          }
+
+          if (!rawTeamId && (key === '_pf_team_id' || key === 'pf_team_id' || key === 'team_id')) {
+            rawTeamId = val;
+          }
+
+          if (!rawTeamName && (key === '_pf_team_name' || key === 'pf_team_name' || key === 'team_name')) {
+            rawTeamName = val;
+          }
+        }
+      }
+    }
+
+    rawScope = String(rawScope || '').toLowerCase();
+    if (rawScope !== 'team') continue;
 
     scope = 'team';
     teamId = pfNormalizeTeamId(rawTeamId);
@@ -387,6 +405,7 @@ function pfExtractScopeFromOrderProjects(projectsRaw) {
 
   return { scope, teamId, teamName };
 }
+
 
 /**
  * Bygger:
