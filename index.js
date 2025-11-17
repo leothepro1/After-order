@@ -2896,6 +2896,7 @@ async function listTeamMembersForTeam(teamId) {
       status,
       member_email,
       member_avatar_url,
+      team_avatar_url,
       created_at,
       updated_at
     FROM ${TEAM_MEMBERS_TABLE}
@@ -5817,8 +5818,6 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
   }
 });
 
-// NYTT: Hämta medlemmar för ett team från DB-projektionen
-// GET /proxy/orders-meta/teams/members?teamCustomerId=123&logged_in_customer_id=...
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   try {
     // 1) Verifiera App Proxy-signatur
@@ -5863,7 +5862,9 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
         role: r.role,
         status: r.status,
         email: r.member_email || null,
-        avatarUrl: r.member_avatar_url || null
+        avatarUrl: r.team_avatar_url || r.member_avatar_url || null,
+        teamAvatarUrl: r.team_avatar_url || null,
+        memberAvatarUrl: r.member_avatar_url || null
       }))
     });
   } catch (err) {
