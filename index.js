@@ -5894,25 +5894,33 @@ app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
     }
 
     // 4) Identifiera medlemmen som ska tas bort
-    const memberCustomerIdRaw =
-      body.memberCustomerId ||
-      body.member_customer_id ||
-      null;
-    const memberCustomerId = memberCustomerIdRaw
-      ? String(memberCustomerIdRaw).split('/').pop()
-      : null;
+  // 4) Identifiera medlemmen som ska tas bort
+let memberCustomerIdRaw =
+  body.memberCustomerId ||
+  body.member_customer_id ||
+  null;
 
-    const memberEmailRaw =
-      body.memberEmail ||
-      body.member_email ||
-      null;
-    const memberEmail = memberEmailRaw
-      ? String(memberEmailRaw).trim().toLowerCase()
-      : null;
+let memberCustomerId = null;
+if (memberCustomerIdRaw != null) {
+  const tmp = String(memberCustomerIdRaw).split('/').pop().trim();
+  // Ignorera "null", "undefined" och tom sträng – de ska inte tolkas som riktiga id:n
+  if (tmp && tmp !== 'null' && tmp !== 'undefined') {
+    memberCustomerId = tmp;
+  }
+}
 
-    if (!memberCustomerId && !memberEmail) {
-      return res.status(400).json({ error: 'missing_member_identifier' });
-    }
+const memberEmailRaw =
+  body.memberEmail ||
+  body.member_email ||
+  null;
+const memberEmail = memberEmailRaw
+  ? String(memberEmailRaw).trim().toLowerCase()
+  : null;
+
+if (!memberCustomerId && !memberEmail) {
+  return res.status(400).json({ error: 'missing_member_identifier' });
+}
+
 
     // 5) Läs teamets metafält och kontrollera behörighet
     const teamMeta = await readCustomerTeams(teamCustomerId);
@@ -5929,33 +5937,35 @@ app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
       return res.status(403).json({ error: 'not_team_owner' });
     }
 
-    const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
-    let removedMember = null;
+ const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
+let removedMember = null;
 
-    const filteredMembers = members.filter(m => {
-      if (!m) return true;
+const filteredMembers = members.filter(m => {
+  if (!m) return true;
 
-      const cid = m.customerId != null ? String(m.customerId) : null;
-      const email = m.email ? String(m.email).trim().toLowerCase() : null;
+  const cid = m.customerId != null ? String(m.customerId) : null;
+  const email = m.email ? String(m.email).trim().toLowerCase() : null;
 
-      const matchByCustomerId =
-        memberCustomerId && cid && String(cid) === String(memberCustomerId);
-      const matchByEmail =
-        memberEmail && email && email === memberEmail;
+  // Vi försöker matcha både på customerId (om vi har ett giltigt sådant)
+  // och på e-post (om vi har den)
+  const matchByCustomerId =
+    memberCustomerId && cid && cid === memberCustomerId;
+  const matchByEmail =
+    memberEmail && email && email === memberEmail;
 
-      if (matchByCustomerId || matchByEmail) {
-        if (!removedMember) {
-          removedMember = m;
-        }
-        return false;
-      }
-
-      return true;
-    });
-
+  if (matchByCustomerId || matchByEmail) {
     if (!removedMember) {
-      return res.status(404).json({ error: 'member_not_found' });
+      removedMember = m;
     }
+    return false;
+  }
+
+  return true;
+});
+
+if (!removedMember) {
+  return res.status(404).json({ error: 'member_not_found' });
+}
 
     // Tillåt inte att man tar bort ägaren via denna endpoint
     if (String(removedMember.role || '').toLowerCase() === 'owner') {
@@ -6070,21 +6080,23 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
     // 3) Läs från Postgres
     const rows = await listTeamMembersForTeam(teamCustomerId);
 
-    return res.json({
-      ok: true,
-      teamId: pfNormalizeTeamId(teamCustomerId),
-      members: rows.map(r => ({
-        teamId: String(r.team_id),
-        customerId: String(r.customer_id),
-        role: r.role,
-        status: r.status,
-        email: r.member_email || null,
-        // 🔁 Viktigt: visa alltid PERSONLIG avatar i "medlemslistan”
-        avatarUrl: r.member_avatar_url || r.team_avatar_url || null,
-        teamAvatarUrl: r.team_avatar_url || null,
-        memberAvatarUrl: r.member_avatar_url || null
-      }))
-    });
+  return res.json({
+  ok: true,
+  teamId: pfNormalizeTeamId(teamCustomerId),
+  members: rows.map(r => ({
+    teamId: String(r.team_id),
+    // Viktigt: om customer_id är NULL i DB ska vi INTE få "null" (string) här
+    customerId: r.customer_id != null ? String(r.customer_id) : null,
+    role: r.role,
+    status: r.status,
+    email: r.member_email || null,
+    // 🔁 Viktigt: visa alltid PERSONLIG avatar i "medlemslistan”
+    avatarUrl: r.member_avatar_url || r.team_avatar_url || null,
+    teamAvatarUrl: r.team_avatar_url || null,
+    memberAvatarUrl: r.member_avatar_url || null
+  }))
+});
+
   } catch (err) {
     console.error('GET /proxy/orders-meta/teams/members error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
