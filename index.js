@@ -117,14 +117,17 @@ async function ensureOrdersSnapshotTable() {
       metafield_json JSONB NOT NULL
     );
 
-    -- Nya kolumner för scout/Teams (läggs bara om de saknas)
+    -- Nya kolumner för scout/Teams + totalsummor (läggs bara om de saknas)
     ALTER TABLE ${ORDERS_SNAPSHOT_TABLE}
       ADD COLUMN IF NOT EXISTS order_name                 TEXT,
-      ADD COLUMN IF NOT EXISTS processed_at              TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS fulfillment_status        TEXT,
+      ADD COLUMN IF NOT EXISTS processed_at               TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS fulfillment_status         TEXT,
       ADD COLUMN IF NOT EXISTS display_fulfillment_status TEXT,
-      ADD COLUMN IF NOT EXISTS pressify_scope            TEXT,
-      ADD COLUMN IF NOT EXISTS pressify_team_id          TEXT;
+      ADD COLUMN IF NOT EXISTS pressify_scope             TEXT,
+      ADD COLUMN IF NOT EXISTS pressify_team_id           TEXT,
+      ADD COLUMN IF NOT EXISTS order_total_price          NUMERIC,
+      ADD COLUMN IF NOT EXISTS order_currency             TEXT,
+      ADD COLUMN IF NOT EXISTS line_totals_json           JSONB;
 
     -- Befintliga index (kund + e-post + tid)
     CREATE INDEX IF NOT EXISTS idx_orders_snapshot_customer_id
@@ -147,6 +150,7 @@ async function ensureOrdersSnapshotTable() {
 
   await pgQuery(ddl);
 }
+
 
 
 // Styr om backfill ska köras automatiskt när servern startar
@@ -2453,6 +2457,64 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
   const pressifyScope   = scopeInfo.scope  || 'personal';
   const pressifyTeamId  = scopeInfo.teamId || null;
 
+  // === NYTT: valuta + totalsummor (hel order + per rad/produkt) ===
+  const currencyFromLine =
+    Array.isArray(order?.line_items) && order.line_items[0]?.price_set?.shop_money?.currency_code;
+
+  const orderCurrency =
+    order?.currency ||
+    order?.presentment_currency ||
+    currencyFromLine ||
+    null;
+
+  // Orderns totalsumma
+  let orderTotalPrice = null;
+  if (order?.total_price_set?.shop_money?.amount != null) {
+    const n = Number(order.total_price_set.shop_money.amount);
+    if (Number.isFinite(n)) orderTotalPrice = n;
+  } else if (order?.total_price != null) {
+    const n = Number(order.total_price);
+    if (Number.isFinite(n)) orderTotalPrice = n;
+  } else if (Array.isArray(order?.line_items) && order.line_items.length) {
+    let sum = 0;
+    for (const li of order.line_items) {
+      const rawLine =
+        li.total_discounted_price_set?.shop_money?.amount ??
+        li.line_price ??
+        (Number(li.price || 0) * Number(li.quantity || 0));
+      const n = Number(rawLine);
+      if (Number.isFinite(n)) sum += n;
+    }
+    orderTotalPrice = sum;
+  }
+
+  // Summa per rad/produkt (lagras som JSONB)
+  let lineTotalsJson = null;
+  if (Array.isArray(order?.line_items) && order.line_items.length) {
+    const arr = order.line_items.map((li) => {
+      const rawLine =
+        li.total_discounted_price_set?.shop_money?.amount ??
+        li.line_price ??
+        (Number(li.price || 0) * Number(li.quantity || 0));
+      const n = Number(rawLine);
+
+      return {
+        line_item_id: li.id || null,
+        sku: li.sku || null,
+        title: li.title || li.name || null,
+        quantity: li.quantity || 0,
+        total_price: Number.isFinite(n) ? n : null,
+        currency: orderCurrency
+      };
+    });
+
+    try {
+      lineTotalsJson = JSON.stringify(arr);
+    } catch {
+      lineTotalsJson = null;
+    }
+  }
+
   await pgQuery(
     `
     INSERT INTO ${ORDERS_SNAPSHOT_TABLE} (
@@ -2468,9 +2530,12 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
       fulfillment_status,
       display_fulfillment_status,
       pressify_scope,
-      pressify_team_id
+      pressify_team_id,
+      order_total_price,
+      order_currency,
+      line_totals_json
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
     ON CONFLICT (order_id) DO UPDATE SET
       customer_id                = EXCLUDED.customer_id,
       customer_email             = EXCLUDED.customer_email,
@@ -2483,7 +2548,10 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
       fulfillment_status         = COALESCE(EXCLUDED.fulfillment_status, ${ORDERS_SNAPSHOT_TABLE}.fulfillment_status),
       display_fulfillment_status = COALESCE(EXCLUDED.display_fulfillment_status, ${ORDERS_SNAPSHOT_TABLE}.display_fulfillment_status),
       pressify_scope             = COALESCE(EXCLUDED.pressify_scope, ${ORDERS_SNAPSHOT_TABLE}.pressify_scope),
-      pressify_team_id           = COALESCE(EXCLUDED.pressify_team_id, ${ORDERS_SNAPSHOT_TABLE}.pressify_team_id)
+      pressify_team_id           = COALESCE(EXCLUDED.pressify_team_id, ${ORDERS_SNAPSHOT_TABLE}.pressify_team_id),
+      order_total_price          = COALESCE(EXCLUDED.order_total_price, ${ORDERS_SNAPSHOT_TABLE}.order_total_price),
+      order_currency             = COALESCE(EXCLUDED.order_currency, ${ORDERS_SNAPSHOT_TABLE}.order_currency),
+      line_totals_json           = COALESCE(EXCLUDED.line_totals_json, ${ORDERS_SNAPSHOT_TABLE}.line_totals_json)
     `,
     [
       orderId,
@@ -2491,14 +2559,17 @@ async function upsertOrderSnapshotFromMetafield(order, metafieldValue) {
       customerEmail,
       createdAt,
       updatedAt,
-      raw,        // 1:1 Shopify-sträng
-      jsonText,   // alltid giltig JSON-text
+      raw,             // 1:1 Shopify-sträng
+      jsonText,        // alltid giltig JSON-text
       orderName,
       processedAt,
       fulfillmentStatus,
       displayFulfillmentStatus,
       pressifyScope,
-      pressifyTeamId
+      pressifyTeamId,
+      orderTotalPrice,
+      orderCurrency,
+      lineTotalsJson
     ]
   );
 }
