@@ -5855,7 +5855,6 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
 
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   try {
-    // 1) Verifiera App Proxy-signatur
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
@@ -5866,24 +5865,28 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
     }
     const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
 
-    const teamCustomerIdRaw =
+      const teamCustomerIdRaw =
       req.query.teamCustomerId ||
       req.query.team_customer_id ||
+      null;
 
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
       : null;
+
 
     if (!teamCustomerId) {
       return res.status(400).json({ error: 'missing_team_customer_id' });
     }
 
-    // 2) Säkerhet: bara medlemmar/admin får läsa
+
     const isMember = await isCustomerMemberOfTeam(loggedInCustomerId, teamCustomerId);
     const isAdmin  = await isAdminCustomer(loggedInCustomerId);
     if (!isMember && !isAdmin) {
       return res.status(403).json({ error: 'forbidden' });
     }
 
-    // 3) Läs från Postgres
+
     const rows = await listTeamMembersForTeam(teamCustomerId);
 
     return res.json({
@@ -5895,9 +5898,7 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
         role: r.role,
         status: r.status,
         email: r.member_email || null,
-        // ⬅️ NU: avatarUrl = PERSONLIGA avataren
         avatarUrl: r.member_avatar_url || null,
-        // Teamets gemensamma avatar skickas separat
         teamAvatarUrl: r.team_avatar_url || null,
         memberAvatarUrl: r.member_avatar_url || null
       }))
@@ -5908,8 +5909,7 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   }
 });
 
-// NYTT: Byt roll på en befintlig teammedlem
-// POST /proxy/orders-meta/teams/role (via App Proxy: /apps/orders-meta/teams/role)
+
 // Body: { teamCustomerId, memberCustomerId, role }
 app.post('/proxy/orders-meta/teams/role', async (req, res) => {
   try {
