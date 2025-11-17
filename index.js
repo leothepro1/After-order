@@ -5711,7 +5711,7 @@ app.post('/proxy/orders-meta/teams/create', async (req, res) => {
 
 // NYTT: Bjud in medlemmar till ett befintligt teamkonto
 // POST /proxy/orders-meta/teams/invite  (via App Proxy: /apps/orders-meta/teams/invite)
-// Body: { teamCustomerId, emails: ["a@...", "b@..."] }
+// Body: { teamCustomerId, emails: ["a@.", "b@."] }
 //
 // Effekt:
 // 1) Alla giltiga mailadresser läggs in i teamets metafält (teamValue.members[])
@@ -5853,6 +5853,188 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
   }
 });
 
+// NYTT: Ta bort medlem från ett befintligt teamkonto
+// POST /proxy/orders-meta/teams/remove  (via App Proxy: /apps/orders-meta/teams/remove)
+// Body: { teamCustomerId, memberCustomerId?, memberEmail? }
+//
+// Effekt:
+// 1) Tar bort medlemmen ur teamets metafält (teamValue.members[])
+// 2) Markerar medlemmen som 'removed' i team_members-tabellen (DB-projektion)
+// 3) Försöker ta bort teamet från medlemmens egna memberships[]-metafält
+app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
+  try {
+    // 1) Verifiera att anropet kommer via Shopify App Proxy
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund (ägare av teamet) eller admin
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
+
+    const body = req.body || {};
+
+    // 3) Identifiera team-kontot
+    const teamCustomerIdRaw =
+      body.teamCustomerId ||
+      body.team_customer_id ||
+      req.query.teamCustomerId ||
+      req.query.team_customer_id ||
+      null;
+
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
+      : null;
+
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'missing_team_customer_id' });
+    }
+
+    // 4) Identifiera medlemmen som ska tas bort
+    const memberCustomerIdRaw =
+      body.memberCustomerId ||
+      body.member_customer_id ||
+      null;
+    const memberCustomerId = memberCustomerIdRaw
+      ? String(memberCustomerIdRaw).split('/').pop()
+      : null;
+
+    const memberEmailRaw =
+      body.memberEmail ||
+      body.member_email ||
+      null;
+    const memberEmail = memberEmailRaw
+      ? String(memberEmailRaw).trim().toLowerCase()
+      : null;
+
+    if (!memberCustomerId && !memberEmail) {
+      return res.status(400).json({ error: 'missing_member_identifier' });
+    }
+
+    // 5) Läs teamets metafält och kontrollera behörighet
+    const teamMeta = await readCustomerTeams(teamCustomerId);
+    const teamValue = teamMeta?.value || null;
+
+    if (!teamValue || !teamValue.isTeam) {
+      return res.status(400).json({ error: 'not_a_team_account' });
+    }
+
+    const isOwner = Number(teamValue.ownerCustomerId) === Number(loggedInCustomerId);
+    const isAdmin = await isAdminCustomer(loggedInCustomerId);
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'not_team_owner' });
+    }
+
+    const members = Array.isArray(teamValue.members) ? teamValue.members.slice() : [];
+    let removedMember = null;
+
+    const filteredMembers = members.filter(m => {
+      if (!m) return true;
+
+      const cid = m.customerId != null ? String(m.customerId) : null;
+      const email = m.email ? String(m.email).trim().toLowerCase() : null;
+
+      const matchByCustomerId =
+        memberCustomerId && cid && String(cid) === String(memberCustomerId);
+      const matchByEmail =
+        memberEmail && email && email === memberEmail;
+
+      if (matchByCustomerId || matchByEmail) {
+        if (!removedMember) {
+          removedMember = m;
+        }
+        return false;
+      }
+
+      return true;
+    });
+
+    if (!removedMember) {
+      return res.status(404).json({ error: 'member_not_found' });
+    }
+
+    // Tillåt inte att man tar bort ägaren via denna endpoint
+    if (String(removedMember.role || '').toLowerCase() === 'owner') {
+      return res.status(400).json({ error: 'cannot_remove_owner' });
+    }
+
+    // 6) Spara uppdaterat team-metakonto
+    teamValue.members = filteredMembers;
+    await writeCustomerTeams(teamCustomerId, teamValue);
+
+    // 7) Uppdatera DB-projektionen (team_members-tabellen)
+    if (removedMember.customerId) {
+      try {
+        await markTeamMemberRemoved(teamCustomerId, removedMember.customerId);
+      } catch (e) {
+        console.warn(
+          '[team_members] remove: markTeamMemberRemoved failed',
+          e?.message || e
+        );
+      }
+    }
+
+    // 8) Försök uppdatera den borttagna medlemmens personliga TEAMS-metafält
+    if (removedMember.customerId) {
+      try {
+        const memberId = removedMember.customerId;
+        const memberMeta = await readCustomerTeams(memberId);
+        let memberValue = memberMeta.value;
+
+        if (!memberValue || typeof memberValue !== 'object') {
+          memberValue = {};
+        }
+
+        if (Array.isArray(memberValue.memberships) && memberValue.memberships.length > 0) {
+          const beforeLen = memberValue.memberships.length;
+          memberValue.memberships = memberValue.memberships.filter(m => {
+            const rawTeamId =
+              m.teamCustomerId ??
+              m.team_customer_id ??
+              (m.team && m.team.id) ??
+              null;
+
+            if (!rawTeamId) return true;
+
+            const a = String(rawTeamId).split('/').pop();
+            const b = String(teamCustomerId).split('/').pop();
+            return a !== b;
+          });
+
+          if (memberValue.memberships.length !== beforeLen) {
+            await writeCustomerTeams(memberId, memberValue);
+          }
+        }
+      } catch (e) {
+        console.warn(
+          '[teams/remove] kunde inte uppdatera medlems personliga metafält',
+          e?.message || e
+        );
+      }
+    }
+
+    return res.json({
+      ok: true,
+      removed: {
+        customerId: removedMember.customerId || null,
+        email: removedMember.email || memberEmail || null,
+        role: removedMember.role || 'member'
+      },
+      team: {
+        id: teamCustomerId,
+        teamName: teamValue.teamName || null
+      }
+    });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/teams/remove error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   try {
     // 1) Verifiera App Proxy-signatur
@@ -5936,63 +6118,24 @@ app.get('/proof/share/:token', async (req, res) => {
     if (!proj) return res.status(404).json({ error: 'Not found' });
 
     const share = (Array.isArray(proj.shares) ? proj.shares : []).find(
-      (s) => s && s.status === 'active' && String(s.tid) === String(tid)
+      (s) => String(s.tid) === String(tid)
     );
-    if (!share) {
-      return res.status(410).json({ error: 'Superseded or revoked' });
-    }
+    if (!share) return res.status(404).json({ error: 'Not found' });
 
-    // Hämta ordersammanfattning (frivilligt) – fortsatt direkt mot Shopify
-    let summary = null;
-    try {
-      const { data: oRes } = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const o = oRes?.order || {};
-      const ship =
-        o.total_shipping_price_set?.presentment_money?.amount ??
-        o.total_shipping_price_set?.shop_money?.amount ??
-        (Array.isArray(o.shipping_lines)
-          ? o.shipping_lines.reduce(
-              (s, ln) => s + parseFloat(ln.price || 0),
-              0
-            )
-          : 0);
-
-      summary = {
-        name: o.name || null,
-        currency: o.currency || 'SEK',
-        subtotal_price: o.subtotal_price || null,
-        shipping_price: ship != null ? String(ship) : null,
-        total_price: o.total_price || null
-      };
-    } catch (e) {
-      console.warn(
-        'share summary fetch failed:',
-        e?.response?.data || e.message
-      );
-    }
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({
-      project: {
-        orderId,
-        lineItemId,
-        ...(proj.orderNumber ? { orderNumber: proj.orderNumber } : {}),
-        ...safeProjectFields(proj)
-      },
-      snapshot: share.snapshot || {},
-      ...(summary ? { summary } : {})
+    return res.render('proof-share', {
+      layout: false,
+      orderId,
+      lineItemId,
+      tid,
+      project: proj,
+      share
     });
-  } catch (e) {
-    console.error(
-      'GET /proof/share/:token error:',
-      e?.response?.data || e.message
-    );
-    return res.status(500).json({ error: 'Kunde inte hämta projekt' });
+  } catch (err) {
+    console.error('GET /proof/share/:token error:', err?.response?.data || err.message);
+    return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
