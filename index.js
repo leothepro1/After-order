@@ -4117,14 +4117,15 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
     const customerId = normalizeCustomerId(loggedInCustomerId);
 
     if (req.method !== 'POST') {
-      // GET kan du låta vara kvar som tidigare om något annat använder den,
-      // men avatar-komponenten använder nu bara metafältet från Liquid.
+      // GET: kvar för ev. annan kod, men avatar-komponenten använder Liquid-metafältet direkt
       if (req.method === 'GET') {
         const mfRes = await axios.get(
           `https://${SHOP}/admin/api/2025-07/customers/${customerId}/metafields.json`,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
-        const mf = (mfRes.data.metafields || []).find(m => m.namespace === 'Profilbild' && m.key === 'Profilbild');
+        const mf = (mfRes.data.metafields || []).find(
+          m => m.namespace === 'Profilbild' && m.key === 'Profilbild'
+        );
         return res.json({ ok: true, metafield: mf ? mf.value : null });
       }
       return res.status(405).json({ error: 'Method not allowed' });
@@ -4143,12 +4144,18 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
     );
 
     let valueObj = {};
-    try { valueObj = existing && existing.value ? JSON.parse(existing.value) : {}; } catch { valueObj = {}; }
+    try {
+      valueObj = existing && existing.value ? JSON.parse(existing.value) : {};
+    } catch {
+      valueObj = {};
+    }
 
     valueObj.teams = valueObj.teams || {};
 
     // ==== DELETE ====
     if (action === 'delete') {
+      const deletingPersonal = !(tType === 'team' && teamCustomerId);
+
       if (tType === 'team' && teamCustomerId) {
         const tid = String(teamCustomerId);
         if (valueObj.teams[tid]) {
@@ -4175,7 +4182,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
       if (existing) {
         await axios.put(
           `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-          { metafield: { id: existing.id, ...payload.metafield } },
+          { metafield: payload.metafield },
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
       } else {
@@ -4184,6 +4191,19 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
           payload,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
+      }
+
+      // 🆕 NYTT: om vi raderar den PERSONLIGA avataren → nolla i DB för alla team
+      if (deletingPersonal) {
+        try {
+          await clearAvatarForCustomerInAllTeams(customerId);
+        } catch (e) {
+          console.warn(
+            '[team_members] clear avatar failed for',
+            customerId,
+            e?.message || e
+          );
+        }
       }
 
       return res.json({ ok: true });
@@ -4212,6 +4232,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
       };
 
       if (tType === 'team' && teamCustomerId) {
+        // Team-avatar (lagras under valueObj.teams[teamCustomerId])
         const tid = String(teamCustomerId);
         const old = valueObj.teams[tid] || {};
         valueObj.teams[tid] = {
@@ -4227,6 +4248,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
           updatedAt:  new Date().toISOString()
         };
       } else {
+        // Personlig avatar (valueObj.personal)
         const old = valueObj.personal || {};
         valueObj.personal = {
           ...old,
@@ -4259,7 +4281,7 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
       if (existing) {
         await axios.put(
           `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-          { metafield: { id: existing.id, ...payload.metafield } },
+          { metafield: payload.metafield },
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
       } else {
@@ -4268,6 +4290,19 @@ app.all('/proxy/orders-meta/avatar', async (req, res) => {
           payload,
           { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
         );
+      }
+
+      // 🆕 NYTT: om vi uppdaterar PERSONLIG avatar → synca URL → team_members
+      if (tType !== 'team') {
+        try {
+          await syncAvatarToTeamMembers(customerId);
+        } catch (e) {
+          console.warn(
+            '[team_members] avatar sync failed for',
+            customerId,
+            e?.message || e
+          );
+        }
       }
 
       return res.json({ ok: true, value: valueObj });
@@ -4425,6 +4460,78 @@ function applyWorkspaceScopeFilter(list, scopeParam, teamIdParam) {
   }
 
   return src;
+}
+// 🆕 Rensa avatar i DB för alla team där kunden är medlem
+async function clearAvatarForCustomerInAllTeams(customerId) {
+  if (!pgPool) return;
+
+  const cid = normalizeCustomerId(customerId);
+  if (!cid) return;
+
+  try {
+    await pgQuery(
+      `UPDATE ${TEAM_MEMBERS_TABLE}
+       SET member_avatar_url = NULL,
+           updated_at = NOW()
+       WHERE customer_id = $1`,
+      [Number(cid)]
+    );
+  } catch (e) {
+    console.warn(
+      '[team_members] clear avatar for customer failed:',
+      customerId,
+      e?.message || e
+    );
+  }
+}
+
+// 🆕 Synka ny personlig avatar till team_members för alla memberships
+async function syncAvatarToTeamMembers(customerId) {
+  if (!pgPool) return;
+
+  const cid = normalizeCustomerId(customerId);
+  if (!cid) return;
+
+  try {
+    // 1) Läs avatar-url från Profilbild.Profilbild
+    const avatarUrl = await getCustomerAvatarUrl(cid);
+
+    // 2) Läs kundens teams-metafält → memberships[]
+    const { value } = await readCustomerTeams(cid);
+    if (!value || typeof value !== 'object') return;
+
+    const memberships = Array.isArray(value.memberships)
+      ? value.memberships
+      : [];
+
+    if (!memberships.length) return;
+
+    for (const m of memberships) {
+      const rawTeamId =
+        m.teamCustomerId ??
+        m.team_customer_id ??
+        (m.team && m.team.id) ??
+        null;
+
+      const teamId = pfNormalizeTeamId(rawTeamId);
+      if (!teamId) continue;
+
+      await upsertTeamMemberRow({
+        teamId,
+        customerId: cid,
+        role: m.role || 'member',
+        status: 'active',
+        email: null,          // email finns inte i memberships–metat här
+        avatarUrl: avatarUrl || null
+      });
+    }
+  } catch (e) {
+    console.warn(
+      '[team_members] avatar-sync: kunde inte synka för',
+      customerId,
+      e?.message || e
+    );
+  }
 }
 
 // ===== TEAMS: helpers för customer.metafields.teams.teams (JSON) =====
