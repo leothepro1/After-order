@@ -2531,8 +2531,7 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
         fulfillment_status,
         display_fulfillment_status,
         pressify_scope,
-        pressify_team_id,
-        pressify_team_name
+        pressify_team_id
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE customer_id = $1
       ORDER BY COALESCE(processed_at, created_at) DESC
@@ -2546,11 +2545,7 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
   }
 }
 
-/**
- * Hämta snapshots för ett TEAM:
- *  - pressify_scope = 'team'
- *  - pressify_team_id = teamId (normaliserat)
- */
+
 async function listOrderSnapshotsForTeam(teamId, limit = 50) {
   if (!pgPool) return [];
 
@@ -2572,8 +2567,7 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
         fulfillment_status,
         display_fulfillment_status,
         pressify_scope,
-        pressify_team_id,
-        pressify_team_name
+        pressify_team_id
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE pressify_scope = 'team'
         AND pressify_team_id = $1
@@ -2587,6 +2581,7 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
     return [];
   }
 }
+
 
 
 // ========================================================================
