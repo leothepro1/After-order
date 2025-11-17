@@ -169,6 +169,8 @@ async function ensureTeamMembersTable() {
       status            TEXT   NOT NULL DEFAULT 'active',
       member_email      TEXT,
       member_avatar_url TEXT,
+      -- 🆕: samma värde för alla rader i samma team, används som "teamets avatar"
+      team_avatar_url   TEXT,
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (team_id, customer_id)
@@ -179,10 +181,15 @@ async function ensureTeamMembersTable() {
 
     CREATE INDEX IF NOT EXISTS idx_team_members_customer
       ON ${TEAM_MEMBERS_TABLE}(customer_id);
+
+    -- 🆕: om tabellen redan finns sedan tidigare, se till att kolumnen finns
+    ALTER TABLE ${TEAM_MEMBERS_TABLE}
+      ADD COLUMN IF NOT EXISTS team_avatar_url TEXT;
   `;
 
   await pgQuery(ddl);
 }
+
 
 
 
@@ -2764,6 +2771,60 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
     return [];
   }
 }
+// 🆕: uppdatera team_avatar_url i DB för alla medlemmar i ett team
+async function syncTeamAvatarToMembers(teamCustomerId, urlFromMeta) {
+  if (!pgPool) return;
+
+  const tId = Number(pfNormalizeTeamId(teamCustomerId));
+  if (!tId) return;
+
+  let avatarUrl = urlFromMeta || null;
+
+  // fallback: om vi inte fick URL direkt, läs från Profilbild.Profilbild på team-kontot
+  if (!avatarUrl) {
+    try {
+      avatarUrl = await getCustomerAvatarUrl(tId);
+    } catch (e) {
+      console.warn('[team_members] getCustomerAvatarUrl för team misslyckades:', e?.message || e);
+    }
+  }
+
+  try {
+    await pgQuery(
+      `
+        UPDATE ${TEAM_MEMBERS_TABLE}
+        SET team_avatar_url = $1,
+            updated_at      = NOW()
+        WHERE team_id = $2
+      `,
+      [avatarUrl || null, tId]
+    );
+  } catch (e) {
+    console.warn('[team_members] syncTeamAvatarToMembers failed:', e?.message || e);
+  }
+}
+
+// 🆕: nolla team_avatar_url i DB när team-avatar tas bort
+async function clearTeamAvatarInMembers(teamCustomerId) {
+  if (!pgPool) return;
+
+  const tId = Number(pfNormalizeTeamId(teamCustomerId));
+  if (!tId) return;
+
+  try {
+    await pgQuery(
+      `
+        UPDATE ${TEAM_MEMBERS_TABLE}
+        SET team_avatar_url = NULL,
+            updated_at      = NOW()
+        WHERE team_id = $1
+      `,
+      [tId]
+    );
+  } catch (e) {
+    console.warn('[team_members] clearTeamAvatarInMembers failed:', e?.message || e);
+  }
+}
 
 
 
@@ -3940,87 +4001,120 @@ app.all('/proxy/avatar', async (req, res) => {
       });
     }
 
-    // ===== action: delete =====
-    if (action === 'delete') {
-      if (existing) {
-        await axios.delete(
-          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-      }
-      return res.json({ ok: true, deleted: true });
+if (action === 'delete') {
+  if (existing) {
+    await axios.delete(
+      `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  }
+
+  // 🆕: om vi tar bort TEAMETS avatar → nolla team_avatar_url i DB
+  if (String(targetType || '').toLowerCase() === 'team' && teamCustomerId) {
+    try {
+      await clearTeamAvatarInMembers(teamCustomerId);
+    } catch (e) {
+      console.warn(
+        '[team_members] clearTeamAvatarInMembers failed for team',
+        teamCustomerId,
+        e?.message || e
+      );
     }
+  }
+
+  return res.json({ ok: true, deleted: true });
+}
+
 
     // ===== action: save =====
-    if (action === 'save') {
-      if (
-        !meta ||
-        (
-          !meta.public_id &&
-          !meta.secure_url &&
-          typeof meta.selection === 'undefined' &&
-          typeof meta.marketing === 'undefined' &&
-          typeof meta.role === 'undefined'
-        )
-      ) {
-        return res.status(400).json({ error: 'Invalid meta payload' });
-      }
+if (action === 'save') {
+  if (
+    !meta ||
+    (
+      !meta.public_id &&
+      !meta.secure_url &&
+      typeof meta.selection === 'undefined' &&
+      typeof meta.marketing === 'undefined' &&
+      typeof meta.role === 'undefined'
+    )
+  ) {
+    return res.status(400).json({ error: 'Invalid meta payload' });
+  }
 
-      let existingValue = {};
-      try {
-        existingValue = existing && existing.value ? JSON.parse(existing.value) : {};
-      } catch {
-        existingValue = {};
-      }
+  let existingValue = {};
+  try {
+    existingValue = existing && existing.value ? JSON.parse(existing.value) : {};
+  } catch {
+    existingValue = {};
+  }
 
-      const normalizeBool = (v) => {
-        if (typeof v === 'boolean') return v;
-        if (typeof v === 'number') return v !== 0;
-        if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
-        return false;
-      };
+  const normalizeBool = (v) => {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'number') return v !== 0;
+    if (typeof v === 'string') return /^(true|1|yes|on)$/i.test(v.trim());
+    return false;
+  };
 
-      const valueObj = {
-        // Bildfält – bevara gamla om de inte skickas
-        public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
-        version:    meta.version ?? existingValue.version ?? null,
-        secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
+  const valueObj = {
+    // Bildfält – bevara gamla om de inte skickas
+    public_id:  String(meta.public_id ?? existingValue.public_id ?? ''),
+    version:    meta.version ?? existingValue.version ?? null,
+    secure_url: String(meta.secure_url ?? existingValue.secure_url ?? ''),
 
-        // Övriga fält du redan använder
-        selection:  String(meta.selection ?? existingValue.selection ?? ''),
-        marketing:  (typeof meta.marketing !== 'undefined')
-                      ? normalizeBool(meta.marketing)
-                      : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
-        role:       String(meta.role ?? existingValue.role ?? ''),
+    // Övriga fält du redan använder
+    selection:  String(meta.selection ?? existingValue.selection ?? ''),
+    marketing:  (typeof meta.marketing !== 'undefined')
+                  ? normalizeBool(meta.marketing)
+                  : (typeof existingValue.marketing !== 'undefined' ? !!existingValue.marketing : false),
+    role:       String(meta.role ?? existingValue.role ?? ''),
 
-        updatedAt:  new Date().toISOString()
-      };
+    updatedAt:  new Date().toISOString()
+  };
 
-      const payload = {
-        metafield: {
-          namespace: 'Profilbild',
-          key: 'Profilbild',
-          type: 'json',
-          value: JSON.stringify(valueObj)
-        }
-      };
-
-      if (existing) {
-        await axios.put(
-          `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
-          { metafield: { id: existing.id, ...payload.metafield } },
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-      } else {
-        await axios.post(
-          `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
-          payload,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-      }
-
-      return res.json({ ok: true });
+  const payload = {
+    metafield: {
+      namespace: 'Profilbild',
+      key: 'Profilbild',
+      type: 'json',
+      value: JSON.stringify(valueObj)
     }
+  };
+
+  if (existing) {
+    await axios.put(
+      `https://${SHOP}/admin/api/2025-07/metafields/${existing.id}.json`,
+      { metafield: { id: existing.id, ...payload.metafield } },
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  } else {
+    await axios.post(
+      `https://${SHOP}/admin/api/2025-07/customers/${targetCustomerId}/metafields.json`,
+      payload,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+  }
+
+  // 🆕: om vi sparar TEAMETS avatar → synca till DB så alla medlemmar ser samma
+  if (String(targetType || '').toLowerCase() === 'team' && teamCustomerId) {
+    const urlForDb =
+      (meta && meta.secure_url) ||
+      valueObj.secure_url ||
+      null;
+
+    try {
+      await syncTeamAvatarToMembers(teamCustomerId, urlForDb);
+    } catch (e) {
+      console.warn(
+        '[team_members] syncTeamAvatarToMembers failed for team',
+        teamCustomerId,
+        e?.message || e
+      );
+    }
+  }
+
+  return res.json({ ok: true });
+}
+
 
     return res.status(400).json({ error: 'Unknown action' });
   } catch (err) {
