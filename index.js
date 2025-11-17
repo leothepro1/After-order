@@ -4839,59 +4839,73 @@ app.get('/proxy/orders-meta', async (req, res) => {
     const teamIdFilter = req.query.teamId ? String(req.query.teamId) : null;
 
     // ===== ADMIN-LÄGE: /apps/orders-meta?scope=all → Shopify Admin (oförändrat) =====
-    if (scopeParam === 'all') {
-      try {
-        const q = 'status:any';
-        const query = `
-          query OrdersWithMetafield($first:Int!,$q:String!,$ns:String!,$key:String!){
-            orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
-              edges{
-                node{
-                  id
-                  name
-                  processedAt
-                  fulfillmentStatus
-                  displayFulfillmentStatus
-                  metafield(namespace:$ns, key:$key){ value }
-                }
-              }
+  if (scopeParam === 'all') {
+  try {
+    // (valfritt men vettigt) – begränsa så att bara admin-taggade kunder får använda scope=all
+    const isAdmin = await isAdminCustomer(cidNum);
+    if (!isAdmin) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(403).json({ error: 'forbidden_admin_only', orders: [] });
+    }
+
+    const q = 'status:any'; // OBS: ingen customer_id-filter här
+    const query = `
+      query OrdersWithMetafield($first:Int!,$q:String!,$ns:String!,$key:String!){
+        orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
+          edges{
+            node{
+              id
+              name
+              processedAt
+              fulfillmentStatus
+              displayFulfillmentStatus
+              metafield(namespace:$ns, key:$key){ value }
             }
           }
-        `;
-
-        const data = await shopifyGraphQL(query, {
-          first: limit,
-          q,
-          ns: ORDER_META_NAMESPACE,
-          key: ORDER_META_KEY
-        });
-
-        if (data.errors) throw new Error('GraphQL error');
-
-        const edges = data?.data?.orders?.edges || [];
-        const adminOrders = edges.map((e) => {
-          const node = e.node;
-          const metafieldValue = node.metafield ? node.metafield.value : null;
-
-          return {
-            id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
-            name: node.name,
-            processedAt: node.processedAt,
-            metafield: metafieldValue,
-            fulfillmentStatus: node.fulfillmentStatus || null,
-            displayFulfillmentStatus: node.displayFulfillmentStatus || null
-          };
-        });
-
-        const nonDelivered = adminOrders.filter(o => !isDeliveredOrderShape(o));
-        res.setHeader('Cache-Control', 'no-store');
-        return res.json({ orders: nonDelivered, admin: true });
-      } catch (err) {
-        console.error('proxy/orders-meta admin error:', err?.response?.data || err.message);
-        setCorsOnError(req, res);
-        return res.status(500).json({ error: 'Internal error' });
+        }
       }
+    `;
+
+    const data = await shopifyGraphQL(query, {
+      first: limit,
+      q,
+      ns: ORDER_META_NAMESPACE,
+      key: ORDER_META_KEY
+    });
+
+    if (data.errors && data.errors.length) {
+      console.error(
+        'proxy/orders-meta admin GraphQL errors:',
+        JSON.stringify(data.errors, null, 2)
+      );
+      throw new Error('GraphQL error');
     }
+
+    const edges = data?.data?.orders?.edges || [];
+    const adminOrders = edges.map((e) => {
+      const node = e.node;
+      const metafieldValue = node.metafield ? node.metafield.value : null;
+
+      return {
+        id: parseInt(gidToId(node.id), 10) || gidToId(node.id),
+        name: node.name,
+        processedAt: node.processedAt,
+        metafield: metafieldValue,
+        fulfillmentStatus: node.fulfillmentStatus || null,
+        displayFulfillmentStatus: node.displayFulfillmentStatus || null
+      };
+    });
+
+    const nonDelivered = adminOrders.filter(o => !isDeliveredOrderShape(o));
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ orders: nonDelivered, admin: true });
+  } catch (err) {
+    console.error('proxy/orders-meta admin error:', err?.response?.data || err.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+}
+
 
 // ===== KUND-/TEAM-LÄGE: Postgres ONLY =====
 if (typeof listOrderSnapshotsForCustomer !== 'function') {
