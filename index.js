@@ -2685,10 +2685,13 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
         fulfillment_status,
         display_fulfillment_status,
         pressify_scope,
-        pressify_team_id
+        pressify_team_id,
+        order_total_price,
+        order_currency,
+        line_totals_json
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE customer_id = $1
-      ORDER BY created_at DESC
+      ORDER BY COALESCE(processed_at, created_at) DESC
       LIMIT $2
     `;
     const { rows } = await pgQuery(sql, [customerId, first]);
@@ -2701,41 +2704,6 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
 
 
 
-async function listOrderSnapshotsForTeam(teamId, limit = 50) {
-  if (!pgPool) return [];
-
-  try {
-    const normTeamId = pfNormalizeTeamId(teamId);
-    if (!normTeamId) return [];
-
-    const first = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
-    const sql = `
-      SELECT
-        order_id,
-        customer_id,
-        customer_email,
-        processed_at,
-        created_at,
-        order_name,
-        metafield_raw,
-        metafield_json,
-        fulfillment_status,
-        display_fulfillment_status,
-        pressify_scope,
-        pressify_team_id
-      FROM ${ORDERS_SNAPSHOT_TABLE}
-      WHERE pressify_scope = 'team'
-        AND pressify_team_id = $1
-      ORDER BY created_at DESC
-      LIMIT $2
-    `;
-    const { rows } = await pgQuery(sql, [normTeamId, first]);
-    return rows || [];
-  } catch (e) {
-    console.error('[orders_snapshot] listOrderSnapshotsForTeam error:', e?.response?.data || e.message);
-    return [];
-  }
-}
 
 async function listOrderSnapshotsForTeam(teamId, limit = 50) {
   if (!pgPool) return [];
@@ -2758,7 +2726,10 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
         fulfillment_status,
         display_fulfillment_status,
         pressify_scope,
-        pressify_team_id
+        pressify_team_id,
+        order_total_price,
+        order_currency,
+        line_totals_json
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE pressify_scope = 'team'
         AND pressify_team_id = $1
@@ -2772,6 +2743,45 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
     return [];
   }
 }
+async function listOrderSnapshotsForTeam(teamId, limit = 50) {
+  if (!pgPool) return [];
+
+  try {
+    const normTeamId = pfNormalizeTeamId(teamId);
+    if (!normTeamId) return [];
+
+    const first = Math.max(1, Math.min(500, parseInt(limit, 10) || 50));
+    const sql = `
+      SELECT
+        order_id,
+        customer_id,
+        customer_email,
+        processed_at,
+        created_at,
+        order_name,
+        metafield_raw,
+        metafield_json,
+        fulfillment_status,
+        display_fulfillment_status,
+        pressify_scope,
+        pressify_team_id,
+        order_total_price,
+        order_currency,
+        line_totals_json
+      FROM ${ORDERS_SNAPSHOT_TABLE}
+      WHERE pressify_scope = 'team'
+        AND pressify_team_id = $1
+      ORDER BY COALESCE(processed_at, created_at) DESC
+      LIMIT $2
+    `;
+    const { rows } = await pgQuery(sql, [normTeamId, first]);
+    return rows || [];
+  } catch (e) {
+    console.error('[orders_snapshot] listOrderSnapshotsForTeam error:', e?.response?.data || e.message);
+    return [];
+  }
+}
+
 // 🆕: uppdatera team_avatar_url i DB för alla medlemmar i ett team
 async function syncTeamAvatarToMembers(teamCustomerId, urlFromMeta) {
   if (!pgPool) return;
@@ -4998,9 +5008,117 @@ if (!Array.isArray(snapshots) || snapshots.length === 0) {
 
 const out = snapshots.map((row) => {
   const orderId   = Number(row.order_id);
-  const metaRaw   = row.metafield_raw;      // EXAKT samma JSON-sträng som i Shopify-order-metafältet
+  const metaRaw   = row.metafield_raw;      // lagrat 1:1 från Shopify
   const createdAt = row.processed_at || row.created_at;
   const orderName = row.order_name || null;
+
+  // NYTT: injicera _total_price per line item i den metafield-sträng som skickas ut
+  // (vi rör varken Shopify-metafältet eller Postgres-snapshoten – bara svaret till frontend)
+  let metaForResponse = metaRaw;
+
+  try {
+    const raw = metaRaw;
+    const ltSrc = row.line_totals_json;
+
+    if (raw && ltSrc) {
+      let projects = [];
+      let parsedMeta = null;
+
+      // 1) Parsea metafältet (array eller { projects:[...] })
+      try {
+        parsedMeta = JSON.parse(raw);
+      } catch {
+        parsedMeta = null;
+      }
+
+      if (Array.isArray(parsedMeta)) {
+        projects = parsedMeta;
+      } else if (parsedMeta && typeof parsedMeta === 'object' && Array.isArray(parsedMeta.projects)) {
+        projects = parsedMeta.projects;
+      }
+
+      // 2) Parsea line_totals_json (array med { line_item_id, total_price, ... })
+      let lineTotals = [];
+      if (Array.isArray(ltSrc)) {
+        lineTotals = ltSrc;
+      } else if (typeof ltSrc === 'string') {
+        try {
+          const parsedLt = JSON.parse(ltSrc);
+          if (Array.isArray(parsedLt)) lineTotals = parsedLt;
+        } catch {
+          lineTotals = [];
+        }
+      }
+
+      if (Array.isArray(projects) && projects.length && Array.isArray(lineTotals) && lineTotals.length) {
+        const priceByLineId = new Map();
+        lineTotals.forEach((t) => {
+          if (!t) return;
+          const lid = t.line_item_id ?? t.lineItemId;
+          const val = t.total_price   ?? t.totalPrice;
+          if (lid == null || val == null) return;
+          const num = Number(val);
+          if (!Number.isNaN(num)) {
+            priceByLineId.set(String(lid), num);
+          }
+        });
+
+        if (priceByLineId.size > 0) {
+          const nextProjects = projects.map((p) => {
+            const clone = { ...p };
+            const lid = clone.lineItemId ?? clone.line_item_id;
+            if (lid == null) return clone;
+
+            const price = priceByLineId.get(String(lid));
+            if (price == null) return clone;
+
+            let props = clone.properties;
+
+            // Finns det redan ett _total_price / total_price? Låt det vara i så fall.
+            let hasTotal = false;
+            if (Array.isArray(props)) {
+              hasTotal = props.some((p2) => {
+                const n = String(p2 && (p2.name || p2.key || '')).toLowerCase();
+                return n === '_total_price' || n === 'total_price';
+              });
+            } else if (props && typeof props === 'object') {
+              const keys = Object.keys(props).map((k) => k.toLowerCase());
+              hasTotal = keys.includes('_total_price') || keys.includes('total_price');
+            }
+
+            if (!hasTotal) {
+              const valStr = price.toFixed(2); // t.ex "4125.00" – frontend formatterar till "4 125,00 kr"
+
+              if (Array.isArray(props)) {
+                props = props.concat([{ name: '_total_price', value: valStr }]);
+              } else if (props && typeof props === 'object') {
+                props = { ...props, _total_price: valStr };
+              } else {
+                props = [{ name: '_total_price', value: valStr }];
+              }
+            }
+
+            clone.properties = props;
+            return clone;
+          });
+
+          // 3) Skriv tillbaka i samma format som originalet
+          if (Array.isArray(parsedMeta)) {
+            metaForResponse = JSON.stringify(nextProjects);
+          } else if (
+            parsedMeta &&
+            typeof parsedMeta === 'object' &&
+            Array.isArray(parsedMeta.projects)
+          ) {
+            metaForResponse = JSON.stringify({ ...parsedMeta, projects: nextProjects });
+          }
+        }
+      }
+    }
+  } catch {
+    // Om något går fel behåller vi original-strängen
+    metaForResponse = metaRaw;
+  }
 
   const info = pfExtractScopeFromOrderProjects(
     row.metafield_json && Array.isArray(row.metafield_json)
@@ -5013,7 +5131,7 @@ const out = snapshots.map((row) => {
     // 🔑 Viktigt: behåll samma keys som Shopify-responsen
     name: orderName,              // kan vara null om kolumnen saknas – frontend får fortfarande samma property
     processedAt: createdAt,
-    metafield: metaRaw,
+    metafield: metaForResponse,   // ⬅️ NYTT: samma struktur som innan, men med _total_price i properties
     fulfillmentStatus: null,      // finns inte i snapshot ännu – men key måste finnas
     displayFulfillmentStatus: null,
     scope: info.scope || 'personal',
@@ -5021,6 +5139,7 @@ const out = snapshots.map((row) => {
     teamName: info.teamName || null
   };
 });
+
 
 // applyWorkspaceScopeFilter gör fortfarande sista säkerhets-filtret:
 //  - personal → släng ev. team-ordrar som råkat komma med
