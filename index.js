@@ -5087,7 +5087,7 @@ const out = snapshots.map((row) => {
             }
 
             if (!hasTotal) {
-              const valStr = price.toFixed(2); // t.ex "4125.00" – frontend formatterar till "4 125,00 kr"
+              const valStr = String(Math.round(price));
 
               if (Array.isArray(props)) {
                 props = props.concat([{ name: '_total_price', value: valStr }]);
