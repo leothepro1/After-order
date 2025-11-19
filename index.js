@@ -2688,7 +2688,7 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
         pressify_team_id
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE customer_id = $1
-      ORDER BY COALESCE(processed_at, created_at) DESC
+      ORDER BY created_at DESC
       LIMIT $2
     `;
     const { rows } = await pgQuery(sql, [customerId, first]);
@@ -2698,6 +2698,7 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
     return [];
   }
 }
+
 
 
 async function listOrderSnapshotsForTeam(teamId, limit = 50) {
@@ -2725,7 +2726,7 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE pressify_scope = 'team'
         AND pressify_team_id = $1
-      ORDER BY COALESCE(processed_at, created_at) DESC
+      ORDER BY created_at DESC
       LIMIT $2
     `;
     const { rows } = await pgQuery(sql, [normTeamId, first]);
