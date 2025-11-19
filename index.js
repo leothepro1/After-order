@@ -5846,12 +5846,6 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
 });
 
 
-// NYTT: Ta bort medlem från ett befintligt teamkonto
-// POST /proxy/orders-meta/teams/remove  (via App Proxy: /apps/orders-meta/teams/remove)
-// Body: { teamCustomerId, memberCustomerId?, memberEmail? }
-// NYTT: Ta bort medlem från ett befintligt teamkonto
-// POST /proxy/orders-meta/teams/remove  (via App Proxy: /apps/orders-meta/teams/remove)
-// Body: { teamCustomerId, memberCustomerId?, memberEmail? }
 app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
   try {
     // 1) Verifiera att anropet kommer via Shopify App Proxy
@@ -6038,6 +6032,200 @@ app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
   }
 });
 
+// ===== NYTT: Uppdatera roll för en teammedlem =====
+// POST /proxy/orders-meta/teams/role  (via App Proxy: /apps/orders-meta/teams/role)
+// Body: { teamCustomerId, memberCustomerId?, memberEmail?, role: "OWNER" | "MEMBER" }
+app.post('/proxy/orders-meta/teams/role', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ error: 'not_logged_in' });
+    }
+    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
+
+    const body = req.body || {};
+
+    // 3) Identifiera team-kontot
+    const teamCustomerIdRaw =
+      body.teamCustomerId ||
+      body.team_customer_id ||
+      req.query.teamCustomerId ||
+      req.query.team_customer_id ||
+      null;
+
+    const teamCustomerId = teamCustomerIdRaw
+      ? String(teamCustomerIdRaw).split('/').pop()
+      : null;
+
+    if (!teamCustomerId) {
+      return res.status(400).json({ error: 'missing_team_customer_id' });
+    }
+
+    // 4) Ny roll (från frontend skickas "OWNER"/"MEMBER")
+    const rawRole = String(body.role || '').trim().toUpperCase();
+    if (!rawRole || (rawRole !== 'OWNER' && rawRole !== 'MEMBER')) {
+      return res.status(400).json({ error: 'invalid_role' });
+    }
+
+    // Så som du verkar spara roll i metafält/DB → lower case
+    const newRoleValue = rawRole.toLowerCase(); // "owner" | "member"
+
+    // 5) Identifiera medlemmen som ska uppdateras
+    let memberCustomerIdRaw =
+      body.memberCustomerId ||
+      body.member_customer_id ||
+      null;
+
+    let memberCustomerId = null;
+    if (memberCustomerIdRaw != null) {
+      const tmp = String(memberCustomerIdRaw).split('/').pop().trim();
+      if (tmp && tmp !== 'null' && tmp !== 'undefined') {
+        memberCustomerId = tmp;
+      }
+    }
+
+    const memberEmailRaw =
+      body.memberEmail ||
+      body.member_email ||
+      null;
+
+    const memberEmail = memberEmailRaw
+      ? String(memberEmailRaw).trim().toLowerCase()
+      : null;
+
+    if (!memberCustomerId && !memberEmail) {
+      return res.status(400).json({ error: 'missing_member_identifier' });
+    }
+
+    // 6) Läs teamets metafält och verifiera att det är ett teamkonto
+    const teamMeta = await readCustomerTeams(teamCustomerId);
+    const teamValue = teamMeta?.value || null;
+
+    if (!teamValue || !teamValue.isTeam) {
+      return res.status(400).json({ error: 'not_a_team_account' });
+    }
+
+    // 7) Säkerhet: bara ägare får ändra roller
+    const membersArr = Array.isArray(teamValue.members)
+      ? teamValue.members.slice()
+      : [];
+
+    const me = membersArr.find(m => {
+      if (!m) return false;
+      const cid = m.customerId != null ? String(m.customerId) : null;
+      return (
+        cid &&
+        cid === String(loggedInCustomerId) &&
+        String(m.role || '').toLowerCase() === 'owner'
+      );
+    });
+
+    const isAdmin = await isAdminCustomer(loggedInCustomerId); // om du vill tillåta admin
+    if (!me && !isAdmin) {
+      return res.status(403).json({ error: 'forbidden_not_owner' });
+    }
+
+    // 8) Hitta medlemmen i teamets metafält
+    let targetMember = null;
+    for (const m of membersArr) {
+      if (!m) continue;
+
+      const cid = m.customerId != null ? String(m.customerId) : null;
+      const email = m.email ? String(m.email).trim().toLowerCase() : null;
+
+      const matchByCustomerId =
+        memberCustomerId && cid && cid === memberCustomerId;
+      const matchByEmail =
+        memberEmail && email && email === memberEmail;
+
+      if (matchByCustomerId || matchByEmail) {
+        targetMember = m;
+        break;
+      }
+    }
+
+    if (!targetMember) {
+      return res.status(404).json({ error: 'member_not_found' });
+    }
+
+    // 9) Hindra att man plockar bort sista ägaren (om du vill)
+    const wasOwner = String(targetMember.role || '').toLowerCase() === 'owner';
+    if (
+      wasOwner &&
+      newRoleValue !== 'owner'
+    ) {
+      const otherOwners = membersArr.filter(m => {
+        if (!m) return false;
+        if (m === targetMember) return false;
+        return String(m.role || '').toLowerCase() === 'owner';
+      });
+
+      if (otherOwners.length === 0) {
+        return res.status(400).json({ error: 'cannot_demote_last_owner' });
+      }
+    }
+
+    // 10) Uppdatera roll i teamets metafält
+    targetMember.role = newRoleValue;
+
+    // skriv tillbaka arrayen
+    teamValue.members = membersArr;
+
+    try {
+      await writeCustomerTeams(teamCustomerId, teamValue);
+    } catch (e) {
+      console.error('[teams/role] kunde inte skriva team-metafält', e?.message || e);
+      return res.status(500).json({ error: 'failed_to_save_metafield' });
+    }
+
+    // 11) Uppdatera DB-projektionen (team_members-tabellen)
+    const effectiveCustomerId =
+      targetMember.customerId || memberCustomerId || null;
+
+    if (effectiveCustomerId && typeof upsertTeamMemberRow === 'function') {
+      try {
+        await upsertTeamMemberRow({
+          teamId: teamCustomerId,
+          customerId: effectiveCustomerId,
+          role: newRoleValue,
+          status: 'active',
+          email: targetMember.email || memberEmail || null,
+          avatarUrl: null // avatar ändras inte här
+        });
+      } catch (e) {
+        console.warn(
+          '[team_members] role: upsertTeamMemberRow failed',
+          e?.message || e
+        );
+      }
+    }
+
+    return res.json({
+      ok: true,
+      member: {
+        customerId: effectiveCustomerId || null,
+        email: targetMember.email || memberEmail || null,
+        role: newRoleValue
+      },
+      team: {
+        id: teamCustomerId,
+        teamName: teamValue.teamName || null
+      }
+    });
+  } catch (err) {
+    console.error(
+      'POST /proxy/orders-meta/teams/role error:',
+      err?.response?.data || err.message
+    );
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
 
 
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
