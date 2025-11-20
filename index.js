@@ -6350,22 +6350,17 @@ app.post('/proxy/orders-meta/teams/role', async (req, res) => {
 
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   try {
-
-    // 1) Verifiera App Proxy-signatur
+    // 1) Verifiera App Proxy-signatur (billigt + säkerställer att anropet kommer från din Shopify-butik)
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
 
-    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
-    if (!loggedInCustomerIdRaw) {
-      return res.status(401).json({ error: 'not_logged_in' });
-    }
-    const loggedInCustomerId = String(loggedInCustomerIdRaw).split('/').pop();
-
+    // 2) Plocka ut teamCustomerId (kan vara GID eller siffra)
     const teamCustomerIdRaw =
       req.query.teamCustomerId ||
       req.query.team_customer_id ||
       null;
+
     const teamCustomerId = teamCustomerIdRaw
       ? String(teamCustomerIdRaw).split('/').pop()
       : null;
@@ -6374,39 +6369,33 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
       return res.status(400).json({ error: 'missing_team_customer_id' });
     }
 
-    // 2) Säkerhet: bara medlemmar/admin får läsa
-    const isMember = await isCustomerMemberOfTeam(loggedInCustomerId, teamCustomerId);
-    const isAdmin  = await isAdminCustomer(loggedInCustomerId);
-    if (!isMember && !isAdmin) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-
-    // 3) Läs från Postgres
+    // 3) Läs direkt från Postgres – inga extra Shopify-anrop, inga medlems/admin-kontroller
     const rows = await listTeamMembersForTeam(teamCustomerId);
 
- return res.json({
-  ok: true,
-  teamId: pfNormalizeTeamId(teamCustomerId),
-  members: rows.map(r => ({
-    teamId: String(r.team_id),
-    // om customer_id är NULL i DB ska vi ha null, inte "null"
-    customerId: r.customer_id != null ? String(r.customer_id) : null,
-    role: r.role,
-    status: r.status,
-    email: r.member_email || null,
-    // 🔁 Viktigt: visa alltid PERSONLIG avatar i "medlemslistan”
-    avatarUrl: r.member_avatar_url || r.team_avatar_url || null,
-    teamAvatarUrl: r.team_avatar_url || null,
-    memberAvatarUrl: r.member_avatar_url || null
-  }))
-});
-
-
+    return res.json({
+      ok: true,
+      teamId: pfNormalizeTeamId(teamCustomerId),
+      members: rows.map((r) => ({
+        teamId: String(r.team_id),
+        customerId: r.customer_id != null ? String(r.customer_id) : null,
+        role: r.role,
+        status: r.status,
+        email: r.member_email || null,
+        // Personlig avatar för listor, team-avatar separat fält
+        avatarUrl: r.member_avatar_url || r.team_avatar_url || null,
+        teamAvatarUrl: r.team_avatar_url || null,
+        memberAvatarUrl: r.member_avatar_url || null,
+      })),
+    });
   } catch (err) {
-    console.error('GET /proxy/orders-meta/teams/members error:', err?.response?.data || err.message);
+    console.error(
+      'GET /proxy/orders-meta/teams/members error:',
+      err?.response?.data || err.message
+    );
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
