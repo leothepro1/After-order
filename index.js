@@ -94,7 +94,6 @@ if (!DATABASE_URL) {
 }
 
 // Generell helper för SELECT/INSERT/UPDATE mot Postgres
-// Generell helper för SELECT/INSERT/UPDATE mot Postgres
 async function pgQuery(text, params) {
   if (!pgPool) {
     throw new Error('pgPool inte initialiserad – saknar DATABASE_URL');
@@ -109,7 +108,7 @@ async function pgQuery(text, params) {
 
 // Tabellnamn för våra snapshots
 const ORDERS_SNAPSHOT_TABLE = 'orders_snapshot';
-// 🔹 NYTT: tabell för Pressify Teams-medlemmar
+// Tabell för Pressify Teams-medlemmar
 const TEAM_MEMBERS_TABLE = 'team_members';
 
 async function ensureOrdersSnapshotTable() {
@@ -164,7 +163,7 @@ async function ensureOrdersSnapshotTable() {
   await pgQuery(ddl);
 }
 
-// 🔹 NYTT: tabell för team-medlemmar + avatar
+// Tabell för team-medlemmar + avatar
 async function ensureTeamMembersTable() {
   if (!pgPool) {
     console.warn('[team_members] Hoppar över init – pgPool saknas');
@@ -179,7 +178,7 @@ async function ensureTeamMembersTable() {
       status            TEXT   NOT NULL DEFAULT 'active',
       member_email      TEXT,
       member_avatar_url TEXT,
-      -- 🆕: samma värde för alla rader i samma team, används som "teamets avatar"
+      -- samma värde för alla rader i samma team, används som "teamets avatar"
       team_avatar_url   TEXT,
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -192,7 +191,7 @@ async function ensureTeamMembersTable() {
     CREATE INDEX IF NOT EXISTS idx_team_members_customer
       ON ${TEAM_MEMBERS_TABLE}(customer_id);
 
-    -- 🆕: om tabellen redan finns sedan tidigare, se till att kolumnen finns
+    -- om tabellen redan finns sedan tidigare, se till att kolumnen finns
     ALTER TABLE ${TEAM_MEMBERS_TABLE}
       ADD COLUMN IF NOT EXISTS team_avatar_url TEXT;
   `;
@@ -200,130 +199,14 @@ async function ensureTeamMembersTable() {
   await pgQuery(ddl);
 }
 
-
-
-
-
-// Styr om backfill ska köras automatiskt när servern startar
-// (du kan sätta ORDERS_SNAPSHOT_BACKFILL_ON_BOOT=false i Render om du vill pausa den)
-const ORDERS_SNAPSHOT_BACKFILL_ON_BOOT =
-  String(process.env.ORDERS_SNAPSHOT_BACKFILL_ON_BOOT || 'true') === 'true';
-
-let __ordersSnapshotBackfillStarted = false;
-
-// Backfill: hämta ALLA ordrar från Shopify, läs order-metafältet (ORDER_META_NAMESPACE/ORDER_META_KEY)
-// och spegla till Postgres via upsertOrderSnapshotFromMetafield.
-// Metafältets JSON (value) används som exakt sanning – vi rör inte strukturen, vi speglar den bara.
-async function backfillOrdersSnapshotAllOrders() {
-  if (!pgPool) {
-    console.warn('[orders_snapshot] backfill: pgPool saknas, hoppar över');
-    return { processed: 0, skipped: 0, errors: 0, reason: 'no-pg' };
-  }
-  if (!SHOP || !ACCESS_TOKEN) {
-    console.warn('[orders_snapshot] backfill: SHOP/ACCESS_TOKEN saknas, hoppar över');
-    return { processed: 0, skipped: 0, errors: 0, reason: 'no-shopify' };
-  }
-
-  console.log('[orders_snapshot] backfill: startar (boot/manuell)…');
-
-  let url = `https://${SHOP}/admin/api/2025-07/orders.json?status=any&limit=100`;
-  let processed = 0;
-  let skipped = 0;
-  let errors = 0;
-
-  while (url) {
-    let resp;
-    try {
-      resp = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN }
-      });
-    } catch (e) {
-      console.error('[orders_snapshot] backfill: kunde inte hämta orders:', e?.response?.data || e.message);
-      break;
-    }
-
-    const orders = resp.data?.orders || [];
-    if (!orders.length) break;
-
-    for (const order of orders) {
-      try {
-        const orderId = order.id;
-
-        const mfResp = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-
-        const metafields = mfResp.data?.metafields || [];
-        const mf = metafields.find(
-          (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
-        );
-
-        if (!mf || !mf.value) {
-          skipped++;
-          continue;
-        }
-
-        await upsertOrderSnapshotFromMetafield(order, mf.value);
-        processed++;
-      } catch (e) {
-        errors++;
-        console.warn(
-          '[orders_snapshot] backfill: misslyckades för order',
-          (order && order.id) || '?',
-          e?.response?.data || e.message
-        );
-      }
-    }
-
-    const link = resp.headers['link'] || resp.headers['Link'];
-    if (!link) {
-      url = null;
-    } else {
-      const nextPart = link
-        .split(',')
-        .map((p) => p.trim())
-        .find((p) => p.includes('rel="next"'));
-      if (!nextPart) {
-        url = null;
-      } else {
-        const m = nextPart.match(/<([^>]+)>/);
-        url = m ? m[1] : null;
-      }
-    }
-  }
-
-  const summary = { processed, skipped, errors };
-  console.log('[orders_snapshot] backfill: klar', summary);
-  return summary;
-}
-
-
-// Start-funktion: triggas EN gång vid uppstart, efter att tabellen finns
-function startOrdersSnapshotBackfillOnBoot() {
-  if (!ORDERS_SNAPSHOT_BACKFILL_ON_BOOT) {
-    console.log('[orders_snapshot] backfill: ORDERS_SNAPSHOT_BACKFILL_ON_BOOT=false – hoppar över vid boot');
-    return;
-  }
-  if (__ordersSnapshotBackfillStarted) return;
-  __ordersSnapshotBackfillStarted = true;
-
-  // Kör i bakgrunden – blockar inte serverstarten
-  backfillOrdersSnapshotAllOrders().catch((err) => {
-    console.error('[orders_snapshot] backfill: oväntat fel:', err?.message || err);
-  });
-}
-
-// Kör init/migration vid start, och därefter backfill (en gång)
+// Initiera tabeller vid start (ingen automatisk backfill längre)
 ensureOrdersSnapshotTable()
-  .then(() => ensureTeamMembersTable())          // 🔹 NYTT
-  .then(() => {
-    startOrdersSnapshotBackfillOnBoot();
-  })
+  .then(() => ensureTeamMembersTable())
   .catch((err) => {
     console.error('[orders_snapshot] init-fel:', err?.message || err);
   });
 // ========================================================================
+
 
 
 // överst bland konfig:
