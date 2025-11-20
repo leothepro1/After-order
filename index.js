@@ -52,9 +52,19 @@ const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const POSTMARK_SERVER_TOKEN = process.env.POSTMARK_SERVER_TOKEN || process.env.POSTMARK_TOKEN || '';
 const POSTMARK_FROM = process.env.POSTMARK_FROM || process.env.POSTMARK_SENDER || 'info@pressify.se';
 const POSTMARK_STREAM = process.env.POSTMARK_STREAM || 'outbound';
+
 const POSTMARK_TEMPLATE_ALIAS_PROOF_UPLOADED =
-  process.env.POSTMARK_TEMPLATE_ALIAS_PROOF_UPLOADED || process.env.POSTMARK_TEMPLATE_PROOF_READY || 'proof-uploaded';
+  process.env.POSTMARK_TEMPLATE_ALIAS_PROOF_UPLOADED ||
+  process.env.POSTMARK_TEMPLATE_PROOF_READY ||
+  'proof-uploaded';
+
+// 🔹 NYTT: template-alias för team-inbjudningar (member-invite)
+const POSTMARK_TEMPLATE_ALIAS_MEMBER_INVITE =
+  process.env.POSTMARK_TEMPLATE_ALIAS_MEMBER_INVITE ||
+  'member-invite';
+
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET; // används för App Proxy + OAuth-verifiering
+
 const SCOPES = process.env.SCOPES || 'read_orders,read_customers,write_customers,read_metafields,write_app_proxy';
 const HOST = (process.env.HOST || 'https://after-order-1.onrender.com').replace(/\/$/, '');
 const ORDER_META_NAMESPACE = process.env.ORDER_META_NAMESPACE || 'order-created';
@@ -5926,7 +5936,7 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
       });
     }
 
-    // 7) Spara uppdaterat team-metakonto
+      // 7) Spara uppdaterat team-metakonto
     teamValue.members = members;
     await writeCustomerTeams(teamCustomerId, teamValue);
 
@@ -5950,6 +5960,46 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
       );
     }
 
+    // 🔹 NYTT: skicka inbjudningsmail via Postmark till ALLA NYA medlemmar
+    try {
+      const rawTeamName = String(teamValue.teamName || '').trim();
+
+      // Enkel "capitalize": första bokstaven stor, resten som användaren skrev
+      const teamNameForEmail = rawTeamName
+        ? rawTeamName.charAt(0).toUpperCase() + rawTeamName.slice(1)
+        : '';
+
+      if (
+        POSTMARK_SERVER_TOKEN &&
+        POSTMARK_TEMPLATE_ALIAS_MEMBER_INVITE &&
+        teamNameForEmail &&
+        addedEmails.length
+      ) {
+        const baseModel = {
+          // 🔑 exakt samma nyckel som används i Postmark-mallen: {{team_name}}
+          team_name: teamNameForEmail
+        };
+
+        for (const email of addedEmails) {
+          try {
+            await postmarkSendEmail({
+              to: email,
+              alias: POSTMARK_TEMPLATE_ALIAS_MEMBER_INVITE,
+              model: baseModel
+            });
+          } catch (e) {
+            console.warn(
+              '[teams.invite email] send failed for',
+              email,
+              e?.response?.data || e.message
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[teams.invite email] top-level error:', e?.message || e);
+    }
+
     // 9) Svar till frontend – den behöver bara veta att inbjudan är "ok"
     return res.json({
       ok: true,
@@ -5959,6 +6009,7 @@ app.post('/proxy/orders-meta/teams/invite', async (req, res) => {
         teamName: teamValue.teamName || null
       }
     });
+
   } catch (err) {
     console.error('POST /proxy/orders-meta/teams/invite error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'internal_error' });
