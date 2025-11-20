@@ -6325,23 +6325,6 @@ app.post('/proxy/orders-meta/teams/role', async (req, res) => {
       return res.status(404).json({ error: 'member_not_found' });
     }
 
-    // 9) Hindra att man plockar bort sista ägaren (om du vill)
-    const wasOwner = String(targetMember.role || '').toLowerCase() === 'owner';
-    if (
-      wasOwner &&
-      newRoleValue !== 'owner'
-    ) {
-      const otherOwners = membersArr.filter(m => {
-        if (!m) return false;
-        if (m === targetMember) return false;
-        return String(m.role || '').toLowerCase() === 'owner';
-      });
-
-      if (otherOwners.length === 0) {
-        return res.status(400).json({ error: 'cannot_demote_last_owner' });
-      }
-    }
-
     // 10) Uppdatera roll i teamets metafält
     targetMember.role = newRoleValue;
 
