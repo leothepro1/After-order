@@ -6108,11 +6108,6 @@ app.post('/proxy/orders-meta/teams/remove', async (req, res) => {
       return true;
     });
 
-    // OBS: vi returnerar INTE 404 här längre.
-    // Om vi inte hittar medlemmen i metafältet kör vi vidare och försöker i DB.
-    if (removedMember && String(removedMember.role || '').toLowerCase() === 'owner') {
-      return res.status(400).json({ error: 'cannot_remove_owner' });
-    }
 
     // 6) Spara uppdaterat team-metakonto (om vi faktiskt tog bort någon)
     if (removedMember) {
