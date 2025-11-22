@@ -2584,7 +2584,7 @@ async function listOrderSnapshotsForCustomer(customerId, limit = 50) {
         line_totals_json
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE customer_id = $1
-      ORDER BY COALESCE(processed_at, created_at) DESC
+      ORDER BY created_at DESC
       LIMIT $2
     `;
     const { rows } = await pgQuery(sql, [customerId, first]);
@@ -2626,7 +2626,7 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
       FROM ${ORDERS_SNAPSHOT_TABLE}
       WHERE pressify_scope = 'team'
         AND pressify_team_id = $1
-      ORDER BY COALESCE(processed_at, created_at) DESC
+      ORDER BY created_at DESC
       LIMIT $2
     `;
     const { rows } = await pgQuery(sql, [normTeamId, first]);
@@ -2636,6 +2636,7 @@ async function listOrderSnapshotsForTeam(teamId, limit = 50) {
     return [];
   }
 }
+
 async function listOrderSnapshotsForTeam(teamId, limit = 50) {
   if (!pgPool) return [];
 
@@ -4902,7 +4903,7 @@ if (!Array.isArray(snapshots) || snapshots.length === 0) {
 const out = snapshots.map((row) => {
   const orderId   = Number(row.order_id);
   const metaRaw   = row.metafield_raw;      // lagrat 1:1 från Shopify
-  const createdAt = row.processed_at || row.created_at;
+  const createdAt = row.created_at;         // alltid orderdatum från när ordern lades
   const orderName = row.order_name || null;
 
   // NYTT: injicera _total_price per line item i den metafield-sträng som skickas ut
@@ -4917,7 +4918,7 @@ const out = snapshots.map((row) => {
       let projects = [];
       let parsedMeta = null;
 
-      // 1) Parsea metafältet (array eller { projects:[...] })
+      // 1) Parsea metafältet (array eller { projects:[.] })
       try {
         parsedMeta = JSON.parse(raw);
       } catch {
@@ -4930,7 +4931,7 @@ const out = snapshots.map((row) => {
         projects = parsedMeta.projects;
       }
 
-      // 2) Parsea line_totals_json (array med { line_item_id, total_price, ... })
+      // 2) Parsea line_totals_json (array med { line_item_id, total_price, . })
       let lineTotals = [];
       if (Array.isArray(ltSrc)) {
         lineTotals = ltSrc;
@@ -4980,14 +4981,19 @@ const out = snapshots.map((row) => {
             }
 
             if (!hasTotal) {
-              const valStr = String(Math.round(price));
-
+              const asStr = String(price.toFixed(2));
               if (Array.isArray(props)) {
-                props = props.concat([{ name: '_total_price', value: valStr }]);
+                props = [
+                  ...props,
+                  { name: '_total_price', value: asStr }
+                ];
               } else if (props && typeof props === 'object') {
-                props = { ...props, _total_price: valStr };
+                props = {
+                  ...props,
+                  _total_price: asStr
+                };
               } else {
-                props = [{ name: '_total_price', value: valStr }];
+                props = [{ name: '_total_price', value: asStr }];
               }
             }
 
@@ -4995,14 +5001,9 @@ const out = snapshots.map((row) => {
             return clone;
           });
 
-          // 3) Skriv tillbaka i samma format som originalet
           if (Array.isArray(parsedMeta)) {
             metaForResponse = JSON.stringify(nextProjects);
-          } else if (
-            parsedMeta &&
-            typeof parsedMeta === 'object' &&
-            Array.isArray(parsedMeta.projects)
-          ) {
+          } else if (parsedMeta && typeof parsedMeta === 'object') {
             metaForResponse = JSON.stringify({ ...parsedMeta, projects: nextProjects });
           }
         }
@@ -5023,8 +5024,8 @@ const out = snapshots.map((row) => {
     id: orderId,
     // 🔑 Viktigt: behåll samma keys som Shopify-responsen
     name: orderName,              // kan vara null om kolumnen saknas – frontend får fortfarande samma property
-    processedAt: createdAt,
-    metafield: metaForResponse,   // ⬅️ NYTT: samma struktur som innan, men med _total_price i properties
+    processedAt: createdAt,       // frontend får fortfarande fältet processedAt – men det är nu alltid orderdatum
+    metafield: metaForResponse,   // ⬅️ samma struktur som innan, men med _total_price i properties
     fulfillmentStatus: null,      // finns inte i snapshot ännu – men key måste finnas
     displayFulfillmentStatus: null,
     scope: info.scope || 'personal',
@@ -5032,6 +5033,7 @@ const out = snapshots.map((row) => {
     teamName: info.teamName || null
   };
 });
+
 
 
 // applyWorkspaceScopeFilter gör fortfarande sista säkerhets-filtret:
