@@ -5058,6 +5058,7 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
+
     const loggedInCustomerId = req.query.logged_in_customer_id;
     if (!loggedInCustomerId) return res.status(204).end();
 
@@ -5074,8 +5075,10 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
     try {
       if (typeof listOrderSnapshotsForCustomer === 'function') {
         const snaps = await listOrderSnapshotsForCustomer(cidNum, 50);
+
         if (Array.isArray(snaps) && snaps.length) {
           snapshotsOk = true;
+
           for (const snap of snaps) {
             const orderId = Number(snap.order_id);
             const metaRaw = snap.metafield_raw;
@@ -5134,7 +5137,7 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
 
     if (snapshotsOk) {
       res.setHeader('Cache-Control', 'no-store');
-      return res.json({ items: out });
+      return res.json({ pending: out, items: out });
     }
 
     // ===== 2) Fallback: befintlig Shopify GraphQL-implementation =====
@@ -5152,19 +5155,23 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
           }
         }
       }`;
+
     const data = await shopifyGraphQL(query, {
       first: 50,
       q,
       ns: ORDER_META_NAMESPACE,
       key: ORDER_META_KEY
     });
+
     if (data.errors) throw new Error('GraphQL error');
 
     const edges = data?.data?.orders?.edges || [];
     out = [];
+
     for (const e of edges) {
       const orderId = parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id);
       let items = [];
+
       try {
         items = e.node.metafield?.value
           ? JSON.parse(e.node.metafield.value)
@@ -5172,6 +5179,7 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
       } catch {
         items = [];
       }
+
       (items || []).forEach((p) => {
         const isDone = p?.review?.status === 'done';
         if (!isDone) {
@@ -5189,7 +5197,8 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
     }
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items: out });
+    return res.json({ pending: out, items: out });
+
   } catch (err) {
     console.error(
       'GET /proxy/orders-meta/reviews/pending:',
