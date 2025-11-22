@@ -6377,18 +6377,46 @@ app.get('/review/share/:token', async (req, res) => {
       return res.status(400).json({ error: 'bad_payload' });
     }
 
-    // 🔄 NYTT: DB/Redis först
-    const { projects } = await readOrderProjectsForRead(orderId);
-    const proj = (projects || []).find(
-      (p) => String(p.lineItemId) === String(lineItemId)
-    );
-    if (!proj) return res.status(404).json({ error: 'not_found' });
+    let proj = null;
+
+    // 1) DB/Redis först (snabbaste vägen)
+    try {
+      const fromDb = await readOrderProjectsForRead(orderId);
+      const arr = Array.isArray(fromDb?.projects) ? fromDb.projects : [];
+      proj = arr.find(p => String(p.lineItemId) === String(lineItemId)) || null;
+    } catch {}
+
+    // 2) Om vi inte hittar rätt projekt ELLER review saknar rätt tid → läs direkt från Shopify-metafält
+    if (
+      !proj ||
+      !proj.review ||
+      String(proj.review.tid || '') !== String(tid)
+    ) {
+      try {
+        const live = await readOrderProjects(orderId); // { metafieldId, projects }
+        const liveArr = Array.isArray(live?.projects) ? live.projects : [];
+        const liveProj = liveArr.find(
+          (p) => String(p.lineItemId) === String(lineItemId)
+        );
+        if (liveProj) {
+          proj = liveProj;
+        }
+      } catch (e) {
+        console.warn('/review/share live fallback failed:', e?.response?.data || e.message);
+      }
+    }
+
+    if (!proj) {
+      return res.status(404).json({ error: 'not_found' });
+    }
 
     const r = proj.review || {};
     if (r.status === 'done') {
+      // här är det *på riktigt* inskickat (både DB och live-metafält säger done)
       return res.status(410).json({ error: 'already_submitted' });
     }
     if (!r || String(r.tid || '') !== String(tid)) {
+      // även efter live-läsning: tid matchar inte → någon nyare token finns
       return res.status(410).json({ error: 'token_superseded' });
     }
 
@@ -6408,6 +6436,7 @@ app.get('/review/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 /* ======= SIMPLE CANCEL VIA APP PROXY (MVP) ======= */
 /* POST /apps/orders-meta/order/cancel  (Shopify App Proxy → server: /proxy/orders-meta/order/cancel)
