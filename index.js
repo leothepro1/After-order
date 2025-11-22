@@ -6379,14 +6379,16 @@ app.get('/review/share/:token', async (req, res) => {
 
     let proj = null;
 
-    // 1) DB/Redis först (snabbaste vägen)
+    // 1) Läs via DB/Redis först (snabbt)
     try {
       const fromDb = await readOrderProjectsForRead(orderId);
       const arr = Array.isArray(fromDb?.projects) ? fromDb.projects : [];
       proj = arr.find(p => String(p.lineItemId) === String(lineItemId)) || null;
-    } catch {}
+    } catch (e) {
+      console.warn('/review/share DB-first failed:', e?.message || e);
+    }
 
-    // 2) Om vi inte hittar rätt projekt ELLER review saknar rätt tid → läs direkt från Shopify-metafält
+    // 2) Om projekt saknas ELLER review.tid inte matchar → läs direkt från Shopify-metafältet
     if (
       !proj ||
       !proj.review ||
@@ -6412,11 +6414,11 @@ app.get('/review/share/:token', async (req, res) => {
 
     const r = proj.review || {};
     if (r.status === 'done') {
-      // här är det *på riktigt* inskickat (både DB och live-metafält säger done)
+      // Här är det faktiskt inskickat (även live-metafältet säger done)
       return res.status(410).json({ error: 'already_submitted' });
     }
     if (!r || String(r.tid || '') !== String(tid)) {
-      // även efter live-läsning: tid matchar inte → någon nyare token finns
+      // Även efter live-läsning matchar inte tid → det finns en nyare token
       return res.status(410).json({ error: 'token_superseded' });
     }
 
@@ -6436,6 +6438,7 @@ app.get('/review/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 
 /* ======= SIMPLE CANCEL VIA APP PROXY (MVP) ======= */
