@@ -5052,7 +5052,6 @@ return res.json({ orders: scopedOut });
   }
 });
 
-/* ===== NYTT: pending reviews för inloggad kund ===== */
 app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
   try {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -5068,9 +5067,13 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
       ? cidRaw.split('/').pop()
       : cidRaw;
 
+    // 🆕 Scout / workspace-parameterar – samma mönster som /proxy/orders-meta
+    const scopeParam   = String(req.query.scope || 'personal');   // 'personal' | 'team'
+    const teamIdFilter = req.query.teamId ? String(req.query.teamId) : null;
+
     // ===== 1) Försök läsa pending reviews från Postgres-snapshots =====
-    let out = [];
     let snapshotsOk = false;
+    const out = [];
 
     try {
       if (typeof listOrderSnapshotsForCustomer === 'function') {
@@ -5087,16 +5090,9 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
             try {
               if (snap.metafield_json && Array.isArray(snap.metafield_json)) {
                 items = snap.metafield_json;
-              } else if (
-                snap.metafield_json &&
-                typeof snap.metafield_json === 'object' &&
-                Array.isArray(snap.metafield_json.projects)
-              ) {
-                items = snap.metafield_json.projects;
-              } else if (metaRaw) {
+              } else if (metaRaw && typeof metaRaw === 'string') {
                 const parsed = JSON.parse(metaRaw);
-                if (Array.isArray(parsed)) items = parsed;
-                else if (
+                if (
                   parsed &&
                   typeof parsed === 'object' &&
                   Array.isArray(parsed.projects)
@@ -5108,7 +5104,10 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
               items = [];
             }
 
-            (items || []).forEach((p) => {
+            // 🆕 Filtrera projekten enligt aktiv workspace (personal/team)
+            const scopedItems = applyWorkspaceScopeFilter(items, scopeParam, teamIdFilter);
+
+            (scopedItems || []).forEach((p) => {
               const isDone = p?.review?.status === 'done';
               if (!isDone) {
                 out.push({
@@ -5129,71 +5128,80 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
     } catch (e) {
       console.warn(
         '/proxy/orders-meta/reviews/pending snapshot-fel:',
-        e?.response?.data || e.message
+        e?.message || e
       );
-      snapshotsOk = false;
-      out = [];
     }
 
-    if (snapshotsOk) {
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ pending: out, items: out });
-    }
-
-    // ===== 2) Fallback: befintlig Shopify GraphQL-implementation =====
-    const q = `customer_id:${cidNum} status:any`;
-    const query = `
-      query OrdersWithMeta($first:Int!,$q:String!,$ns:String!,$key:String!){
-        orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
-          edges{
-            node{
+    // ===== 2) Fallback till Admin GraphQL om snapshots saknas =====
+    if (!snapshotsOk || out.length === 0) {
+      try {
+        const query = `
+          query PendingReviews($customerId: ID!, $ns: String!, $key: String!) {
+            customer(id: $customerId) {
               id
-              name
-              processedAt
-              metafield(namespace:$ns, key:$key){ value }
+              orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+                edges {
+                  node {
+                    id
+                    name
+                    processedAt
+                    metafield(namespace: $ns, key: $key) {
+                      value
+                    }
+                  }
+                }
+              }
             }
           }
-        }
-      }`;
+        `;
 
-    const data = await shopifyGraphQL(query, {
-      first: 50,
-      q,
-      ns: ORDER_META_NAMESPACE,
-      key: ORDER_META_KEY
-    });
+        const data = await shopifyGraphQL(query, {
+          customerId: loggedInCustomerId,
+          ns: ORDER_META_NAMESPACE,
+          key: ORDER_META_KEY
+        });
 
-    if (data.errors) throw new Error('GraphQL error');
+        const edges = data?.data?.customer?.orders?.edges || [];
+        for (const edge of edges) {
+          const e = edge || {};
+          const orderGid = e.node?.id;
+          if (!orderGid) continue;
 
-    const edges = data?.data?.orders?.edges || [];
-    out = [];
+          const orderId = Number(String(orderGid).split('/').pop());
+          let items = [];
 
-    for (const e of edges) {
-      const orderId = parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id);
-      let items = [];
+          try {
+            items = e.node.metafield?.value
+              ? JSON.parse(e.node.metafield.value)
+              : [];
+          } catch {
+            items = [];
+          }
 
-      try {
-        items = e.node.metafield?.value
-          ? JSON.parse(e.node.metafield.value)
-          : [];
-      } catch {
-        items = [];
-      }
+          // 🆕 Filtrera även här enligt workspace
+          const scopedItems = applyWorkspaceScopeFilter(items, scopeParam, teamIdFilter);
 
-      (items || []).forEach((p) => {
-        const isDone = p?.review?.status === 'done';
-        if (!isDone) {
-          out.push({
-            orderId,
-            orderNumber: e.node.name,
-            processedAt: e.node.processedAt,
-            lineItemId: p.lineItemId,
-            productId: p.productId,
-            productTitle: p.productTitle,
-            preview_img: p.previewUrl || p.preview_img || null
+          (scopedItems || []).forEach((p) => {
+            const isDone = p?.review?.status === 'done';
+            if (!isDone) {
+              out.push({
+                orderId,
+                orderNumber: e.node.name,
+                processedAt: e.node.processedAt,
+                lineItemId: p.lineItemId,
+                productId: p.productId,
+                productTitle: p.productTitle,
+                preview_img: p.previewUrl || p.preview_img || null
+              });
+            }
           });
         }
-      });
+      } catch (e) {
+        console.error(
+          '/proxy/orders-meta/reviews/pending GraphQL-fel:',
+          e?.response?.data || e?.message || e
+        );
+      }
     }
 
     res.setHeader('Cache-Control', 'no-store');
@@ -5202,11 +5210,12 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
   } catch (err) {
     console.error(
       'GET /proxy/orders-meta/reviews/pending:',
-      err?.response?.data || err.message
+      err?.response?.data || err?.message || err
     );
-    return res.status(500).json({ error: 'internal' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
+
 
 // ===== NYA APP PROXY-ROUTER FÖR PROFILUPPDATERING =====
 app.post('/proxy/profile/update', async (req, res) => {
