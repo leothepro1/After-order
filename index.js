@@ -5052,6 +5052,7 @@ return res.json({ orders: scopedOut });
   }
 });
 
+/* ===== NYTT: pending reviews för inloggad kund (workspace-aware: personal/team) ===== */
 app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
   try {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -5067,127 +5068,107 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
       ? cidRaw.split('/').pop()
       : cidRaw;
 
-    // 🆕 Scout / workspace-parameterar – samma mönster som /proxy/orders-meta
-    const scopeParam   = String(req.query.scope || 'personal');   // 'personal' | 'team'
-    const teamIdFilter = req.query.teamId ? String(req.query.teamId) : null;
+    // Workspace-parametrar från frontend (Team Scout)
+    const scopeParam = String(req.query.scope || 'personal').toLowerCase();
+    const teamIdFilter = req.query.teamId || '';
+
+    let out = [];
+    let snapshotsOk = false;
 
     // ===== 1) Försök läsa pending reviews från Postgres-snapshots =====
-    let snapshotsOk = false;
-    const out = [];
-
     try {
-      if (typeof listOrderSnapshotsForCustomer === 'function') {
-        const snaps = await listOrderSnapshotsForCustomer(cidNum, 50);
-
-        if (Array.isArray(snaps) && snaps.length) {
-          snapshotsOk = true;
-
-          for (const snap of snaps) {
-            const orderId = Number(snap.order_id);
-            const metaRaw = snap.metafield_raw;
-            let items = [];
-
-            try {
-              if (snap.metafield_json && Array.isArray(snap.metafield_json)) {
-                items = snap.metafield_json;
-              } else if (metaRaw && typeof metaRaw === 'string') {
-                const parsed = JSON.parse(metaRaw);
-                if (
-                  parsed &&
-                  typeof parsed === 'object' &&
-                  Array.isArray(parsed.projects)
-                ) {
-                  items = parsed.projects;
-                }
-              }
-            } catch {
-              items = [];
-            }
-
-            // 🆕 Filtrera projekten enligt aktiv workspace (personal/team)
-            const scopedItems = applyWorkspaceScopeFilter(items, scopeParam, teamIdFilter);
-
-            (scopedItems || []).forEach((p) => {
-              const isDone = p?.review?.status === 'done';
-              if (!isDone) {
-                out.push({
-                  orderId,
-                  // vi har inte order.name i snapshot → håll fältet men använd null
-                  orderNumber: p.orderNumber || null,
-                  processedAt: snap.created_at,
-                  lineItemId: p.lineItemId,
-                  productId: p.productId,
-                  productTitle: p.productTitle,
-                  preview_img: p.previewUrl || p.preview_img || null
-                });
-              }
-            });
-          }
-        }
+      // Vi kräver snapshot-funktioner i kund-/team-läge
+      if (
+        typeof listOrderSnapshotsForCustomer !== 'function' &&
+        typeof listOrderSnapshotsForTeam !== 'function'
+      ) {
+        throw new Error('snapshot_functions_missing');
       }
-    } catch (e) {
-      console.warn(
-        '/proxy/orders-meta/reviews/pending snapshot-fel:',
-        e?.message || e
-      );
-    }
 
-    // ===== 2) Fallback till Admin GraphQL om snapshots saknas =====
-    if (!snapshotsOk || out.length === 0) {
-      try {
-        const query = `
-          query PendingReviews($customerId: ID!, $ns: String!, $key: String!) {
-            customer(id: $customerId) {
-              id
-              orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
-                edges {
-                  node {
-                    id
-                    name
-                    processedAt
-                    metafield(namespace: $ns, key: $key) {
-                      value
-                    }
-                  }
-                }
-              }
-            }
-          }
-        `;
+      let snaps = [];
 
-        const data = await shopifyGraphQL(query, {
-          customerId: loggedInCustomerId,
-          ns: ORDER_META_NAMESPACE,
-          key: ORDER_META_KEY
+      if (scopeParam === 'team') {
+        // TEAM-SCOPE: använd team-snapshots
+        const normTeamId = pfNormalizeTeamId(teamIdFilter);
+        if (!normTeamId) {
+          // ogiltigt team-läge → tom lista
+          res.setHeader('Cache-Control', 'no-store');
+          return res.json({ pending: [], items: [] });
+        }
+
+        if (typeof listOrderSnapshotsForTeam === 'function') {
+          snaps = await listOrderSnapshotsForTeam(normTeamId, 50);
+        } else {
+          snaps = [];
+        }
+
+        // Säkerhetsfilter: dubbelkolla scope i projekt-metat
+        snaps = (snaps || []).filter((row) => {
+          const info = pfExtractScopeFromOrderProjects(
+            row.metafield_json?.projects || row.metafield_json || row.metafield_raw
+          );
+          if ((info.scope || 'personal') !== 'team') return false;
+          const rowTeamId = pfNormalizeTeamId(info.teamId);
+          if (!rowTeamId) return false;
+          return rowTeamId === normTeamId;
         });
+      } else {
+        // PERSONAL-SCOPE (default): kundens egna snapshots
+        if (typeof listOrderSnapshotsForCustomer === 'function') {
+          snaps = await listOrderSnapshotsForCustomer(cidNum, 50);
+        } else {
+          snaps = [];
+        }
 
-        const edges = data?.data?.customer?.orders?.edges || [];
-        for (const edge of edges) {
-          const e = edge || {};
-          const orderGid = e.node?.id;
-          if (!orderGid) continue;
+        // Filtrera bort alla team-ordrar så de inte dyker upp i personligt läge
+        snaps = (snaps || []).filter((row) => {
+          const info = pfExtractScopeFromOrderProjects(
+            row.metafield_json?.projects || row.metafield_json || row.metafield_raw
+          );
+          return (info.scope || 'personal') !== 'team';
+        });
+      }
 
-          const orderId = Number(String(orderGid).split('/').pop());
+      if (Array.isArray(snaps) && snaps.length) {
+        snapshotsOk = true;
+
+        for (const snap of snaps) {
+          const orderId = Number(snap.order_id);
+          const metaRaw = snap.metafield_raw;
           let items = [];
 
           try {
-            items = e.node.metafield?.value
-              ? JSON.parse(e.node.metafield.value)
-              : [];
+            if (snap.metafield_json && Array.isArray(snap.metafield_json)) {
+              items = snap.metafield_json;
+            } else if (
+              snap.metafield_json &&
+              typeof snap.metafield_json === 'object' &&
+              Array.isArray(snap.metafield_json.projects)
+            ) {
+              items = snap.metafield_json.projects;
+            } else if (metaRaw) {
+              const parsed = JSON.parse(metaRaw);
+              if (Array.isArray(parsed)) items = parsed;
+              else if (
+                parsed &&
+                typeof parsed === 'object' &&
+                Array.isArray(parsed.projects)
+              ) {
+                items = parsed.projects;
+              }
+            }
           } catch {
             items = [];
           }
 
-          // 🆕 Filtrera även här enligt workspace
-          const scopedItems = applyWorkspaceScopeFilter(items, scopeParam, teamIdFilter);
-
-          (scopedItems || []).forEach((p) => {
+          (items || []).forEach((p) => {
             const isDone = p?.review?.status === 'done';
             if (!isDone) {
               out.push({
                 orderId,
-                orderNumber: e.node.name,
-                processedAt: e.node.processedAt,
+                // vi har inte order.name i snapshot → håll fältet men använd null
+                orderNumber: p.orderNumber || null,
+                processedAt: snap.created_at,
                 lineItemId: p.lineItemId,
                 productId: p.productId,
                 productTitle: p.productTitle,
@@ -5196,12 +5177,82 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
             }
           });
         }
-      } catch (e) {
-        console.error(
-          '/proxy/orders-meta/reviews/pending GraphQL-fel:',
-          e?.response?.data || e?.message || e
-        );
       }
+    } catch (e) {
+      console.warn(
+        '/proxy/orders-meta/reviews/pending snapshot-fel:',
+        e?.response?.data || e.message
+      );
+      snapshotsOk = false;
+      out = [];
+    }
+
+    // Om snapshots funkade (kund eller team) → använd dem och skippa GraphQL
+    if (snapshotsOk) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ pending: out, items: out });
+    }
+
+    // I TEAM-LÄGE finns ingen rimlig GraphQL-fallback → returnera tom lista
+    if (scopeParam === 'team') {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ pending: [], items: [] });
+    }
+
+    // ===== 2) Fallback: befintlig Shopify GraphQL-implementation (endast personal) =====
+    const q = `customer_id:${cidNum} status:any`;
+    const query = `
+      query OrdersWithMeta($first:Int!,$q:String!,$ns:String!,$key:String!){
+        orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true){
+          edges{
+            node{
+              id
+              name
+              processedAt
+              metafield(namespace:$ns, key:$key){ value }
+            }
+          }
+        }
+      }`;
+
+    const data = await shopifyGraphQL(query, {
+      first: 50,
+      q,
+      ns: ORDER_META_NAMESPACE,
+      key: ORDER_META_KEY
+    });
+
+    if (data.errors) throw new Error('GraphQL error');
+
+    const edges = data?.data?.orders?.edges || [];
+    out = [];
+
+    for (const e of edges) {
+      const orderId = parseInt(gidToId(e.node.id), 10) || gidToId(e.node.id);
+      let items = [];
+
+      try {
+        items = e.node.metafield?.value
+          ? JSON.parse(e.node.metafield.value)
+          : [];
+      } catch {
+        items = [];
+      }
+
+      (items || []).forEach((p) => {
+        const isDone = p?.review?.status === 'done';
+        if (!isDone) {
+          out.push({
+            orderId,
+            orderNumber: e.node.name,
+            processedAt: e.node.processedAt,
+            lineItemId: p.lineItemId,
+            productId: p.productId,
+            productTitle: p.productTitle,
+            preview_img: p.previewUrl || p.preview_img || null
+          });
+        }
+      });
     }
 
     res.setHeader('Cache-Control', 'no-store');
@@ -5210,11 +5261,12 @@ app.get('/proxy/orders-meta/reviews/pending', async (req, res) => {
   } catch (err) {
     console.error(
       'GET /proxy/orders-meta/reviews/pending:',
-      err?.response?.data || err?.message || err
+      err?.response?.data || err.message
     );
-    return res.status(500).json({ error: 'Internal error' });
+    return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 
 // ===== NYA APP PROXY-ROUTER FÖR PROFILUPPDATERING =====
