@@ -3128,12 +3128,15 @@ app.post('/webhooks/order-updated', async (req, res) => {
     );
 
     if (!mf || !mf.value) {
-      console.log('[orders_snapshot] order-updated: inget order-metafält att spegla, hoppar över', orderId);
+      console.log(
+        '[orders_snapshot] order-updated: inget order-metafält att spegla, hoppar över',
+        orderId
+      );
       return res.sendStatus(200);
     }
 
     // =========================
-    // NYTT: sätt "Slutförd" när ordern är levererad/fulfiled i Shopify
+    // NYTT: sätt "Slutförd" när ordern är levererad/fulfilled i Shopify
     // =========================
 
     const rawFulfillmentStatus =
@@ -3149,12 +3152,13 @@ app.post('/webhooks/order-updated', async (req, res) => {
 
     let isDelivered = false;
     try {
+      // Återanvänd befintlig helper som redan avgör "levererad" baserat på fulfillment + metafält
       isDelivered = isDeliveredOrderShape(deliveredShape);
     } catch (e) {
       isDelivered = false;
     }
 
-    // Extra defensiv fallback: direkt på fulfillment_status-stringen
+    // Extra defensiv fallback: titta direkt på fulfillment_status-strängen
     if (!isDelivered && rawFulfillmentStatus) {
       const fs = String(rawFulfillmentStatus).toUpperCase();
       if (fs === 'FULFILLED' || fs === 'DELIVERED' || fs === 'SHIPPED') {
@@ -3162,6 +3166,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
       }
     }
 
+    // ===== CASE 1: Ordern är levererad/fulfilled → skriv "Slutförd" =====
     if (isDelivered) {
       console.log(
         '[orders_snapshot] order-updated: order betraktas som levererad – sätter status "Slutförd" i metafältet',
@@ -3189,7 +3194,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
         projects = [];
       }
 
-      const nowIso = new Date().toISOString();
+      const nowIsoVal = new Date().toISOString();
 
       // 2) Sätt status/tag "Slutförd" på alla projekt
       const completedProjects = (projects || []).map((p) => {
@@ -3198,7 +3203,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
           ...p,
           status: 'Slutförd',
           tag: 'Slutförd',
-          completedAt: p.completedAt || nowIso
+          completedAt: p.completedAt || nowIsoVal
         };
       });
 
@@ -3210,11 +3215,11 @@ app.post('/webhooks/order-updated', async (req, res) => {
           orderId
         );
       } catch (e) {
-        console.error(
-          '[order-updated] kunde inte skriva "Slutförd" till order-metafältet:',
+        console.warn(
+          '[order-updated] writeOrderProjects misslyckades:',
           e?.response?.data || e.message
         );
-        // fallback: försök åtminstone spegla det befintliga metafältet till snapshot
+        // Fallback: försök åtminstone spegla det ursprungliga metafältet till snapshot
         try {
           await upsertOrderSnapshotFromMetafield(order, mf.value);
         } catch (e2) {
@@ -3246,7 +3251,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
           order?.processed_at ||
           order?.updated_at ||
           order?.created_at ||
-          nowIso;
+          nowIso();
 
         await touchOrderSummary(customerIdForIndex, Number(orderId), {
           processedAt,
@@ -3260,7 +3265,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
         );
       }
 
-      // 6) Håll Postgres-snapshot i sync med nya projekt + invalidera /proxy/orders-meta-cache
+      // 6) Håll Postgres-snapshot i sync med nya projekt
       try {
         const customerIdExtra = order?.customer?.id
           ? Number(String(order.customer.id).split('/').pop())
@@ -3271,7 +3276,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
           order?.processed_at ||
           order?.updated_at ||
           order?.created_at ||
-          nowIso;
+          nowIso();
 
         await syncSnapshotAfterMetafieldWrite(orderId, completedProjects, {
           customerId: customerIdExtra,
@@ -3293,7 +3298,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Om ordern INTE är levererad → behåll tidigare beteende:
+    // ===== CASE 2: Ordern är INTE levererad → behåll tidigare beteende =====
     // Spegla exakt samma metafält-value till vår Postgres-snapshot
     try {
       await upsertOrderSnapshotFromMetafield(order, mf.value);
@@ -3318,21 +3323,6 @@ app.post('/webhooks/order-updated', async (req, res) => {
   }
 });
 
-
-    // Spegla exakt samma metafält-value till vår Postgres-snapshot
-    try {
-      await upsertOrderSnapshotFromMetafield(order, mf.value);
-      console.log('[orders_snapshot] order-updated: snapshot uppdaterad', orderId);
-    } catch (e) {
-      console.warn('[orders_snapshot] order-updated → snapshot misslyckades:', e?.message || e);
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('[orders_snapshot] Fel vid webhook/order-updated:', err?.response?.data || err.message);
-    res.sendStatus(500);
-  }
-});
 
 // Hämta korrektur-status för kund
 // Hämta korrektur-status för kund (Postgres först, Shopify fallback)
