@@ -3106,28 +3106,213 @@ app.post('/webhooks/order-updated', async (req, res) => {
 
   try {
     const order = req.body;
-    const orderId = order && order.id;
+    const orderId = order?.id;
 
     if (!orderId) {
       console.warn('[orders_snapshot] order-updated: saknar order.id i payload');
       return res.sendStatus(400);
     }
 
-    // Hämta det aktuella order-metafältet från Shopify – metafältet är alltid sanningen
+    // Hämta order-metafält – metafältet är alltid sanningen
     const mfResp = await axios.get(
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
 
-    const metafields = (mfResp.data && mfResp.data.metafields) || [];
+    const metafields = mfResp.data?.metafields || [];
     const mf = metafields.find(
       (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
     );
 
     if (!mf || !mf.value) {
-      console.log('[orders_snapshot] order-updated: inget order-metafält att spegla, hoppar över', orderId);
+      console.log(
+        '[orders_snapshot] order-updated: inget order-metafält att spegla, hoppar över',
+        orderId
+      );
       return res.sendStatus(200);
     }
+
+    // =========================
+    // NYTT: sätt "Slutförd" när ordern är levererad/fulfilled i Shopify
+    // =========================
+
+    const rawFulfillmentStatus =
+      order?.fulfillment_status ||
+      order?.fulfillmentStatus ||
+      null;
+
+    const rawDisplayStatus =
+      order?.display_fulfillment_status ||
+      order?.displayFulfillmentStatus ||
+      null;
+
+    const deliveredShape = {
+      fulfillmentStatus: rawFulfillmentStatus || undefined,
+      displayFulfillmentStatus: rawDisplayStatus || undefined,
+      metafield: mf.value
+    };
+
+    let isDelivered = false;
+
+    try {
+      isDelivered = isDeliveredOrderShape(deliveredShape);
+    } catch {
+      isDelivered = false;
+    }
+
+    // Fallback: tolka fulfillment_status direkt
+    if (!isDelivered && rawFulfillmentStatus) {
+      const fs = String(rawFulfillmentStatus).toUpperCase();
+      if (['FULFILLED', 'DELIVERED', 'SHIPPED'].includes(fs)) {
+        isDelivered = true;
+      }
+    }
+
+    if (isDelivered) {
+      console.log(
+        '[orders_snapshot] order-updated: order betraktas som levererad – sätter status "Slutförd"',
+        orderId
+      );
+
+      // 1) Parsea projekt-metafältet
+      let projects = [];
+      try {
+        const parsed = JSON.parse(mf.value || '[]');
+        if (Array.isArray(parsed)) {
+          projects = parsed;
+        } else if (parsed?.projects && Array.isArray(parsed.projects)) {
+          projects = parsed.projects;
+        } else if (parsed && typeof parsed === 'object') {
+          projects = [parsed];
+        }
+      } catch (e) {
+        console.warn(
+          '[order-updated] kunde inte parsa order-metafält, fortsätter med tom array:',
+          e?.message || e
+        );
+      }
+
+      const now = new Date().toISOString();
+
+      // 2) Sätt status/tag "Slutförd" på alla projekt
+      const completedProjects = projects.map((p) => {
+        if (!p || typeof p !== 'object') return p;
+        return {
+          ...p,
+          status: 'Slutförd',
+          tag: 'Slutförd',
+          completedAt: p.completedAt || now
+        };
+      });
+
+      // 3) Skriv tillbaka metafältet i Shopify
+      try {
+        await writeOrderProjects(mf.id, completedProjects);
+        console.log(
+          '[orders_snapshot] order-updated: metafält uppdaterat till "Slutförd" för order',
+          orderId
+        );
+      } catch (e) {
+        console.error(
+          '[order-updated] kunde inte skriva "Slutförd" till order-metafältet:',
+          e?.response?.data || e.message
+        );
+
+        // fallback: uppdatera snapshot med originalvärdet
+        try {
+          await upsertOrderSnapshotFromMetafield(order, mf.value);
+        } catch (e2) {
+          console.warn(
+            '[orders_snapshot] order-updated → snapshot misslyckades (fallback, original-metafält):',
+            e2?.message || e2
+          );
+        }
+
+        return res.sendStatus(200);
+      }
+
+      // 4) Uppdatera Redis-cache
+      try {
+        await cacheOrderProjects(orderId, completedProjects);
+      } catch (e) {
+        console.warn('[order-updated] cacheOrderProjects misslyckades:', e?.message || e);
+      }
+
+      // 5) Uppdatera sammanfattning
+      try {
+        const customerIdForIndex = order?.customer?.id
+          ? Number(String(order.customer.id).split('/').pop())
+          : null;
+
+        const processedAt =
+          order?.processed_at ||
+          order?.updated_at ||
+          order?.created_at ||
+          now;
+
+        await touchOrderSummary(customerIdForIndex, Number(orderId), {
+          processedAt,
+          metafield: JSON.stringify(completedProjects),
+          fulfillmentStatus: rawFulfillmentStatus || ''
+        });
+      } catch (e) {
+        console.warn('[order-updated] touchOrderSummary misslyckades:', e?.message || e);
+      }
+
+      // 6) Sync Postgres + cache-invalidering
+      try {
+        const customerIdExtra = order?.customer?.id
+          ? Number(String(order.customer.id).split('/').pop())
+          : null;
+
+        const customerEmailExtra = order?.customer?.email || order?.email || null;
+
+        const processedAtExtra =
+          order?.processed_at ||
+          order?.updated_at ||
+          order?.created_at ||
+          now;
+
+        await syncSnapshotAfterMetafieldWrite(orderId, completedProjects, {
+          customerId: customerIdExtra,
+          customerEmail: customerEmailExtra,
+          processedAt: processedAtExtra
+        });
+
+        console.log(
+          '[orders_snapshot] order-updated: snapshot + cache uppdaterade med "Slutförd" för order',
+          orderId
+        );
+      } catch (e) {
+        console.warn(
+          '[orders_snapshot] order-updated → syncSnapshotAfterMetafieldWrite misslyckades:',
+          e?.message || e
+        );
+      }
+
+      return res.sendStatus(200);
+    }
+
+    // ===== Om ordern inte är levererad: gammalt beteende =====
+    try {
+      await upsertOrderSnapshotFromMetafield(order, mf.value);
+      console.log(
+        '[orders_snapshot] order-updated: snapshot uppdaterad (ej levererad order)',
+        orderId
+      );
+    } catch (e) {
+      console.warn('[orders_snapshot] order-updated → snapshot misslyckades:', e?.message || e);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error(
+      '[orders_snapshot] Fel vid webhook/order-updated:',
+      err?.response?.data || err.message
+    );
+    res.sendStatus(500);
+  }
+});
 
     // Spegla exakt samma metafält-value till vår Postgres-snapshot
     try {
