@@ -3098,6 +3098,9 @@ try {
 
 
 
+// FILE: index.js
+// AFTER (context: webhook /webhooks/order-updated – sätt "Slutförd" när order är distribuerad/fulfilled i Shopify)
+
 app.post('/webhooks/order-updated', async (req, res) => {
   console.log('📬 Webhook order-updated mottagen');
 
@@ -3134,39 +3137,23 @@ app.post('/webhooks/order-updated', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 2) Avgör om ordern ska betraktas som levererad/fulfilled
+    // 2) Avgör om ordern ska betraktas som DISTRIBUERAD i Shopify
+    //    Dvs: fulfillment_status === "fulfilled" (case-insensitive).
     const rawFulfillmentStatus =
       (order && (order.fulfillment_status || order.fulfillmentStatus)) || null;
-    const rawDisplayStatus =
-      (order && (order.display_fulfillment_status || order.displayFulfillmentStatus)) ||
-      null;
 
-    const deliveredShape = {
-      fulfillmentStatus: rawFulfillmentStatus || undefined,
-      displayFulfillmentStatus: rawDisplayStatus || undefined,
-      metafield: mf.value
-    };
-
-    let isDelivered = false;
-    try {
-      // Använd befintlig helper för att avgöra "levererad"
-      isDelivered = isDeliveredOrderShape(deliveredShape);
-    } catch (e) {
-      isDelivered = false;
-    }
-
-    // Extra defensiv fallback: titta direkt på fulfillment_status-strängen
-    if (!isDelivered && rawFulfillmentStatus) {
-      const fs = String(rawFulfillmentStatus).toUpperCase();
-      if (fs === 'FULFILLED' || fs === 'DELIVERED' || fs === 'SHIPPED') {
-        isDelivered = true;
+    let isDistributed = false;
+    if (rawFulfillmentStatus) {
+      const fs = String(rawFulfillmentStatus).trim().toLowerCase();
+      if (fs === 'fulfilled') {
+        isDistributed = true;
       }
     }
 
-    // ===== CASE 1: Ordern är levererad/fulfilled → sätt status "Slutförd" =====
-    if (isDelivered) {
+    // ===== CASE 1: Ordern är distribuerad (fulfillment_status = "fulfilled") → sätt status "Slutförd" =====
+    if (isDistributed) {
       console.log(
-        '[orders_snapshot] order-updated: order betraktas som levererad – sätter status "Slutförd" i metafältet',
+        '[orders_snapshot] order-updated: order betraktas som distribuerad (fulfillment_status="fulfilled") – sätter status "Slutförd" i metafältet',
         orderId
       );
 
@@ -3299,12 +3286,12 @@ app.post('/webhooks/order-updated', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ===== CASE 2: Ordern är INTE levererad → behåll tidigare beteende =====
+    // ===== CASE 2: Ordern är INTE distribuerad (fulfillment_status != "fulfilled") → behåll tidigare beteende =====
     // Spegla exakt samma metafält-value till vår Postgres-snapshot
     try {
       await upsertOrderSnapshotFromMetafield(order, mf.value);
       console.log(
-        '[orders_snapshot] order-updated: snapshot uppdaterad (ej levererad order)',
+        '[orders_snapshot] order-updated: snapshot uppdaterad (ej distribuerad order)',
         orderId
       );
     } catch (e) {
@@ -3323,6 +3310,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
     res.sendStatus(500);
   }
 });
+
 
 
 
