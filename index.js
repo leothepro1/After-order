@@ -3098,9 +3098,6 @@ try {
 
 
 
-// FILE: index.js
-// AFTER (context: webhook /webhooks/order-updated – sätt "Slutförd" när order är distribuerad/fulfilled i Shopify)
-
 app.post('/webhooks/order-updated', async (req, res) => {
   console.log('📬 Webhook order-updated mottagen');
 
@@ -3157,7 +3154,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
         orderId
       );
 
-      // 2a) Parsea befintliga projekt från metafältet
+      // 2a) Parsea befintliga projekt från metafältet (samma typ av struktur som övriga flows)
       let projects = [];
       try {
         const parsed = JSON.parse(mf.value || '[]');
@@ -3310,6 +3307,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
     res.sendStatus(500);
   }
 });
+
 
 
 
