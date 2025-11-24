@@ -3096,8 +3096,7 @@ try {
 
 });
 
-// FILE: index.js
-// AFTER (context: webhook /webhooks/order-updated – sätter status "Slutförd" när order är fulfilled/levererad)
+
 
 app.post('/webhooks/order-updated', async (req, res) => {
   console.log('📬 Webhook order-updated mottagen');
@@ -3116,7 +3115,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
       return res.sendStatus(400);
     }
 
-    // Hämta det aktuella order-metafältet från Shopify – metafältet är alltid sanningen
+    // 1) Hämta aktuellt order-metafält från Shopify – metafältet är "sanningen"
     const mfResp = await axios.get(
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
@@ -3135,14 +3134,12 @@ app.post('/webhooks/order-updated', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =========================
-    // NYTT: sätt "Slutförd" när ordern är levererad/fulfilled i Shopify
-    // =========================
-
+    // 2) Avgör om ordern ska betraktas som levererad/fulfilled
     const rawFulfillmentStatus =
       (order && (order.fulfillment_status || order.fulfillmentStatus)) || null;
     const rawDisplayStatus =
-      (order && (order.display_fulfillment_status || order.displayFulfillmentStatus)) || null;
+      (order && (order.display_fulfillment_status || order.displayFulfillmentStatus)) ||
+      null;
 
     const deliveredShape = {
       fulfillmentStatus: rawFulfillmentStatus || undefined,
@@ -3152,7 +3149,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
 
     let isDelivered = false;
     try {
-      // Återanvänd befintlig helper som redan avgör "levererad" baserat på fulfillment + metafält
+      // Använd befintlig helper för att avgöra "levererad"
       isDelivered = isDeliveredOrderShape(deliveredShape);
     } catch (e) {
       isDelivered = false;
@@ -3166,20 +3163,24 @@ app.post('/webhooks/order-updated', async (req, res) => {
       }
     }
 
-    // ===== CASE 1: Ordern är levererad/fulfilled → skriv "Slutförd" =====
+    // ===== CASE 1: Ordern är levererad/fulfilled → sätt status "Slutförd" =====
     if (isDelivered) {
       console.log(
         '[orders_snapshot] order-updated: order betraktas som levererad – sätter status "Slutförd" i metafältet',
         orderId
       );
 
-      // 1) Parsea befintliga projekt från metafältet
+      // 2a) Parsea befintliga projekt från metafältet
       let projects = [];
       try {
         const parsed = JSON.parse(mf.value || '[]');
         if (Array.isArray(parsed)) {
           projects = parsed;
-        } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.projects)) {
+        } else if (
+          parsed &&
+          typeof parsed === 'object' &&
+          Array.isArray(parsed.projects)
+        ) {
           projects = parsed.projects;
         } else if (parsed && typeof parsed === 'object') {
           projects = [parsed];
@@ -3194,9 +3195,9 @@ app.post('/webhooks/order-updated', async (req, res) => {
         projects = [];
       }
 
-      const nowIsoVal = new Date().toISOString();
+      const nowIsoVal = nowIso();
 
-      // 2) Sätt status/tag "Slutförd" på alla projekt
+      // 2b) Sätt status/tag "Slutförd" på alla projekt
       const completedProjects = (projects || []).map((p) => {
         if (!p || typeof p !== 'object') return p;
         return {
@@ -3219,7 +3220,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
           '[order-updated] writeOrderProjects misslyckades:',
           e?.response?.data || e.message
         );
-        // Fallback: försök åtminstone spegla det ursprungliga metafältet till snapshot
+        // Fallback: spegla åtminstone det ursprungliga metafältet till snapshot
         try {
           await upsertOrderSnapshotFromMetafield(order, mf.value);
         } catch (e2) {
@@ -3241,7 +3242,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
         );
       }
 
-      // 5) Uppdatera order-sammanfattning i Redis
+      // 5) Uppdatera order-sammanfattning i Redis (/apps/orders-meta läser här)
       try {
         const customerIdForIndex = order?.customer?.id
           ? Number(String(order.customer.id).split('/').pop())
@@ -3322,6 +3323,7 @@ app.post('/webhooks/order-updated', async (req, res) => {
     res.sendStatus(500);
   }
 });
+
 
 
 // Hämta korrektur-status för kund
