@@ -4326,6 +4326,8 @@ app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 // ADMIN: MANUELL FULFILLMENT + TRACKING
 // ===========================================================
 
+// AFTER
+
 app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
   try {
     // 1) Verifiera App Proxy-signatur
@@ -4349,6 +4351,7 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
 
     // 4) Läs och validera body
     const body = req.body || {};
+    console.log('[proxy fulfill] incoming body:', body);
 
     const orderIdRaw = body.orderId || body.order_id;
     const orderId = String(orderIdRaw || '').trim();
@@ -4373,12 +4376,27 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     const trackingUrlRaw = body.tracking_url || body.trackingUrl || '';
     const trackingUrl = String(trackingUrlRaw || '').trim();
 
+    // === Viktigt: produktbaserat → vi kräver en line_item_id i body ===
     const lineItemsInput =
       Array.isArray(body.line_items) && body.line_items.length
         ? body.line_items
         : Array.isArray(body.lineItems) && body.lineItems.length
         ? body.lineItems
         : [];
+
+    if (!lineItemsInput.length) {
+      return res.status(400).json({ ok: false, error: 'line_items_required' });
+    }
+
+    // Ta första posten – vi fulfillar alltid EN rad, alltid hela kvantiteten
+    const firstLi = lineItemsInput[0] || {};
+    const targetLineItemIdRaw =
+      firstLi.line_item_id || firstLi.lineItemId || firstLi.id || '';
+
+    const targetLineItemId = Number(String(targetLineItemIdRaw).trim());
+    if (!targetLineItemId || Number.isNaN(targetLineItemId)) {
+      return res.status(400).json({ ok: false, error: 'invalid_line_items' });
+    }
 
     // 5) Hämta fulfillment_orders för ordern
     const foResp = await axios.get(
@@ -4391,53 +4409,38 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       return res.status(409).json({ ok: false, error: 'no_fulfillment_orders' });
     }
 
-     // 6) Bygg line_items_by_fulfillment_order (produktbaserat, full kvantitet)
-    if (!lineItemsInput.length) {
-      // Frontend måste skicka minst en rad (line_item_id)
-      return res
-        .status(400)
-        .json({ ok: false, error: 'line_items_required' });
-    }
-
+    // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
     const segments = [];
 
     for (const fo of fulfillmentOrders) {
       const foLineItems = fo.line_items || [];
-      const selected = [];
+      const matches = foLineItems.filter(
+        (x) => Number(x.line_item_id || x.id || 0) === targetLineItemId
+      );
 
-      for (const li of lineItemsInput) {
-        const wantedId = String(
-          li.line_item_id || li.lineItemId || li.id || ''
-        ).trim();
-        if (!wantedId) continue;
+      if (!matches.length) continue;
 
-        const match = foLineItems.find(
-          (x) => String(x.line_item_id || x.id || '').trim() === wantedId
-        );
-        if (!match) continue;
-
-        // Alltid hela fulfillable_quantity för just den produkten
-        const fulfillable = Number(match.fulfillable_quantity || 0);
-        if (!fulfillable || Number.isNaN(fulfillable)) continue;
-
-        selected.push({
-          id: match.id,
-          quantity: fulfillable
-        });
+      const foLines = [];
+      for (const ml of matches) {
+        const maxQty = Number(ml.fulfillable_quantity || ml.quantity || 0);
+        if (maxQty > 0) {
+          foLines.push({
+            id: ml.id,              // fulfillment_order_line_item.id
+            quantity: maxQty        // ALLTID hela kvantiteten
+          });
+        }
       }
 
-      if (selected.length) {
+      if (foLines.length) {
         segments.push({
           fulfillment_order_id: fo.id,
-          fulfillment_order_line_items: selected
+          fulfillment_order_line_items: foLines
         });
       }
     }
 
     if (!segments.length) {
-      return res
-        .status(409)
-        .json({ ok: false, error: 'no_fulfillable_lines' });
+      return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
     }
 
     // 7) Skapa fulfillment i Shopify
@@ -4458,18 +4461,31 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       payload.fulfillment.tracking_info.url = trackingUrl;
     }
 
-    const fulResp = await axios.post(
-      `https://${SHOP}/admin/api/2025-07/fulfillments.json`,
-      payload,
-      {
-        headers: {
-          'X-Shopify-Access-Token': ACCESS_TOKEN,
-          'Content-Type': 'application/json'
+    let fulfillment;
+    try {
+      const fulResp = await axios.post(
+        `https://${SHOP}/admin/api/2025-07/fulfillments.json`,
+        payload,
+        {
+          headers: {
+            'X-Shopify-Access-Token': ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
         }
-      }
-    );
-
-    const fulfillment = fulResp.data?.fulfillment || null;
+      );
+      fulfillment = fulResp.data?.fulfillment || null;
+    } catch (err) {
+      console.error(
+        'proxy fulfill error:',
+        err?.response?.data || err.message || err
+      );
+      // Shopify-return typ: { errors: ['Invalid fulfillment order line item quantity requested.'] }
+      return res.status(400).json({
+        ok: false,
+        error: 'shopify_fulfillment_error',
+        details: err?.response?.data || null
+      });
+    }
 
     // 8) Markera projekten som "Slutförd"
     let completedProjects = null;
@@ -4492,11 +4508,12 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
         );
 
         if (mf && mf.value) {
-          completedProjects = await markOrderProjectsAsSlutförd(
+          const result = await markOrderProjectsAsSlutförd(
             order,
             mf,
             order.fulfillment_status || order.fulfillmentStatus || 'fulfilled'
           );
+          completedProjects = result?.completedProjects || null;
         }
       }
     } catch (e) {
@@ -4506,16 +4523,20 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       );
     }
 
-    return res.json({ ok: true, fulfillment, projects: completedProjects });
-
-  } catch (err) {
+    return res.json({
+      ok: true,
+      fulfillment,
+      projects: completedProjects
+    });
+  } catch (e) {
     console.error(
-      'proxy fulfill error:',
-      err?.response?.data || err.message || err
+      'POST /proxy/orders-meta/order/fulfill:',
+      e?.response?.data || e.message
     );
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 
 
 app.all('/proxy/orders-meta/avatar', async (req, res) => {
