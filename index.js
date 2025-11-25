@@ -7310,14 +7310,22 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       fulfillment,
       projects: completedProjects
     });
-  } catch (e) {
-    console.error(
-      'POST /proxy/orders-meta/order/fulfill:',
-      e?.response?.data || e.message
-    );
-    return res.status(500).json({ ok: false, error: 'internal' });
-  }
-});
+} catch (e) {
+  // Mer informativ logg i servern
+  console.error(
+    'POST /proxy/orders-meta/order/fulfill ERROR:',
+    e?.response?.status,
+    e?.response?.data || e.message || e
+  );
+
+  const status = e?.response?.status || 500;
+
+  return res.status(status).json({
+    ok: false,
+    error: 'internal',
+    detail: e?.response?.data || e.message || String(e)
+  });
+}
 
 // ===== RENAME: byt värdet på line item property "Tryckfil" via App Proxy =====
 app.post('/proxy/orders-meta/rename', async (req, res) => {
