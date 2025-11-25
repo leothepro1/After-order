@@ -760,12 +760,10 @@ function generateArtworkToken(orderId, lineItemId) {
   return { token, tid, token_hash };
 }
 
-// <!-- AFTER -->
 
-// ==== KÄRNAN: Shopify-läsning, används fortfarande för alla writes ====
 async function readOrderProjects(orderId) {
   const { data } = await axios.get(
-    https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json,
+  `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 
