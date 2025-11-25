@@ -7080,7 +7080,7 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
 
     // 6) Neka om någon rad redan är i produktion (säkerhet även om UI döljer knappen)
     const hasInProduction = (projects || []).some(
-      (p) => String(p.status || '') === 'I produktion'
+      p => String(p.status || '') === 'I produktion'
     );
     if (hasInProduction) {
       return res.status(409).json({ ok: false, error: 'in_production' });
@@ -7088,7 +7088,7 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
 
     // 7) Sätt status till "Annulerad" på samtliga projekt
     const now = new Date().toISOString();
-    const next = (projects || []).map((p) => ({
+    const next = (projects || []).map(p => ({
       ...p,
       status: 'Annulerad',
       tag: 'Annulerad',
@@ -7097,20 +7097,17 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
     await writeOrderProjects(metafieldId, next);
     try {
       await cacheOrderProjects(orderId, next);
-    } catch {
-      // cache-fel ignoreras
-    }
+    } catch {}
 
     // 8) (valfritt) enkel activity-logg
     try {
-      const entries = (order.line_items || []).map((li) => ({
+      const entries = (order.line_items || []).map(li => ({
         ts: now,
         actor: {
           type: 'customer',
           name:
-            `${order.customer?.first_name || ''} ${
-              order.customer?.last_name || ''
-            }`.trim() || 'Kund'
+            `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`
+              .trim() || 'Kund'
         },
         action: 'order.cancelled_request',
         order_id: Number(orderId),
@@ -7120,11 +7117,10 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
         correlation_id: `order.cancelled_request:${orderId}:${li.id}:${cidNum}`
       }));
       await appendActivity(orderId, entries);
-    } catch {
-      // activity-logg är best effort
-    }
+    } catch {}
 
     return res.json({ ok: true });
+
   } catch (e) {
     console.error('proxy cancel error:', e?.response?.data || e.message);
     return res.status(500).json({ ok: false, error: 'internal' });
@@ -7153,7 +7149,7 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       return res.status(403).json({ ok: false, error: 'forbidden_admin_only' });
     }
 
-    // 4) Läs & validera body
+    // 4) Läs & validera body – vi kräver alltid minst en line_item
     const orderIdRaw = req.body?.orderId;
     const trackingNumber = String(req.body?.tracking_number || '').trim();
     const trackingCompany =
@@ -7161,13 +7157,32 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     const trackingUrl = String(req.body?.tracking_url || '').trim() || '';
     const lineItemsBody = Array.isArray(req.body?.line_items)
       ? req.body.line_items
-      : null;
+      : [];
 
     const orderId = String(orderIdRaw || '').trim();
     if (!orderId || !trackingNumber) {
       return res
         .status(400)
         .json({ ok: false, error: 'orderId_and_tracking_required' });
+    }
+
+    if (!lineItemsBody.length) {
+      // Vi fulfullar aldrig hela ordern; minst en produkt måste specificeras
+      return res.status(400).json({ ok: false, error: 'line_items_required' });
+    }
+
+    // Normalisera requested line_item_ids (vi ignorerar kvantiteten, det är ALLTID full kvantitet)
+    const requestedIds = new Set(
+      lineItemsBody
+        .map(li =>
+          String(li.line_item_id || li.lineItemId || li.id || '').trim()
+        )
+        .filter(Boolean)
+    );
+    if (!requestedIds.size) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'invalid_line_items' });
     }
 
     // 5) Hämta fulfillment_orders för ordern
@@ -7181,60 +7196,47 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     }
 
     // 6) Bygg line_items_by_fulfillment_order
-    let lineItemsByFulfillment = [];
+    const lineItemsByFulfillment = [];
 
-    if (lineItemsBody && lineItemsBody.length) {
-      const requested = lineItemsBody
-        .map((li) => ({
-          line_item_id: Number(li.line_item_id || li.lineItemId || li.id),
-          quantity: Number(li.quantity || li.qty || 0)
-        }))
-        .filter((li) => li.line_item_id && li.quantity > 0);
+    for (const fo of fulfillmentOrders) {
+      const foLines = [];
 
-      if (!requested.length) {
-        return res.status(400).json({ ok: false, error: 'invalid_line_items' });
-      }
+      for (const li of fo.line_items || []) {
+        const baseLineId = String(li.line_item_id || li.id || '').trim();
+        if (!baseLineId) continue;
 
-      for (const fo of fulfillmentOrders) {
-        const foLines = [];
-        for (const li of fo.line_items || []) {
-          const reqEntry = requested.find(
-            (r) => Number(r.line_item_id) === Number(li.line_item_id)
-          );
-          if (reqEntry) {
-            const remaining =
-              li.remaining_quantity ?? li.quantity ?? reqEntry.quantity;
-            const qty = Math.min(reqEntry.quantity, remaining);
-            if (qty > 0) {
-              foLines.push({
-                id: li.id,
-                quantity: qty
-              });
-            }
-          }
+        if (!requestedIds.has(baseLineId)) continue;
+
+        // ALLTID hela kvarvarande kvantiteten på den produkten
+        const maxQty = Number(
+          li.fulfillable_quantity ??
+          li.remaining_quantity ??
+          li.quantity ??
+          0
+        );
+
+        if (!maxQty || Number.isNaN(maxQty)) {
+          continue;
         }
-        if (foLines.length) {
-          lineItemsByFulfillment.push({
-            fulfillment_order_id: fo.id,
-            fulfillment_order_line_items: foLines
-          });
-        }
-      }
 
-      if (!lineItemsByFulfillment.length) {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'no_matching_fulfillment_lines' });
-      }
-    } else {
-      // Fulfill:a alla kvarvarande rader
-      lineItemsByFulfillment = fulfillmentOrders.map((fo) => ({
-        fulfillment_order_id: fo.id,
-        fulfillment_order_line_items: (fo.line_items || []).map((li) => ({
+        foLines.push({
           id: li.id,
-          quantity: li.remaining_quantity ?? li.quantity
-        }))
-      }));
+          quantity: maxQty
+        });
+      }
+
+      if (foLines.length) {
+        lineItemsByFulfillment.push({
+          fulfillment_order_id: fo.id,
+          fulfillment_order_line_items: foLines
+        });
+      }
+    }
+
+    if (!lineItemsByFulfillment.length) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'no_matching_fulfillment_lines' });
     }
 
     const payload = {
@@ -7269,11 +7271,9 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     );
     const order = orderResp.data?.order;
     if (!order) {
-      return res.status(500).json({
-        ok: false,
-        error: 'order_reload_failed',
-        fulfillment
-      });
+      return res
+        .status(500)
+        .json({ ok: false, error: 'order_reload_failed', fulfillment });
     }
 
     // 9) Läs nuvarande projekten via readOrderProjects (Admin-metafältet är sanningen)
@@ -7310,144 +7310,13 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       fulfillment,
       projects: completedProjects
     });
-} catch (e) {
-  // Mer informativ logg i servern
-  console.error(
-    'POST /proxy/orders-meta/order/fulfill ERROR:',
-    e?.response?.status,
-    e?.response?.data || e.message || e
-  );
 
-  const status = e?.response?.status || 500;
-
-  return res.status(status).json({
-    ok: false,
-    error: 'internal',
-    detail: e?.response?.data || e.message || String(e)
-  });
-}
-
-// ===== RENAME: byt värdet på line item property "Tryckfil" via App Proxy =====
-app.post('/proxy/orders-meta/rename', async (req, res) => {
-  try {
-    // 1) Säkerhet: App Proxy-signatur + inloggad kund
-    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
-      return res.status(403).json({ error: 'invalid_signature' });
-    }
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) return res.status(401).json({ error: 'not_logged_in' });
-
-    // 2) Body-validering
-    const orderId   = String(req.body?.orderId   || '').trim();
-    const lineItemId= String(req.body?.lineItemId|| '').trim();
-    const oldName   = String(req.body?.oldName   ?? '').trim();
-    const newName   = String(req.body?.newName   ?? '').trim();
-    if (!orderId || !lineItemId || !newName) {
-      return res.status(400).json({ error: 'missing_params' });
-    }
-
-    // 3) Ägarcheck: kunden måste äga ordern
-    const { data } = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+  } catch (e) {
+    console.error(
+      'POST /proxy/orders-meta/order/fulfill:',
+      e?.response?.data || e.message
     );
-    const order = data?.order;
-    if (!order) return res.status(404).json({ error: 'order_not_found' });
-
-    const cidRaw = String(loggedInCustomerId);
-    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
-    const ownerId = String(order?.customer?.id || '');
-    if (!ownerId.endsWith(cidNum)) {
-      return res.status(403).json({ error: 'forbidden_not_owner' });
-    }
-
-    // 4) Läs & uppdatera projekten i SAMMA metafält (order-created)
-    const { metafieldId, projects } = await readOrderProjects(orderId);
-    if (!metafieldId) return res.status(404).json({ error: 'metafield_not_found' });
-
-    const idx = (projects || []).findIndex(p => String(p.lineItemId) === String(lineItemId));
-    if (idx < 0) return res.status(404).json({ error: 'line_item_not_found' });
-
-    const proj = projects[idx] || {};
-    const props = Array.isArray(proj.properties) ? proj.properties.slice() : [];
-
-    let touched = false;
-    const nextProps = props.map(pr => {
-      if (!pr || typeof pr !== 'object') return pr;
-      const nm = String(pr.name || '').toLowerCase();
-      if (nm === 'tryckfil') {
-        // Byt bara värdet
-        if (String(pr.value || '') !== newName) {
-          touched = true;
-          return { ...pr, value: newName };
-        } else {
-          touched = true; // redan samma namn → idempotent OK
-          return pr;
-        }
-      }
-      return pr;
-    });
-
-    if (!touched) {
-      // Hittade ingen "Tryckfil"-property i projektet
-      return res.status(404).json({ error: 'property_not_found' });
-    }
-
-    // Bevara övriga fält oförändrade; uppdatera ev. fallback "tryckfil" om det fanns
-    const nextProj = {
-      ...proj,
-      properties: nextProps,
-      ...(Object.prototype.hasOwnProperty.call(proj, 'tryckfil') ? { tryckfil: newName } : {})
-    };
-     const nextProjects = projects.slice();
-    nextProjects[idx] = nextProj;
-
-    await writeOrderProjects(metafieldId, nextProjects);
-    try { await cacheOrderProjects(orderId, nextProjects); } catch {}
-    // ---- NYTT: uppdatera order-sammanfattning i Redis + Postgres-snapshot ----
-    try {
-      const metaStr = JSON.stringify(nextProjects || []);
-      await touchOrderSummary(cidNum, Number(orderId), {
-        processedAt: new Date().toISOString(),
-        metafield: metaStr
-      });
-
-      await syncSnapshotAfterMetafieldWrite(orderId, nextProjects, {
-        customerId: Number(cidNum)
-      });
-    } catch {}
-
-
-    // 5) Activity-logg (kund agerade)
-    try {
-      const cust = await getCustomerNameByOrder(orderId);
-      await appendActivity(orderId, [{
-        ts: new Date().toISOString(),
-        actor: { type: 'customer', name: cust.name, id: cust.id },
-        action: 'file.renamed',
-        order_id: Number(orderId),
-        line_item_id: Number(lineItemId),
-        product_title: proj.productTitle || '',
-        project_id: oldName || undefined,
-        data: { from: oldName || null, to: newName },
-        correlation_id: `file.renamed:${orderId}:${lineItemId}:${crypto.createHash('sha256').update(`${oldName}→${newName}`).digest('hex')}`
-      }]);
-    } catch (e) {
-      console.warn('/proxy/orders-meta/rename → appendActivity misslyckades:', e?.response?.data || e.message);
-    }
-
-    // 6) Invalidera 20s micro-cachen för den här kunden (så /apps/orders-meta reflekterar bytet)
-    try {
-      const prefix = `${cidNum}:`;
-      for (const key of ordersMetaCache.keys()) {
-        if (key.startsWith(prefix)) ordersMetaCache.delete(key);
-      }
-    } catch {}
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('POST /proxy/orders-meta/rename:', err?.response?.data || err.message);
-    return res.status(500).json({ error: 'internal' });
+    return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
 
