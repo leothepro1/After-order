@@ -4410,34 +4410,44 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     }
 
     // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
-    const segments = [];
+ // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
+const segments = [];
 
-    for (const fo of fulfillmentOrders) {
-      const foLineItems = fo.line_items || [];
-      const matches = foLineItems.filter(
-        (x) => Number(x.line_item_id || x.id || 0) === targetLineItemId
-      );
+for (const fo of fulfillmentOrders) {
+  const foLineItems = fo.line_items || [];
+  const matches = foLineItems.filter(
+    (x) => Number(x.line_item_id || x.id || 0) === targetLineItemId
+  );
 
-      if (!matches.length) continue;
+  if (!matches.length) continue;
 
-      const foLines = [];
-      for (const ml of matches) {
-        const maxQty = Number(ml.fulfillable_quantity || ml.quantity || 0);
-        if (maxQty > 0) {
-          foLines.push({
-            id: ml.id,              // fulfillment_order_line_item.id
-            quantity: maxQty        // ALLTID hela kvantiteten
-          });
-        }
-      }
+  const foLines = [];
+  for (const ml of matches) {
+    const maxQty = Number(
+      ml.fulfillable_quantity ??
+      ml.remaining_quantity ??
+      ml.quantity ??
+      0
+    );
 
-      if (foLines.length) {
-        segments.push({
-          fulfillment_order_id: fo.id,
-          fulfillment_order_line_items: foLines
-        });
-      }
+    if (!maxQty || Number.isNaN(maxQty)) {
+      continue;
     }
+
+    foLines.push({
+      id: ml.id,              // fulfillment_order_line_item.id
+      quantity: maxQty        // ALLTID hela kvantiteten (men aldrig > fulfillable_quantity)
+    });
+  }
+
+  if (foLines.length) {
+    segments.push({
+      fulfillment_order_id: fo.id,
+      fulfillment_order_line_items: foLines
+    });
+  }
+}
+
 
     if (!segments.length) {
       return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
