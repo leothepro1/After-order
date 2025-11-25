@@ -961,6 +961,165 @@ async function markOrderProjectsAsSlutförd(
 }
 
 /**
+ * Hjälper både webhooks/order-updated och ADMIN-cancel
+ * att sätta alla projekt till "Avbruten" + hålla cache/snapshot i sync.
+ *
+ * order: Shopify-orderobjektet (från webhook eller REST, efter cancel)
+ * metafieldRecord: { id, value } för order-metafältet (SANNINGEN)
+ *
+ * Returnerar:
+ * { cancelledProjects, writeFailed }
+ */
+async function markOrderProjectsAsAvbruten(order, metafieldRecord) {
+  const orderId = order && order.id;
+  if (!orderId) {
+    console.warn('[markOrderProjectsAsAvbruten] saknar order.id i payload');
+    return { cancelledProjects: [], writeFailed: true };
+  }
+
+  if (!metafieldRecord || !metafieldRecord.value) {
+    console.log(
+      '[markOrderProjectsAsAvbruten] inget order-metafält att uppdatera, hoppar över',
+      orderId
+    );
+    return { cancelledProjects: [], writeFailed: false };
+  }
+
+  // 1) Parsea befintliga projekt från metafältet (samma struktur som befintligt flöde)
+  let projects = [];
+  try {
+    const parsed = JSON.parse(metafieldRecord.value || '[]');
+
+    if (Array.isArray(parsed)) {
+      projects = parsed;
+    } else if (
+      parsed &&
+      typeof parsed === 'object' &&
+      Array.isArray(parsed.projects)
+    ) {
+      projects = parsed.projects;
+    } else if (parsed && typeof parsed === 'object') {
+      projects = [parsed];
+    } else {
+      projects = [];
+    }
+  } catch (e) {
+    console.warn(
+      '[markOrderProjectsAsAvbruten] kunde inte parsa order-metafält, fortsätter med tom array:',
+      e?.message || e
+    );
+    projects = [];
+  }
+
+  const nowIsoVal = nowIso();
+
+  // 2) Sätt status/tag "Avbruten" på alla projekt
+  const cancelledProjects = (projects || []).map((p) => {
+    if (!p || typeof p !== 'object') return p;
+    return {
+      ...p,
+      status: 'Avbruten',
+      tag: 'Avbruten',
+      cancelledAt: p.cancelledAt || nowIsoVal
+    };
+  });
+
+  // 3) Skriv tillbaka till samma metafält i Shopify
+  try {
+    await writeOrderProjects(metafieldRecord.id, cancelledProjects);
+    console.log(
+      '[orders_snapshot] markOrderProjectsAsAvbruten: metafält uppdaterat till "Avbruten" för order',
+      orderId
+    );
+  } catch (e) {
+    console.warn(
+      '[markOrderProjectsAsAvbruten] writeOrderProjects misslyckades:',
+      e?.response?.data || e.message
+    );
+
+    // Fallback: spegla åtminstone det ursprungliga metafältet till snapshot
+    try {
+      await upsertOrderSnapshotFromMetafield(order, metafieldRecord.value);
+    } catch (e2) {
+      console.warn(
+        '[orders_snapshot] markOrderProjectsAsAvbruten → snapshot misslyckades (fallback, original-metafält):',
+        e2?.message || e2
+      );
+    }
+
+    return { cancelledProjects: [], writeFailed: true };
+  }
+
+  // 4) Uppdatera Redis-cache för projekten
+  try {
+    await cacheOrderProjects(orderId, cancelledProjects);
+  } catch (e) {
+    console.warn(
+      '[markOrderProjectsAsAvbruten] cacheOrderProjects misslyckades:',
+      e?.response?.data || e.message
+    );
+  }
+
+  // 5) Uppdatera order-sammanfattning i Redis
+  try {
+    const customerIdForIndex = order?.customer?.id
+      ? Number(String(order.customer.id).split('/').pop())
+      : null;
+
+    const processedAt =
+      order?.cancelled_at ||
+      order?.processed_at ||
+      order?.updated_at ||
+      order?.created_at ||
+      nowIso();
+
+    await touchOrderSummary(customerIdForIndex, Number(orderId), {
+      processedAt,
+      metafield: JSON.stringify(cancelledProjects || []),
+      fulfillmentStatus: 'cancelled'
+    });
+  } catch (e) {
+    console.warn(
+      '[markOrderProjectsAsAvbruten] touchOrderSummary misslyckades:',
+      e?.response?.data || e.message
+    );
+  }
+
+  // 6) Håll Postgres-snapshot i sync med nya projekt
+  try {
+    const customerIdExtra = order?.customer?.id
+      ? Number(String(order.customer.id).split('/').pop())
+      : null;
+    const customerEmailExtra =
+      order?.customer?.email || order?.email || null;
+    const processedAtExtra =
+      order?.cancelled_at ||
+      order?.processed_at ||
+      order?.updated_at ||
+      order?.created_at ||
+      nowIso();
+
+    await syncSnapshotAfterMetafieldWrite(orderId, cancelledProjects, {
+      customerId: customerIdExtra,
+      customerEmail: customerEmailExtra,
+      processedAt: processedAtExtra
+    });
+
+    console.log(
+      '[orders_snapshot] markOrderProjectsAsAvbruten: snapshot + cache uppdaterade med "Avbruten" för order',
+      orderId
+    );
+  } catch (e) {
+    console.warn(
+      '[orders_snapshot] markOrderProjectsAsAvbruten → syncSnapshotAfterMetafieldWrite misslyckades:',
+      e?.message || e
+    );
+  }
+
+  return { cancelledProjects, writeFailed: false };
+}
+
+/**
  * Håll Postgres-snapshot (orders_snapshot) i sync varje gång vi skriver order-metafältet.
  *
  * orderId: Shopify order-id (string eller number)
@@ -1025,6 +1184,7 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
     console.warn('[syncSnapshotAfterMetafieldWrite] failed:', e?.message || e);
   }
 }
+
 
 
 // ===== UPSTASH REDIS (WRITE-THROUGH CACHE) =====
@@ -4305,28 +4465,19 @@ function forward(toPath) {
 }
 
 
-// 1) /link  → /proxy/link
-app.get('/link', forward('/proxy/link'));
-
-// 2) /orders-meta/link  → /proxy/link
-app.get('/orders-meta/link', forward('/proxy/link'));
-
-// 3) /orders-meta/avatar (GET/POST) → /proxy/orders-meta/avatar
-app.all('/orders-meta/avatar', forward('/proxy/orders-meta/avatar'));
-
-// Duplicerad path om din butik använder /proxy/orders-meta/...
-app.get('/proxy/orders-meta/link', forward('/proxy/link'));
-
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
-// ===========================================================
-// ADMIN: MANUELL FULFILLMENT + TRACKING
-// ===========================================================
 
-// AFTER
+// 6) /apps/orders-meta/order/cancel-admin (POST) → /proxy/orders-meta/order/cancel-admin
+app.post(
+  '/apps/orders-meta/order/cancel-admin',
+  forward('/proxy/orders-meta/order/cancel-admin')
+);
+
+
 
 app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
   try {
@@ -4334,6 +4485,7 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ ok: false, error: 'invalid_signature' });
     }
+
 
     // 2) Kräver inloggad kund
     const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
@@ -4369,9 +4521,9 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     const trackingCompany = (
       body.tracking_company ||
       body.trackingCompany ||
-      'PostNord'
+      'FedEx'
     );
-    const trackingCompanyStr = String(trackingCompany || '').trim() || 'PostNord';
+    const trackingCompanyStr = String(trackingCompany || '').trim() || 'FedEx';
 
     const trackingUrlRaw = body.tracking_url || body.trackingUrl || '';
     const trackingUrl = String(trackingUrlRaw || '').trim();
@@ -7161,59 +7313,71 @@ app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
 app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
   try {
     // 1) Verifiera App Proxy-signatur
-    const search = req.url.split('?')[1] || '';
-    if (!verifyAppProxySignature(search)) {
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ ok: false, error: 'invalid_signature' });
     }
 
     // 2) Kräver inloggad kund
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) {
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
       return res.status(401).json({ ok: false, error: 'not_logged_in' });
     }
 
-    // 3) Endast admin-kunder får fulfulla ordrar via denna route
-    const cidRaw = String(loggedInCustomerId || '').trim();
+    // 3) Kontrollera admin via dina egna taggar
+    const cidRaw = String(loggedInCustomerIdRaw || '').trim();
     const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
     const isAdmin = await isAdminCustomer(cidNum);
     if (!isAdmin) {
       return res.status(403).json({ ok: false, error: 'forbidden_admin_only' });
     }
 
-    // 4) Läs & validera body – vi kräver alltid minst en line_item
-    const orderIdRaw = req.body?.orderId;
-    const trackingNumber = String(req.body?.tracking_number || '').trim();
-    const trackingCompany =
-      String(req.body?.tracking_company || '').trim() || 'PostNord';
-    const trackingUrl = String(req.body?.tracking_url || '').trim() || '';
-    const lineItemsBody = Array.isArray(req.body?.line_items)
-      ? req.body.line_items
-      : [];
+    // 4) Läs och validera body
+    const body = req.body || {};
+    console.log('[proxy fulfill] incoming body:', body);
 
+    const orderIdRaw = body.orderId || body.order_id;
     const orderId = String(orderIdRaw || '').trim();
-    if (!orderId || !trackingNumber) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'orderId_and_tracking_required' });
+    if (!orderId) {
+      return res.status(400).json({ ok: false, error: 'orderId_required' });
     }
 
-    if (!lineItemsBody.length) {
-      // Vi fulfullar aldrig hela ordern; minst en produkt måste specificeras
+    const trackingNumber = String(
+      body.tracking_number || body.trackingNumber || ''
+    ).trim();
+    if (!trackingNumber) {
+      return res.status(400).json({ ok: false, error: 'tracking_number_required' });
+    }
+
+    const trackingCompany = (
+      body.tracking_company ||
+      body.trackingCompany ||
+      'PostNord'
+    );
+    const trackingCompanyStr = String(trackingCompany || '').trim() || 'PostNord';
+
+    const trackingUrlRaw = body.tracking_url || body.trackingUrl || '';
+    const trackingUrl = String(trackingUrlRaw || '').trim();
+
+    // === Viktigt: produktbaserat → vi kräver en line_item_id i body ===
+    const lineItemsInput =
+      Array.isArray(body.line_items) && body.line_items.length
+        ? body.line_items
+        : Array.isArray(body.lineItems) && body.lineItems.length
+        ? body.lineItems
+        : [];
+
+    if (!lineItemsInput.length) {
       return res.status(400).json({ ok: false, error: 'line_items_required' });
     }
 
-    // Normalisera requested line_item_ids (vi ignorerar kvantiteten, det är ALLTID full kvantitet)
-    const requestedIds = new Set(
-      lineItemsBody
-        .map(li =>
-          String(li.line_item_id || li.lineItemId || li.id || '').trim()
-        )
-        .filter(Boolean)
-    );
-    if (!requestedIds.size) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'invalid_line_items' });
+    // Ta första posten – vi fulfillar alltid EN rad, alltid hela kvantiteten
+    const firstLi = lineItemsInput[0] || {};
+    const targetLineItemIdRaw =
+      firstLi.line_item_id || firstLi.lineItemId || firstLi.id || '';
+
+    const targetLineItemId = Number(String(targetLineItemIdRaw).trim());
+    if (!targetLineItemId || Number.isNaN(targetLineItemId)) {
+      return res.status(400).json({ ok: false, error: 'invalid_line_items' });
     }
 
     // 5) Hämta fulfillment_orders för ordern
@@ -7221,100 +7385,97 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       `https://${SHOP}/admin/api/2025-07/orders/${orderId}/fulfillment_orders.json`,
       { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
     );
+
     const fulfillmentOrders = foResp.data?.fulfillment_orders || [];
     if (!fulfillmentOrders.length) {
-      return res.status(404).json({ ok: false, error: 'no_fulfillment_orders' });
+      return res.status(409).json({ ok: false, error: 'no_fulfillment_orders' });
     }
 
- // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
-let targetLineItemId = null;
+    // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
+    const segments = [];
 
-// Förväntar oss EN rad i body.line_items, utan mängd
-if (lineItemsBody && lineItemsBody.length) {
-  const first = lineItemsBody[0];
-  targetLineItemId = Number(
-    first.line_item_id ||
-    first.lineItemId ||
-    first.id ||
-    0
-  );
-  if (!targetLineItemId || Number.isNaN(targetLineItemId)) {
-    return res.status(400).json({ ok: false, error: 'invalid_line_items' });
-  }
-}
+    for (const fo of fulfillmentOrders) {
+      const foLineItems = fo.line_items || [];
+      const matches = foLineItems.filter(
+        (x) => Number(x.line_item_id || x.id || 0) === targetLineItemId
+      );
 
-const segments = [];
+      if (!matches.length) continue;
 
-for (const fo of fulfillmentOrders) {
-  const foLineItems = fo.line_items || [];
+      const foLines = [];
+      for (const ml of matches) {
+        const maxQty = Number(
+          ml.fulfillable_quantity ??
+          ml.remaining_quantity ??
+          ml.quantity ??
+          0
+        );
 
-  // Om targetLineItemId finns → ta bara den raden, annars alla (fallback)
-  const sourceLines = targetLineItemId
-    ? foLineItems.filter(
-        x => Number(x.line_item_id || x.id || 0) === targetLineItemId
-      )
-    : foLineItems;
+        if (!maxQty || Number.isNaN(maxQty)) {
+          continue;
+        }
 
-  const foLines = [];
+        foLines.push({
+          id: ml.id,              // fulfillment_order_line_item.id
+          quantity: maxQty        // ALLTID hela kvantiteten (men aldrig > fulfillable_quantity)
+        });
+      }
 
-  for (const li of sourceLines) {
-    const maxQty = Number(
-      li.fulfillable_quantity ??
-      li.remaining_quantity ??
-      li.quantity ??
-      0
-    );
-
-    // Skicka aldrig 0 eller NaN till Shopify
-    if (!maxQty || Number.isNaN(maxQty)) {
-      continue;
+      if (foLines.length) {
+        segments.push({
+          fulfillment_order_id: fo.id,
+          fulfillment_order_line_items: foLines
+        });
+      }
     }
 
-    foLines.push({
-      id: li.id,       // fulfillment_order_line_item.id
-      quantity: maxQty // ALLTID hela kvantiteten, aldrig mer än fulfillable_quantity
-    });
-  }
-
-  if (foLines.length) {
-    segments.push({
-      fulfillment_order_id: fo.id,
-      fulfillment_order_line_items: foLines
-    });
-  }
-}
-
-if (!segments.length) {
-  return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
-}
-
-
-// 7) Skapa fulfillment i Shopify
-const payload = {
-  fulfillment: {
-    line_items_by_fulfillment_order: segments,
-    tracking_info: {
-      number: trackingNumber,
-      ...(trackingCompanyStr ? { company: trackingCompanyStr } : {}),
-      ...(trackingUrl ? { url: trackingUrl } : {})
-    },
-    notify_customer: true
-  }
-};
-
+    if (!segments.length) {
+      return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
+    }
 
     // 7) Skapa fulfillment i Shopify
-    const fResp = await axios.post(
-      `https://${SHOP}/admin/api/2025-07/fulfillments.json`,
-      payload,
-      {
-        headers: {
-          'X-Shopify-Access-Token': ACCESS_TOKEN,
-          'Content-Type': 'application/json'
-        }
+    const payload = {
+      fulfillment: {
+        line_items_by_fulfillment_order: segments,
+        tracking_info: {
+          number: trackingNumber
+        },
+        notify_customer: true
       }
-    );
-    const fulfillment = fResp.data?.fulfillment || null;
+    };
+
+    if (trackingCompanyStr) {
+      payload.fulfillment.tracking_info.company = trackingCompanyStr;
+    }
+    if (trackingUrl) {
+      payload.fulfillment.tracking_info.url = trackingUrl;
+    }
+
+    let fulfillment;
+    try {
+      const fulResp = await axios.post(
+        `https://${SHOP}/admin/api/2025-07/fulfillments.json`,
+        payload,
+        {
+          headers: {
+            'X-Shopify-Access-Token': ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      fulfillment = fulResp.data?.fulfillment || null;
+    } catch (err) {
+      console.error(
+        'proxy fulfill error:',
+        err?.response?.data || err.message || err
+      );
+      // Shopify-return typ: { errors: ['Invalid fulfillment order line item quantity requested.'] }
+      return res.status(400).json({
+        ok: false,
+        error: 'shopify_fulfillment_error',
+        details: err?.response?.data || null
+      });
+    }
 
     // 8) Läs om ordern från Shopify
     const orderResp = await axios.get(
@@ -7372,6 +7533,119 @@ const payload = {
   }
 });
 
+/**
+ * ADMIN: Avbryt order helt (Shopify-cancel + interna projekt → "Avbruten")
+ */
+app.post('/proxy/orders-meta/order/cancel-admin', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ ok: false, error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund
+    const loggedInCustomerIdRaw = req.query.logged_in_customer_id;
+    if (!loggedInCustomerIdRaw) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    // 3) Kontrollera admin via dina egna taggar
+    const cidRaw = String(loggedInCustomerIdRaw || '').trim();
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const isAdmin = await isAdminCustomer(cidNum);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'forbidden_admin_only' });
+    }
+
+    // 4) Läs och validera body
+    const body = req.body || {};
+    console.log('[proxy cancel-admin] incoming body:', body);
+
+    const orderIdRaw = body.orderId || body.order_id;
+    const orderId = String(orderIdRaw || '').trim();
+    if (!orderId) {
+      return res.status(400).json({ ok: false, error: 'orderId_required' });
+    }
+
+    const reason =
+      String(body.reason || body.cancel_reason || '').trim() || 'other';
+    const emailCustomer =
+      body.email_customer === false ? false : true;
+
+    // 5) Läs ordern från Shopify
+    const orderResp = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    let order = orderResp.data?.order;
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'order_not_found' });
+    }
+
+    // 6) Om inte redan annullerad, gör Shopify-cancel (skickar normala cancel-mailet)
+    if (!order.cancelled_at) {
+      try {
+        const cancelPayload = {
+          email: emailCustomer,
+          reason
+        };
+        const cancelResp = await axios.post(
+          `https://${SHOP}/admin/api/2025-07/orders/${orderId}/cancel.json`,
+          cancelPayload,
+          {
+            headers: {
+              'X-Shopify-Access-Token': ACCESS_TOKEN,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        order = cancelResp.data?.order || order;
+      } catch (err) {
+        console.error(
+          'proxy cancel-admin: Shopify cancel error:',
+          err?.response?.data || err.message || err
+        );
+        return res.status(400).json({
+          ok: false,
+          error: 'shopify_cancel_error',
+          details: err?.response?.data || null
+        });
+      }
+    }
+
+    // 7) Uppdatera projekten i order-metafältet → "Avbruten"
+    let cancelledProjects = [];
+    try {
+      const { metafieldId, projects } = await readOrderProjects(orderId);
+      if (metafieldId) {
+        const metafieldRecord = {
+          id: metafieldId,
+          value: JSON.stringify(projects || [])
+        };
+        const result = await markOrderProjectsAsAvbruten(order, metafieldRecord);
+        cancelledProjects = result.cancelledProjects || [];
+      }
+    } catch (e) {
+      console.warn(
+        '[proxy cancel-admin] markOrderProjectsAsAvbruten misslyckades:',
+        e?.response?.data || e.message || e
+      );
+    }
+
+    return res.json({
+      ok: true,
+      order,
+      projects: cancelledProjects
+    });
+  } catch (e) {
+    console.error(
+      'POST /proxy/orders-meta/order/cancel-admin:',
+      e?.response?.data || e.message
+    );
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
 
 /* ===== NYTT: skapa review-token & skriv in i order-metafält ===== */
 app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
@@ -7418,10 +7692,13 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
       reviewObj.token_hash = token_hash;
       reviewObj.createdAt = nowIso();
     }
-       projects[idx] = { ...p, review: reviewObj };
+       projects[idx] = { ...p,
+      review: reviewObj
+    };
 
     await writeOrderProjects(metafieldId, projects);
     try {
+      await cacheOrderProjects(orderId, projects);
       await syncSnapshotAfterMetafieldWrite(orderId, projects);
     } catch {}
 
@@ -7433,6 +7710,7 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 /* Duplicerad path för butiker där proxy-basen inte innehåller "/orders-meta"
    → klienten kan ändå anropa /apps/orders-meta/order/cancel, men vissa teman mappar till /proxy/... direkt. */
 app.post('/proxy/order/cancel', forward('/proxy/orders-meta/order/cancel'));
