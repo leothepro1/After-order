@@ -761,14 +761,15 @@ function generateArtworkToken(orderId, lineItemId) {
 }
 
 
+// ==== KÄRNAN: Shopify-läsning, används fortfarande för alla writes ====
 async function readOrderProjects(orderId) {
   const { data } = await axios.get(
-  `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
+    `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
   );
 
   const mf = (data.metafields || []).find(
-    m => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
+    (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
   );
 
   if (!mf) {
@@ -787,7 +788,7 @@ async function readOrderProjects(orderId) {
 
 async function writeOrderProjects(metafieldId, projects) {
   await axios.put(
-    https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json,
+    `https://${SHOP}/admin/api/2025-07/metafields/${metafieldId}.json`,
     {
       metafield: {
         id: metafieldId,
@@ -815,6 +816,7 @@ async function markOrderProjectsAsSlutförd(order, metafieldRecord, rawFulfillme
     let projects = [];
     try {
       const parsed = JSON.parse(metafieldRecord.value || '[]');
+
       if (Array.isArray(parsed)) {
         projects = parsed;
       } else if (
@@ -861,6 +863,7 @@ async function markOrderProjectsAsSlutförd(order, metafieldRecord, rawFulfillme
         '[markOrderProjectsAsSlutförd] writeOrderProjects misslyckades, försöker ändå spegla snapshot från original-metafält:',
         e?.response?.data || e.message
       );
+
       // Fallback: spegla åtminstone det ursprungliga metafältet till snapshot
       try {
         await upsertOrderSnapshotFromMetafield(order, metafieldRecord.value);
@@ -870,6 +873,7 @@ async function markOrderProjectsAsSlutförd(order, metafieldRecord, rawFulfillme
           e2?.message || e2
         );
       }
+
       return completedProjects;
     }
 
@@ -971,6 +975,7 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
       const candidate = projects.find(
         (p) => p && (p.customerId || p.customerEmail || p.orderProcessedAt)
       );
+
       if (candidate) {
         if (!customerId && candidate.customerId) {
           customerId = Number(candidate.customerId);
@@ -1002,7 +1007,7 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
 
     // Invalidera 20s-microcachen för den här kunden i /proxy/orders-meta
     if (customerId && typeof ordersMetaCache !== 'undefined') {
-      const prefix = ${customerId}:;
+      const prefix = `${customerId}:`;
       for (const key of ordersMetaCache.keys()) {
         if (key.startsWith(prefix)) {
           ordersMetaCache.delete(key);
@@ -1013,6 +1018,7 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
     console.warn('[syncSnapshotAfterMetafieldWrite] failed:', e?.message || e);
   }
 }
+
 
 
     return completedProjects;
