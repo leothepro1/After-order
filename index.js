@@ -4391,40 +4391,39 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       return res.status(409).json({ ok: false, error: 'no_fulfillment_orders' });
     }
 
-    // 6) Bygg line_items_by_fulfillment_order
+     // 6) Bygg line_items_by_fulfillment_order (produktbaserat, full kvantitet)
+    if (!lineItemsInput.length) {
+      // Frontend måste skicka minst en rad (line_item_id)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'line_items_required' });
+    }
+
     const segments = [];
+
     for (const fo of fulfillmentOrders) {
       const foLineItems = fo.line_items || [];
-      let selected = [];
+      const selected = [];
 
-      if (lineItemsInput.length) {
-        selected = [];
+      for (const li of lineItemsInput) {
+        const wantedId = String(
+          li.line_item_id || li.lineItemId || li.id || ''
+        ).trim();
+        if (!wantedId) continue;
 
-        for (const li of lineItemsInput) {
-          const wantedId = String(
-            li.line_item_id || li.lineItemId || li.id || ''
-          ).trim();
-          if (!wantedId) continue;
+        const match = foLineItems.find(
+          (x) => String(x.line_item_id || x.id || '').trim() === wantedId
+        );
+        if (!match) continue;
 
-          const match = foLineItems.find(
-            (x) => String(x.line_item_id || x.id || '').trim() === wantedId
-          );
-          if (!match) continue;
+        // Alltid hela fulfillable_quantity för just den produkten
+        const fulfillable = Number(match.fulfillable_quantity || 0);
+        if (!fulfillable || Number.isNaN(fulfillable)) continue;
 
-          const maxQty = Number(match.fulfillable_quantity || match.quantity || 0);
-          const requestedQty = Number(li.quantity || maxQty || 0);
-          const qty = Math.min(maxQty, requestedQty);
-          if (!qty) continue;
-
-          selected.push({ id: match.id, quantity: qty });
-        }
-      } else {
-        selected = foLineItems
-          .map((x) => {
-            const maxQty = Number(x.fulfillable_quantity || x.quantity || 0);
-            return maxQty > 0 ? { id: x.id, quantity: maxQty } : null;
-          })
-          .filter(Boolean);
+        selected.push({
+          id: match.id,
+          quantity: fulfillable
+        });
       }
 
       if (selected.length) {
@@ -4436,7 +4435,9 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     }
 
     if (!segments.length) {
-      return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
+      return res
+        .status(409)
+        .json({ ok: false, error: 'no_fulfillable_lines' });
     }
 
     // 7) Skapa fulfillment i Shopify
