@@ -1084,7 +1084,7 @@ async function syncSnapshotAfterMetafieldWrite(orderId, projects, extra = {}) {
 
     // Invalidera 20s-microcachen för den här kunden i /proxy/orders-meta
     if (customerId && typeof ordersMetaCache !== 'undefined') {
-      const prefix = ${customerId}:;
+    const prefix = `${customerId}:`;
       for (const key of ordersMetaCache.keys()) {
         if (key.startsWith(prefix)) {
           ordersMetaCache.delete(key);
