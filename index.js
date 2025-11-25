@@ -4409,7 +4409,6 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       return res.status(409).json({ ok: false, error: 'no_fulfillment_orders' });
     }
 
-    // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
  // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
 const segments = [];
 
@@ -7227,61 +7226,82 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'no_fulfillment_orders' });
     }
 
-    // 6) Bygg line_items_by_fulfillment_order
-    const lineItemsByFulfillment = [];
+ // 6) Bygg line_items_by_fulfillment_order – EN produkt, ALLTID hela fulfillable_quantity
+let targetLineItemId = null;
 
-    for (const fo of fulfillmentOrders) {
-      const foLines = [];
+// Förväntar oss EN rad i body.line_items, utan mängd
+if (lineItemsBody && lineItemsBody.length) {
+  const first = lineItemsBody[0];
+  targetLineItemId = Number(
+    first.line_item_id ||
+    first.lineItemId ||
+    first.id ||
+    0
+  );
+  if (!targetLineItemId || Number.isNaN(targetLineItemId)) {
+    return res.status(400).json({ ok: false, error: 'invalid_line_items' });
+  }
+}
 
-      for (const li of fo.line_items || []) {
-        const baseLineId = String(li.line_item_id || li.id || '').trim();
-        if (!baseLineId) continue;
+const segments = [];
 
-        if (!requestedIds.has(baseLineId)) continue;
+for (const fo of fulfillmentOrders) {
+  const foLineItems = fo.line_items || [];
 
-        // ALLTID hela kvarvarande kvantiteten på den produkten
-        const maxQty = Number(
-          li.fulfillable_quantity ??
-          li.remaining_quantity ??
-          li.quantity ??
-          0
-        );
+  // Om targetLineItemId finns → ta bara den raden, annars alla (fallback)
+  const sourceLines = targetLineItemId
+    ? foLineItems.filter(
+        x => Number(x.line_item_id || x.id || 0) === targetLineItemId
+      )
+    : foLineItems;
 
-        if (!maxQty || Number.isNaN(maxQty)) {
-          continue;
-        }
+  const foLines = [];
 
-        foLines.push({
-          id: li.id,
-          quantity: maxQty
-        });
-      }
+  for (const li of sourceLines) {
+    const maxQty = Number(
+      li.fulfillable_quantity ??
+      li.remaining_quantity ??
+      li.quantity ??
+      0
+    );
 
-      if (foLines.length) {
-        lineItemsByFulfillment.push({
-          fulfillment_order_id: fo.id,
-          fulfillment_order_line_items: foLines
-        });
-      }
+    // Skicka aldrig 0 eller NaN till Shopify
+    if (!maxQty || Number.isNaN(maxQty)) {
+      continue;
     }
 
-    if (!lineItemsByFulfillment.length) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'no_matching_fulfillment_lines' });
-    }
+    foLines.push({
+      id: li.id,       // fulfillment_order_line_item.id
+      quantity: maxQty // ALLTID hela kvantiteten, aldrig mer än fulfillable_quantity
+    });
+  }
 
-    const payload = {
-      fulfillment: {
-        line_items_by_fulfillment_order: lineItemsByFulfillment,
-        notify_customer: true,
-        tracking_info: {
-          number: trackingNumber,
-          company: trackingCompany,
-          ...(trackingUrl ? { url: trackingUrl } : {})
-        }
-      }
-    };
+  if (foLines.length) {
+    segments.push({
+      fulfillment_order_id: fo.id,
+      fulfillment_order_line_items: foLines
+    });
+  }
+}
+
+if (!segments.length) {
+  return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
+}
+
+
+// 7) Skapa fulfillment i Shopify
+const payload = {
+  fulfillment: {
+    line_items_by_fulfillment_order: segments,
+    tracking_info: {
+      number: trackingNumber,
+      ...(trackingCompanyStr ? { company: trackingCompanyStr } : {}),
+      ...(trackingUrl ? { url: trackingUrl } : {})
+    },
+    notify_customer: true
+  }
+};
+
 
     // 7) Skapa fulfillment i Shopify
     const fResp = await axios.post(
