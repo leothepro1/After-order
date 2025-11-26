@@ -117,7 +117,7 @@
   },
   "formulas": {
     "tier": "size === 'custom' ? resolveTierByArea(size_w_cm, size_h_cm, 'size.customTierRules') : size",
-    "unit_price": "size === 'custom' ? ((0.30 + (size_w_cm * size_h_cm) * ((size_w_cm * size_h_cm) < 20 ? 0.28 : (size_w_cm * size_h_cm) < 40 ? 0.272 : (size_w_cm * size_h_cm) < 80 ? 0.198 : (size_w_cm * size_h_cm) < 150 ? 0.12 : (size_w_cm * size_h_cm) < 300 ? 0.106 : 0.09)) * (qty <= 100 ? 1.00 : qty <= 200 ? 0.80 : qty <= 300 ? 0.72 : qty <= 500 ? 0.66 : qty <= 900 ? 0.55 : qty <= 1500 ? 0.47 : qty <= 2000 ? 0.42 : qty <= 5000 ? 0.38 : 0.35) * 0.60) : table('unit_price', qty, tier)",
+    "unit_price": "size === 'custom' ? ((0.30 + (size_w_cm * size_h_cm) * ((size_w_cm * size_h_cm) < 20 ? 0.28 : (size_w_cm * size_h_cm) < 40 ? 0.272 : (size_w_cm * size_h_cm) < 80 ? 0.198 : (size_w_cm * size_h_cm) < 150 ? 0.12 : (size_w_cm * size_h_cm) < 300 ? 0.106 : 0.09)) * (qty <= 100 ? 1.00 : qty <= 200 ? 0.80 : qty <= 300 ? 0.72 : qty <= 500 ? 0.66 : qty <= 900 ? 0.55 : qty <= 1500 ? 0.47 : qty <= 2000 ? 0.42 : qty <= 5000 ? 0.38 : 0.35) * 0.78) : table('unit_price', qty, tier)",
     "total_price": "unit * qty"
   },
   "export": ["size", "qty", "size_w_cm", "size_h_cm"]
