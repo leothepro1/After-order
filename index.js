@@ -4452,6 +4452,7 @@ app.get('/proxy/link', async (req, res) => {
 // Ex: Shopify proxar /apps/orders-meta/link → din server /link
 // Vi skickar internt vidare till den säkrade /proxy/link (utan redirect).
 // ============================================================
+<!-- AFTER -->
 function forward(toPath) {
   return (req, res, next) => {
     const origUrl = req.url;
@@ -4471,11 +4472,132 @@ app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 
+// 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil + _rename_ts
+app.post('/proxy/orders-meta/rename', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ ok: false, error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    // 3) Läs och validera body
+    const body = req.body || {};
+    const orderId = String(body.orderId || body.order_id || '').trim();
+    const lineItemId = String(body.lineItemId || body.line_item_id || '').trim();
+    const newName = String(body.newName || body.new_name || '').trim();
+    const oldName = String(body.oldName || body.old_name || '').trim();
+
+    if (!orderId || !lineItemId || !newName) {
+      console.warn('[rename] missing params:', { orderId, lineItemId, newName });
+      return res.status(400).json({ ok: false, error: 'missing_params' });
+    }
+
+    // 4) Hämta order och säkerställ att kunden äger den
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const order = data?.order;
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'order_not_found' });
+    }
+
+    const cidRaw = String(loggedInCustomerId || '').trim();
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const ownerId = String(order?.customer?.id || '');
+    if (!ownerId.endsWith(cidNum)) {
+      return res.status(403).json({ ok: false, error: 'forbidden_not_owner' });
+    }
+
+    // 5) Läs projekt-metafältet
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) {
+      return res.status(404).json({ ok: false, error: 'metafield_not_found' });
+    }
+
+    const arr = Array.isArray(projects) ? projects : [];
+    const idx = arr.findIndex(
+      (p) => String(p?.lineItemId || p?.line_id || '') === String(lineItemId)
+    );
+    if (idx < 0) {
+      return res.status(404).json({ ok: false, error: 'line_item_not_found' });
+    }
+
+    const nowTs = Date.now();
+    const prev = arr[idx] || {};
+    const next = { ...prev };
+
+    // 6) Uppdatera tryckfil-fält direkt
+    if (typeof next.tryckfil === 'string') {
+      next.tryckfil = newName;
+    }
+
+    // 7) Uppdatera properties-array: Tryckfil + _rename_ts
+    const props = Array.isArray(next.properties) ? next.properties.slice() : [];
+    let hasTryckfil = false;
+    let hasRenameTs = false;
+
+    for (const prop of props) {
+      const name = String(prop?.name || '');
+      if (name.toLowerCase() === 'tryckfil') {
+        prop.value = newName;
+        hasTryckfil = true;
+      }
+      if (name === '_rename_ts') {
+        prop.value = String(nowTs);
+        hasRenameTs = true;
+      }
+    }
+
+    if (!hasTryckfil) {
+      props.push({ name: 'Tryckfil', value: newName });
+    }
+    if (!hasRenameTs) {
+      props.push({ name: '_rename_ts', value: String(nowTs) });
+    }
+
+    next.properties = props;
+    arr[idx] = next;
+
+    // 8) Skriv tillbaka metafältet
+    await writeOrderProjects(metafieldId, arr);
+
+    // 9) Uppdatera Redis-cache + snapshot (orders-meta-listorna)
+    try {
+      await cacheOrderProjects(orderId, arr);
+    } catch (e) {
+      console.warn('[rename] cacheOrderProjects failed:', e?.response?.data || e.message);
+    }
+
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, arr);
+    } catch (e) {
+      console.warn('[rename] syncSnapshotAfterMetafieldWrite failed:', e?.response?.data || e.message);
+    }
+
+    return res.json({ ok: true, orderId, lineItemId, oldName, newName });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/rename:', err?.response?.data || err.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
 // 6) /apps/orders-meta/order/cancel-admin (POST) → /proxy/orders-meta/order/cancel-admin
 app.post(
   '/apps/orders-meta/order/cancel-admin',
   forward('/proxy/orders-meta/order/cancel-admin')
 );
+
+
+
+
+
 
 
 
