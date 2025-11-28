@@ -7877,6 +7877,7 @@ app.post('/proxy/orders-meta/order/cancel-admin', async (req, res) => {
 
 
 /* ===== NYTT: skapa review-token & skriv in i order-metafält ===== */
+/* ===== NYTT: skapa review-token & skriv in i order-metafält ===== */
 app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
   try {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -7908,7 +7909,13 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
     if (idx < 0) return res.status(404).json({ error: 'line_item_not_found' });
 
     const tid = newTid();
-    const token = signTokenPayload({ kind: 'review', orderId: Number(orderId), lineItemId: Number(lineItemId), tid, iat: Date.now() });
+    const token = signTokenPayload({
+      kind: 'review',
+      orderId: Number(orderId),
+      lineItemId: Number(lineItemId),
+      tid,
+      iat: Date.now()
+    });
     const token_hash = crypto.createHash('sha256').update(token).digest('hex');
 
     const p = projects[idx] || {};
@@ -7921,7 +7928,9 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
       reviewObj.token_hash = token_hash;
       reviewObj.createdAt = nowIso();
     }
-       projects[idx] = { ...p,
+
+    projects[idx] = {
+      ...p,
       review: reviewObj
     };
 
@@ -7939,6 +7948,7 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 /* Duplicerad path för butiker där proxy-basen inte innehåller "/orders-meta"
    → klienten kan ändå anropa /apps/orders-meta/order/cancel, men vissa teman mappar till /proxy/... direkt. */
