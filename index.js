@@ -4417,6 +4417,7 @@ if (action === 'save') {
   }
 });
 
+// ===== REFERLINK: hämta eller skapa per-kund slug + redirect =====
 app.get('/proxy/link', async (req, res) => {
   try {
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
@@ -4470,13 +4471,6 @@ app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
-
-// NYTT: Arkivera/avarkivera via enkel POST-endpoint
-// 4a) /orders-meta/archive (POST) → /proxy/orders-meta/archive
-app.post('/orders-meta/archive', forward('/proxy/orders-meta/archive'));
-
-// 5a) /apps/orders-meta/archive (POST) → /proxy/orders-meta/archive
-app.post('/apps/orders-meta/archive', forward('/proxy/orders-meta/archive'));
 
 // 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil + _rename_ts
 app.post('/proxy/orders-meta/rename', async (req, res) => {
@@ -4594,134 +4588,15 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
   }
 });
 
-// NYTT: BACKEND /proxy/orders-meta/archive – arkivera/avarkivera ett projekt
-app.post('/proxy/orders-meta/archive', async (req, res) => {
-  try {
-    // 1) Verifiera App Proxy-signatur
-    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
-      return res.status(403).json({ ok: false, error: 'invalid_signature' });
-    }
-
-    // 2) Kräver inloggad kund
-    const loggedInCustomerId = req.query.logged_in_customer_id;
-    if (!loggedInCustomerId) {
-      return res.status(401).json({ ok: false, error: 'not_logged_in' });
-    }
-
-    // 3) Läs och validera body
-    const body = req.body || {};
-    const orderId = String(body.orderId || body.order_id || '').trim();
-    const lineItemId = String(body.lineItemId || body.line_item_id || '').trim();
-
-    let archivedRaw = typeof body.archived !== 'undefined' ? body.archived : body.archive;
-    const action = String(body.action || '').trim().toLowerCase();
-
-    let archived = null;
-    if (typeof archivedRaw !== 'undefined') {
-      const v = archivedRaw;
-      const s = String(v).toLowerCase();
-      archived =
-        v === true ||
-        v === 1 ||
-        v === '1' ||
-        s === 'true' ||
-        s === 'yes' ||
-        s === 'y';
-    } else if (action) {
-      if (action === 'archive') archived = true;
-      else if (action === 'unarchive') archived = false;
-    }
-
-    if (!orderId || !lineItemId || archived === null) {
-      console.warn('[archive] missing params:', { orderId, lineItemId, archived, action });
-      return res.status(400).json({ ok: false, error: 'missing_params' });
-    }
-
-    // 4) Hämta order och säkerställ att kunden äger den
-    const { data } = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-    );
-    const order = data?.order;
-    if (!order) {
-      return res.status(404).json({ ok: false, error: 'order_not_found' });
-    }
-
-    const cidRaw = String(loggedInCustomerId || '').trim();
-    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
-    const ownerId = String(order?.customer?.id || '');
-    if (!ownerId.endsWith(cidNum)) {
-      return res.status(403).json({ ok: false, error: 'forbidden_not_owner' });
-    }
-
-    // 5) Läs projekt-metafältet
-    const { metafieldId, projects } = await readOrderProjects(orderId);
-    if (!metafieldId) {
-      return res.status(404).json({ ok: false, error: 'metafield_not_found' });
-    }
-
-    const arr = Array.isArray(projects) ? projects : [];
-    const idx = arr.findIndex(
-      (p) => String(p?.lineItemId || p?.line_id || '') === String(lineItemId)
-    );
-    if (idx < 0) {
-      return res.status(404).json({ ok: false, error: 'line_item_not_found' });
-    }
-
-    const prev = arr[idx] || {};
-    const next = { ...prev };
-
-    // 6) Top-level flags för arkivering
-    delete next.archived;
-    delete next._archived;
-    if (archived) {
-      next.archived = true;
-      next._archived = true;
-    }
-
-    // 7) Properties-array: rensa gamla archive-flaggor, sätt nya vid behov
-    const props = Array.isArray(next.properties) ? next.properties.slice() : [];
-    const cleaned = props.filter((prop) => {
-      const n = String(prop?.name || '').toLowerCase();
-      return !(n === 'archive' || n === '_archive' || n === '_archived');
-    });
-
-    if (archived) {
-      cleaned.push({ name: 'archive', value: 'true' });
-      cleaned.push({ name: '_archived', value: 'true' });
-    }
-
-    next.properties = cleaned;
-    arr[idx] = next;
-
-    // 8) Skriv tillbaka metafältet
-    await writeOrderProjects(metafieldId, arr);
-
-    // 9) Uppdatera Redis-cache + snapshot (orders-meta-listorna)
-    try {
-      await cacheOrderProjects(orderId, arr);
-    } catch (e) {
-      console.warn('[archive] cacheOrderProjects failed:', e?.response?.data || e.message);
-    }
-
-    try {
-      await syncSnapshotAfterMetafieldWrite(orderId, arr);
-    } catch (e) {
-      console.warn('[archive] syncSnapshotAfterMetafieldWrite failed:', e?.response?.data || e.message);
-    }
-
-    return res.json({ ok: true, orderId, lineItemId, archived });
-  } catch (err) {
-    console.error('POST /proxy/orders-meta/archive:', err?.response?.data || err.message);
-    return res.status(500).json({ ok: false, error: 'internal' });
-  }
-});
-
 // 6) /apps/orders-meta/order/cancel-admin (POST) → /proxy/orders-meta/order/cancel-admin
 app.post(
   '/apps/orders-meta/order/cancel-admin',
   forward('/proxy/orders-meta/order/cancel-admin')
 );
+
+
+
+
 
 
 
