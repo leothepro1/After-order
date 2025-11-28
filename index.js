@@ -4447,12 +4447,6 @@ app.get('/proxy/link', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-// ============================================================
-// ALIAS-ROUTES när App Proxy INTE har "/proxy" i Proxy URL
-// Ex: Shopify proxar /apps/orders-meta/link → din server /link
-// Vi skickar internt vidare till den säkrade /proxy/link (utan redirect).
-// ============================================================
-<!-- AFTER -->
 function forward(toPath) {
   return (req, res, next) => {
     const origUrl = req.url;
@@ -4588,6 +4582,122 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
   }
 });
 
+
+// 7) /orders-meta/archive (POST) → /proxy/orders-meta/archive
+app.post('/orders-meta/archive', forward('/proxy/orders-meta/archive'));
+
+// 8) /apps/orders-meta/archive (POST) → /proxy/orders-meta/archive
+app.post('/apps/orders-meta/archive', forward('/proxy/orders-meta/archive'));
+
+// 7b) BACKEND: /proxy/orders-meta/archive – togglar archived-flagga på ett projekt
+app.post('/proxy/orders-meta/archive', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ ok: false, error: 'invalid_signature' });
+    }
+
+    // 2) Kräver inloggad kund
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    // 3) Läs och validera body
+    const body = req.body || {};
+    const orderId = String(body.orderId || body.order_id || '').trim();
+    const lineItemId = String(body.lineItemId || body.line_item_id || '').trim();
+    let archivedRaw = body.archived;
+    if (typeof archivedRaw === 'string') {
+      archivedRaw = archivedRaw.trim();
+    }
+
+    if (!orderId || !lineItemId || typeof archivedRaw === 'undefined') {
+      console.warn('[archive] missing params:', { orderId, lineItemId, archived: archivedRaw });
+      return res.status(400).json({ ok: false, error: 'missing_params' });
+    }
+
+    const archived =
+      typeof archivedRaw === 'boolean'
+        ? archivedRaw
+        : /^(1|true|yes|ja)$/i.test(String(archivedRaw));
+
+    // 4) Hämta order och säkerställ att kunden äger den
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+    const order = data?.order;
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'order_not_found' });
+    }
+
+    const cidRaw = String(loggedInCustomerId || '').trim();
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const ownerId = String(order?.customer?.id || '');
+    if (!ownerId.endsWith(cidNum)) {
+      return res.status(403).json({ ok: false, error: 'forbidden_not_owner' });
+    }
+
+    // 5) Läs projekt-metafältet
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) {
+      return res.status(404).json({ ok: false, error: 'metafield_not_found' });
+    }
+
+    const arr = Array.isArray(projects) ? projects : [];
+    const idx = arr.findIndex(
+      (p) => String(p?.lineItemId || p?.line_id || '') === String(lineItemId)
+    );
+    if (idx < 0) {
+      return res.status(404).json({ ok: false, error: 'line_item_not_found' });
+    }
+
+    const prev = arr[idx] || {};
+    const next = { ...prev, archived: !!archived };
+
+    // 6) Uppdatera properties-array med _archived-flagga (så att props också speglar läget)
+    const props = Array.isArray(next.properties) ? next.properties.slice() : [];
+    let hasArchivedProp = false;
+
+    for (const prop of props) {
+      const name = String(prop?.name || '');
+      if (name === '_archived') {
+        prop.value = archived ? '1' : '0';
+        hasArchivedProp = true;
+      }
+    }
+
+    if (!hasArchivedProp) {
+      props.push({ name: '_archived', value: archived ? '1' : '0' });
+    }
+
+    next.properties = props;
+    arr[idx] = next;
+
+    // 7) Skriv tillbaka metafältet
+    await writeOrderProjects(metafieldId, arr);
+
+    // 8) Uppdatera Redis-cache + snapshot (orders-meta-listorna)
+    try {
+      await cacheOrderProjects(orderId, arr);
+    } catch (e) {
+      console.warn('[archive] cacheOrderProjects failed:', e?.response?.data || e.message);
+    }
+
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, arr);
+    } catch (e) {
+      console.warn('[archive] syncSnapshotAfterMetafieldWrite failed:', e?.response?.data || e.message);
+    }
+
+    return res.json({ ok: true, orderId, lineItemId, archived });
+  } catch (err) {
+    console.error('POST /proxy/orders-meta/archive:', err?.response?.data || err.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
 // 6) /apps/orders-meta/order/cancel-admin (POST) → /proxy/orders-meta/order/cancel-admin
 app.post(
   '/apps/orders-meta/order/cancel-admin',
@@ -4650,32 +4760,43 @@ app.post('/proxy/orders-meta/order/fulfill', async (req, res) => {
     const trackingUrlRaw = body.tracking_url || body.trackingUrl || '';
     const trackingUrl = String(trackingUrlRaw || '').trim();
 
-    // === Viktigt: produktbaserat → vi kräver en line_item_id i body ===
-    const lineItemsInput =
-      Array.isArray(body.line_items) && body.line_items.length
-        ? body.line_items
-        : Array.isArray(body.lineItems) && body.lineItems.length
-        ? body.lineItems
-        : [];
-
-    if (!lineItemsInput.length) {
-      return res.status(400).json({ ok: false, error: 'line_items_required' });
+    const orderResp = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': ACCESS_TOKEN
+        }
+      }
+    );
+    const order = orderResp.data?.order;
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'order_not_found' });
     }
 
-    // Ta första posten – vi fulfillar alltid EN rad, alltid hela kvantiteten
-    const firstLi = lineItemsInput[0] || {};
-    const targetLineItemIdRaw =
-      firstLi.line_item_id || firstLi.lineItemId || firstLi.id || '';
-
-    const targetLineItemId = Number(String(targetLineItemIdRaw).trim());
-    if (!targetLineItemId || Number.isNaN(targetLineItemId)) {
-      return res.status(400).json({ ok: false, error: 'invalid_line_items' });
+    const lineItems = order.line_items || [];
+    if (!lineItems.length) {
+      return res.status(409).json({ ok: false, error: 'no_line_items' });
     }
 
-    // 5) Hämta fulfillment_orders för ordern
+    const fulfillable = lineItems.filter((li) => {
+      const qty =
+        li.fulfillable_quantity ??
+        (li.quantity || 0) - (li.fulfilled_quantity || 0) - (li.cancelled_quantity || 0);
+      return qty > 0;
+    });
+
+    if (!fulfillable.length) {
+      return res.status(409).json({ ok: false, error: 'nothing_to_fulfill' });
+    }
+
+    // 5) Fulfillment Orders: hämta vilka fulfillment_orders som har våra line items
     const foResp = await axios.get(
-      `https://${SHOP}/admin/api/2025-07/orders/${orderId}/fulfillment_orders.json`,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+      `https://${SHOP}/admin/api/2025-07/fulfillment_orders.json?order_id=${orderId}`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': ACCESS_TOKEN
+        }
+      }
     );
 
     const fulfillmentOrders = foResp.data?.fulfillment_orders || [];
@@ -4689,38 +4810,38 @@ const segments = [];
 for (const fo of fulfillmentOrders) {
   const foLineItems = fo.line_items || [];
   const matches = foLineItems.filter(
-    (x) => Number(x.line_item_id || x.id || 0) === targetLineItemId
+    (x) => Number(x.line_item_id || x.id ... 
+      ml.remaining_quantity ??
+      ml.quantity ??
+      0
   );
 
   if (!matches.length) continue;
 
-  const foLines = [];
-  for (const ml of matches) {
-    const maxQty = Number(
-      ml.fulfillable_quantity ??
-      ml.remaining_quantity ??
-      ml.quantity ??
-      0
-    );
+  const totalQty = matches.reduce(
+    (sum, ml) =>
+      sum +
+      (ml.fulfillable_quantity ??
+        ml.remaining_quantity ??
+        ml.quantity ??
+        0),
+    0
+  );
 
-    if (!maxQty || Number.isNaN(maxQty)) {
-      continue;
-    }
+  if (totalQty <= 0) continue;
 
-    foLines.push({
-      id: ml.id,              // fulfillment_order_line_item.id
-      quantity: maxQty        // ALLTID hela kvantiteten (men aldrig > fulfillable_quantity)
-    });
-  }
-
-  if (foLines.length) {
-    segments.push({
-      fulfillment_order_id: fo.id,
-      fulfillment_order_line_items: foLines
-    });
-  }
+  segments.push({
+    fulfillment_order_id: fo.id,
+    fulfillment_order_line_items: matches.map((ml) => ({
+      id: ml.id,
+      quantity:
+        ml.fulfillable_quantity ??
+        ml.remaining_quantity ??
+        ml.quantity ??
+        0
+    }))
+  });
 }
-
 
     if (!segments.length) {
       return res.status(409).json({ ok: false, error: 'no_fulfillable_lines' });
@@ -4752,17 +4873,16 @@ for (const fo of fulfillmentOrders) {
         {
           headers: {
             'X-Shopify-Access-Token': ACCESS_TOKEN,
-            'Content-Type': 'application/json'
+            
           }
         }
       );
-      fulfillment = fulResp.data?.fulfillment || null;
+      fulfillment = fulResp.data?.fulfillment;
     } catch (err) {
       console.error(
-        'proxy fulfill error:',
+        '[proxy fulfill] Shopify fulfillment error:',
         err?.response?.data || err.message || err
       );
-      // Shopify-return typ: { errors: ['Invalid fulfillment order line item quantity requested.'] }
       return res.status(400).json({
         ok: false,
         error: 'shopify_fulfillment_error',
@@ -4770,39 +4890,26 @@ for (const fo of fulfillmentOrders) {
       });
     }
 
-    // 8) Markera projekten som "Slutförd"
-    let completedProjects = null;
+    if (!fulfillment) {
+      return res.status(500).json({ ok: false, error: 'fulfillment_missing' });
+    }
 
+    // 8) Markera projekten som "Slutförd" i metafältet + snapshot + cache
+    let completedProjects = [];
     try {
-      const orderResp = await axios.get(
-        `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
-        { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-      );
-      const order = orderResp.data?.order;
-
-      if (order) {
-        const mfResp = await axios.get(
-          `https://${SHOP}/admin/api/2025-07/orders/${orderId}/metafields.json`,
-          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
-        );
-        const metafields = mfResp.data?.metafields || [];
-        const mf = metafields.find(
-          (m) => m.namespace === ORDER_META_NAMESPACE && m.key === ORDER_META_KEY
-        );
-
-        if (mf && mf.value) {
-          const result = await markOrderProjectsAsSlutförd(
-            order,
-            mf,
-            order.fulfillment_status || order.fulfillmentStatus || 'fulfilled'
-          );
-          completedProjects = result?.completedProjects || null;
-        }
+      const { metafieldId, projects } = await readOrderProjects(orderId);
+      if (metafieldId && Array.isArray(projects)) {
+        const metafieldRecord = {
+          id: metafieldId,
+          value: JSON.stringify(projects || [])
+        };
+        const result = await markOrderProjectsAsSlutförd(order, metafieldRecord);
+        completedProjects = result.completedProjects || [];
       }
-    } catch (e) {
-      console.error(
-        'proxy fulfill: markOrderProjectsAsSlutförd misslyckades:',
-        e?.response?.data || e.message || e
+    } catch (err) {
+      console.warn(
+        '[proxy fulfill] markOrderProjectsAsSlutförd misslyckades:',
+        err?.response?.data || err.message || err
       );
     }
 
