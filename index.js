@@ -7129,7 +7129,7 @@ app.post('/proxy/orders-meta/teams/role', async (req, res) => {
 
 app.get('/proxy/orders-meta/teams/members', async (req, res) => {
   try {
-    // 1) Verifiera App Proxy-signatur (billigt + säkerställer att anropet kommer från din Shopify-butik)
+    // 1) Verifiera App Proxy-signaturen (billigt + säkerställer att anropet kommer från din Shopify-butik)
     if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
       return res.status(403).json({ error: 'invalid_signature' });
     }
@@ -7178,6 +7178,83 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
 
 
 
+
+// NYTT: läs enkel ordersammanfattning från Postgres-snapshot (utan att kunden är inloggad)
+async function readOrderSummaryForOrder(orderId) {
+  try {
+    if (!pgPool) return null;
+
+    const oid = Number(orderId);
+    if (!oid || Number.isNaN(oid)) return null;
+
+    const { rows } = await pgQuery(
+      `SELECT 
+         order_id,
+         order_name,
+         order_total_price,
+         order_currency,
+         line_totals_json
+       FROM ${ORDERS_SNAPSHOT_TABLE}
+       WHERE order_id = $1
+       ORDER BY processed_at DESC
+       LIMIT 1`,
+      [oid]
+    );
+
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) return null;
+
+    const currency = row.order_currency || 'SEK';
+    let totalNum = row.order_total_price != null ? Number(row.order_total_price) : NaN;
+    let subtotalNum = NaN;
+    let shippingNum = NaN;
+
+    // Försök dela upp totalen i "produktdel" (subtotal) + frakt baserat på line_totals_json
+    if (Array.isArray(row.line_totals_json)) {
+      let sumLines = 0;
+      for (const item of row.line_totals_json) {
+        if (!item) continue;
+        const v = Number(item.total_price);
+        if (!Number.isNaN(v)) sumLines += v;
+      }
+      if (sumLines > 0) {
+        subtotalNum = sumLines;
+        if (!Number.isNaN(totalNum)) {
+          const diff = totalNum - sumLines;
+          shippingNum = diff > 0 ? diff : 0;
+        } else {
+          totalNum = sumLines;
+          shippingNum = 0;
+        }
+      }
+    }
+
+    if (Number.isNaN(totalNum)) {
+      return null;
+    }
+
+    const safeSubtotal = Number.isNaN(subtotalNum) ? totalNum : subtotalNum;
+    const safeShipping = Number.isNaN(shippingNum) ? 0 : shippingNum;
+
+    // Viktigt: nycklarna här matchar vad frontenden förväntar sig (subtotal_price, shipping_price, total_price)
+    return {
+      orderId: row.order_id,
+      name: row.order_name || null,
+      currency,
+      subtotal_price: safeSubtotal,
+      shipping_price: safeShipping,
+      total_price: totalNum
+    };
+  } catch (e) {
+    console.warn('readOrderSummaryForOrder failed:', e?.response?.data || e.message || e);
+    return null;
+  }
+}
+
+
+
+
+
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -7202,14 +7279,12 @@ app.get('/proof/share/:token', async (req, res) => {
     );
     if (!share) return res.status(404).json({ error: 'Not found' });
 
-    // 🔹 NYTT: global order-summary från Postgres-snapshot (oberoende av inloggat konto)
+    // NYTT: hämta global ordersammanfattning från Postgres-snapshot (utan inloggad kund)
     let summary = null;
     try {
-      if (typeof readOrderSummaryForOrder === 'function') {
-        summary = await readOrderSummaryForOrder(orderId);
-      }
+      summary = await readOrderSummaryForOrder(orderId);
     } catch (e) {
-      console.warn('/proof/share readOrderSummaryForOrder failed:', e?.message || e);
+      console.warn('/proof/share → readOrderSummaryForOrder failed:', e?.response?.data || e.message || e);
     }
 
     return res.json({
@@ -7218,8 +7293,7 @@ app.get('/proof/share/:token', async (req, res) => {
       tid,
       project: proj,
       share,
-      // kan vara null, frontend hanterar det
-      summary
+      summary: summary || null
     });
 
   } catch (err) {
@@ -7227,7 +7301,6 @@ app.get('/proof/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
-
 
 
 
@@ -7282,6 +7355,7 @@ app.get('/review/share/:token', async (req, res) => {
     }
 
     const r = proj.review || {};
+    if (r. = proj.review || {};
     if (r.status === 'done') {
       // Här är det faktiskt inskickat (även live-metafältet säger done)
       return res.status(410).json({ error: 'already_submitted' });
