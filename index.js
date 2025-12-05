@@ -7305,7 +7305,6 @@ app.get('/proof/share/:token', async (req, res) => {
 
 
 
-
 app.get('/review/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -7346,7 +7345,10 @@ app.get('/review/share/:token', async (req, res) => {
           proj = liveProj;
         }
       } catch (e) {
-        console.warn('/review/share live fallback failed:', e?.response?.data || e.message);
+        console.warn(
+          '/review/share live fallback failed:',
+          e?.response?.data || e.message
+        );
       }
     }
 
@@ -7355,7 +7357,6 @@ app.get('/review/share/:token', async (req, res) => {
     }
 
     const r = proj.review || {};
-    if (r. = proj.review || {};
     if (r.status === 'done') {
       // Här är det faktiskt inskickat (även live-metafältet säger done)
       return res.status(410).json({ error: 'already_submitted' });
@@ -7381,6 +7382,7 @@ app.get('/review/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 
 
