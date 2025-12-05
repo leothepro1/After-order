@@ -2883,7 +2883,11 @@ async function readOrderSnapshot(orderId) {
          created_at,
          updated_at,
          metafield_raw,
-         metafield_json
+         metafield_json,
+         order_name,
+         order_total_price,
+         order_currency,
+         line_totals_json
        FROM ${ORDERS_SNAPSHOT_TABLE}
        WHERE order_id = $1`,
       [oid]
@@ -2891,6 +2895,72 @@ async function readOrderSnapshot(orderId) {
     return rows[0] || null;
   } catch (e) {
     console.warn('[orders_snapshot] readOrderSnapshot failed:', e?.message || e);
+    return null;
+  }
+}
+
+
+async function readOrderSummaryForOrder(orderId) {
+  if (!pgPool) return null;
+
+  const oid = Number(orderId);
+  if (!oid || Number.isNaN(oid)) return null;
+
+  try {
+    const { rows } = await pgQuery(
+      `SELECT
+         order_id,
+         order_name,
+         order_total_price,
+         order_currency,
+         line_totals_json
+       FROM ${ORDERS_SNAPSHOT_TABLE}
+       WHERE order_id = $1`,
+      [oid]
+    );
+
+    const row = rows[0];
+    if (!row) return null;
+
+    const currency = row.order_currency || 'SEK';
+    const total = row.order_total_price != null ? Number(row.order_total_price) : 0;
+
+    let linesTotal = 0;
+    try {
+      let lineTotals = row.line_totals_json;
+      if (typeof lineTotals === 'string') {
+        lineTotals = JSON.parse(lineTotals || '[]');
+      }
+      if (!Array.isArray(lineTotals)) lineTotals = [];
+
+      linesTotal = lineTotals.reduce((sum, ln) => {
+        if (!ln) return sum;
+        // stöd både för { total } och { lineTotal }
+        const v = ln.total != null ? ln.total : ln.lineTotal;
+        const num = v != null ? Number(v) : 0;
+        return sum + (Number.isFinite(num) ? num : 0);
+      }, 0);
+    } catch {
+      linesTotal = 0;
+    }
+
+    // Om vi av någon anledning inte får fram radtotaler, låt subtotal = total
+    if (!Number.isFinite(linesTotal) || linesTotal <= 0) {
+      linesTotal = total;
+    }
+
+    const shipping = Math.max(total - linesTotal, 0);
+
+    return {
+      orderId: row.order_id,
+      orderName: row.order_name || null,
+      currency,
+      subtotal: linesTotal,
+      shipping,
+      total
+    };
+  } catch (e) {
+    console.warn('[orders_snapshot] readOrderSummaryForOrder failed:', e?.message || e);
     return null;
   }
 }
@@ -7108,7 +7178,6 @@ app.get('/proxy/orders-meta/teams/members', async (req, res) => {
 
 
 
-
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -7133,13 +7202,24 @@ app.get('/proof/share/:token', async (req, res) => {
     );
     if (!share) return res.status(404).json({ error: 'Not found' });
 
-    // 👇 ENDA RADDEN SOM ÄNDRAS
+    // 🔹 NYTT: global order-summary från Postgres-snapshot (oberoende av inloggat konto)
+    let summary = null;
+    try {
+      if (typeof readOrderSummaryForOrder === 'function') {
+        summary = await readOrderSummaryForOrder(orderId);
+      }
+    } catch (e) {
+      console.warn('/proof/share readOrderSummaryForOrder failed:', e?.message || e);
+    }
+
     return res.json({
       orderId,
       lineItemId,
       tid,
       project: proj,
-      share
+      share,
+      // kan vara null, frontend hanterar det
+      summary
     });
 
   } catch (err) {
@@ -7147,6 +7227,7 @@ app.get('/proof/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
