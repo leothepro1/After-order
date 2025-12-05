@@ -4542,7 +4542,7 @@ app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 
-// 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil + _rename_ts
+// 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil
 app.post('/proxy/orders-meta/rename', async (req, res) => {
   try {
     // 1) Verifiera App Proxy-signatur
@@ -4599,7 +4599,6 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'line_item_not_found' });
     }
 
-    const nowTs = Date.now();
     const prev = arr[idx] || {};
     const next = { ...prev };
 
@@ -4608,10 +4607,9 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
       next.tryckfil = newName;
     }
 
-    // 7) Uppdatera properties-array: Tryckfil + _rename_ts
+    // 7) Uppdatera properties-array: Tryckfil (ingen _rename_ts längre)
     const props = Array.isArray(next.properties) ? next.properties.slice() : [];
     let hasTryckfil = false;
-    let hasRenameTs = false;
 
     for (const prop of props) {
       const name = String(prop?.name || '');
@@ -4619,17 +4617,10 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
         prop.value = newName;
         hasTryckfil = true;
       }
-      if (name === '_rename_ts') {
-        prop.value = String(nowTs);
-        hasRenameTs = true;
-      }
     }
 
     if (!hasTryckfil) {
       props.push({ name: 'Tryckfil', value: newName });
-    }
-    if (!hasRenameTs) {
-      props.push({ name: '_rename_ts', value: String(nowTs) });
     }
 
     next.properties = props;
@@ -4657,6 +4648,7 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 
 // 6) /apps/orders-meta/order/cancel-admin (POST) → /proxy/orders-meta/order/cancel-admin
 app.post(
