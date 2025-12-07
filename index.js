@@ -1947,49 +1947,125 @@ app.post('/public/printed/artwork-register', async (req, res) => {
 app.post('/public/buy-button/register', async (req, res) => {
   try {
     const { imageUrl, artworkName } = req.body || {};
-    const img = String(imageUrl || '').trim();
-    if (!img) {
-      return res.status(400).json({ ok:false, error:'missing_image_url' });
+
+    if (!imageUrl || typeof imageUrl !== 'string') {
+      return res.status(400).json({
+        ok: false,
+        error: 'missing_image_url'
+      });
     }
 
+    const img  = imageUrl.trim();
     const name = artworkName ? String(artworkName) : '';
 
     const tid = newTid();
-    const token = signTokenPayload({
+    const tokenPayload = {
       kind: 'buybutton_artwork',
       imageUrl: img,
       artworkName: name,
       tid,
       iat: Date.now()
-    });
+    };
+    const token = signTokenPayload(tokenPayload);
 
     try {
-      await registerBuyButtonToken(token, {
-        imageUrl: img,
-        artworkName: name,
-        tid,
-        iat: Date.now()
-      });
-    } catch {}
+      await registerBuyButtonToken(token, tokenPayload);
+    } catch (err) {
+      console.error(
+        'registerBuyButtonToken failed for buy-button/register:',
+        err?.response?.data || err?.message || err
+      );
+    }
 
     const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
+
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok:true, token, url });
-  } catch (e) {
-    console.error('POST /public/buy-button/register:', e?.response?.data || e.message);
+    return res.json({
+      ok: true,
+      token,
+      url
+    });
+  } catch (err) {
+    console.error(
+      'POST /public/buy-button/register:',
+      err?.response?.data || err?.message || err
+    );
     setCorsOnError(req, res);
-    return res.status(500).json({ ok:false, error:'internal' });
+    return res.status(500).json({
+      ok: false,
+      error: 'internal'
+    });
+  }
+});
+
+app.post('/public/buy-button/artwork-token', async (req, res) => {
+  try {
+    const { preview, tryckfil } = req.body || {};
+
+    if (!preview || typeof preview !== 'string') {
+      return res.status(400).json({
+        ok: false,
+        error: 'missing_preview'
+      });
+    }
+
+    const img  = preview.trim();
+    const name = tryckfil ? String(tryckfil) : '';
+
+    const tid = newTid();
+    const tokenPayload = {
+      kind: 'buybutton_artwork',
+      imageUrl: img,
+      artworkName: name,
+      tid,
+      iat: Date.now()
+    };
+    const token = signTokenPayload(tokenPayload);
+
+    try {
+      await registerBuyButtonToken(token, tokenPayload);
+    } catch (err) {
+      console.error(
+        'registerBuyButtonToken failed for buy-button/artwork-token:',
+        err?.response?.data || err?.message || err
+      );
+    }
+
+    const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      token,
+      url
+    });
+  } catch (err) {
+    console.error(
+      'POST /public/buy-button/artwork-token:',
+      err?.response?.data || err?.message || err
+    );
+    setCorsOnError(req, res);
+    return res.status(500).json({
+      ok: false,
+      error: 'internal'
+    });
   }
 });
 
 // === Alias så att /apps/. träffar den publika resolvern (utan redirect) ===
-app.get('/apps/printed/artwork-token',  forward('/public/printed/artwork-token'));
-app.get('/apps/pressify/artwork-token', forward('/public/printed/artwork-token'));
-app.get('/apps/artwork-token',          forward('/public/printed/artwork-token'));
+app.get('/apps/printed/artwork-token',      forward('/public/printed/artwork-token'));
+app.get('/apps/pressify/artwork-token',     forward('/public/printed/artwork-token'));
+app.get('/apps/artwork-token',              forward('/public/printed/artwork-token'));
+
 app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-register'));
 app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
 app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
+
 app.post('/apps/buy-button/register',       forward('/public/buy-button/register'));
+app.post('/apps/buy-button/artwork-token',          forward('/public/buy-button/artwork-token'));
+app.post('/apps/printed/buy-button/artwork-token',  forward('/public/buy-button/artwork-token'));
+app.post('/apps/pressify/buy-button/artwork-token', forward('/public/buy-button/artwork-token'));
+
 
 
 
