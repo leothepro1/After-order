@@ -1311,6 +1311,7 @@ async function readOrderProjectsForRead(orderId) {
 
 
 // ===== PASS-BY-REFERENCE TOKEN REGISTRY (Upstash Redis) =====
+// ===== PASS-BY-REFERENCE TOKEN REGISTRY (Upstash Redis) =====
 const ARTWORK_TOKEN_TTL_SECONDS = parseInt(process.env.ARTWORK_TOKEN_TTL_SECONDS || '2592000', 10); // 30 dagar
 
 function tokenHash(token) {
@@ -1344,7 +1345,7 @@ async function registerTokenInRedis(token, payload /* { kind, orderId, lineItemI
       'ver', ver
     ];
 
-    await redisCmd(['HSET', key, ...flat]);
+    await redisCmd(['HSET', key, .flat]);
 
     const ttl = Number(ARTWORK_TOKEN_TTL_SECONDS);
     if (Number.isFinite(ttl) && ttl > 0) {
@@ -1375,6 +1376,49 @@ async function resolveTokenFromRedis(rawToken) {
   } catch { return null; }
 }
 
+// ===== BUY BUTTON TOKEN REGISTRY (Upstash Redis, utan orderId) =====
+// Här återanvänder vi tokenHash men använder ett separat key-prefix
+// så dessa tokens inte krockar med de order-bundna artwork-tokens.
+function buyButtonTokenKey(hash) {
+  return `buybtn:${hash}:v1`;
+}
+
+async function registerBuyButtonToken(token, payload /* { imageUrl, artworkName, iat, tid } */) {
+  try {
+    if (!token) return false;
+    const h = tokenHash(token);
+    const key = buyButtonTokenKey(h);
+
+    const imageUrl    = String(payload?.imageUrl || '');
+    const artworkName = String(payload?.artworkName || '');
+    const iat         = String(payload?.iat || Date.now());
+    const tid         = String(payload?.tid || (typeof newTid === 'function' ? newTid() : ''));
+    const ver         = 'v1';
+
+    const flat = [
+      'token_hash',   h,
+      'kind',         'buybutton_artwork',
+      'imageUrl',     imageUrl,
+      'artworkName',  artworkName,
+      'iat',          iat,
+      'tid',          tid,
+      'ver',          ver
+    ];
+
+    await redisCmd(['HSET', key, ...flat]);
+
+    const ttl = Number(ARTWORK_TOKEN_TTL_SECONDS);
+    if (Number.isFinite(ttl) && ttl > 0) {
+      await redisCmd(['EXPIRE', key, String(ttl)]);
+    }
+
+    return true;
+  } catch (e) {
+    console.error('registerBuyButtonToken failed:', e?.message || e);
+    return false;
+  }
+}
+
 // Cachea hela projects-arrayen under key: order:{orderId}:projects:v1
 async function cacheOrderProjects(orderId, projects) {
   if (!WRITE_ORDERS_TO_REDIS) return;
@@ -1386,6 +1430,7 @@ async function cacheOrderProjects(orderId, projects) {
     console.warn('[cacheOrderProjects] err:', e?.response?.data || e.message);
   }
 }
+
 // ---- Redis order-sammanfattningar (lista/snabb-läsning) ----
 // ZSET index per kund:  key = `cust:{customerId}:orders`  score = processedAt (epoch ms)
 // HASH per order:       key = `order:{orderId}:summary`   fält: id,name,processedAt,metafield,fulfillmentStatus,preview
@@ -1849,6 +1894,8 @@ app.get('/public/printed/artwork-token', async (req, res) => {
 
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
 // Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
+// === PUBLIC REGISTER: /public/printed/artwork-register ==================
+// Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
 app.post('/public/printed/artwork-register', async (req, res) => {
   try {
     const { kind, orderId, lineItemId, preview, tryckfil } = req.body || {};
@@ -1894,13 +1941,55 @@ app.post('/public/printed/artwork-register', async (req, res) => {
   }
 });
 
-// === Alias så att /apps/... träffar den publika resolvern (utan redirect) ===
+// === PUBLIC REGISTER: /public/buy-button/register ==================
+// Body: { imageUrl, artworkName? }
+// Används av Pressify Buy Button-generatorn (ingen orderId/lineItemId behövs)
+app.post('/public/buy-button/register', async (req, res) => {
+  try {
+    const { imageUrl, artworkName } = req.body || {};
+    const img = String(imageUrl || '').trim();
+    if (!img) {
+      return res.status(400).json({ ok:false, error:'missing_image_url' });
+    }
+
+    const name = artworkName ? String(artworkName) : '';
+
+    const tid = newTid();
+    const token = signTokenPayload({
+      kind: 'buybutton_artwork',
+      imageUrl: img,
+      artworkName: name,
+      tid,
+      iat: Date.now()
+    });
+
+    try {
+      await registerBuyButtonToken(token, {
+        imageUrl: img,
+        artworkName: name,
+        tid,
+        iat: Date.now()
+      });
+    } catch {}
+
+    const url = `${STORE_BASE}/pages/printed?artwork=${encodeURIComponent(token)}`;
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok:true, token, url });
+  } catch (e) {
+    console.error('POST /public/buy-button/register:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok:false, error:'internal' });
+  }
+});
+
+// === Alias så att /apps/. träffar den publika resolvern (utan redirect) ===
 app.get('/apps/printed/artwork-token',  forward('/public/printed/artwork-token'));
 app.get('/apps/pressify/artwork-token', forward('/public/printed/artwork-token'));
 app.get('/apps/artwork-token',          forward('/public/printed/artwork-token'));
 app.post('/apps/printed/artwork-register',  forward('/public/printed/artwork-register'));
 app.post('/apps/pressify/artwork-register', forward('/public/printed/artwork-register'));
 app.post('/apps/artwork-register',          forward('/public/printed/artwork-register'));
+app.post('/apps/buy-button/register',       forward('/public/buy-button/register'));
 
 
 
