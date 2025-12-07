@@ -1751,17 +1751,7 @@ app.get('/proxy/printed/artwork-token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
-// Accepterar ?artwork=, ?token= eller ?id=
-// - Signerad token (p64url.<sig>): verifieras → hämtar projekt + aktiv share-snapshot.
-// - Legacy (t.ex. "071ea4..." eller ett gammalt filnamn): söker i orderns projekt om möjligt.
-//   Obs: legacy utan orderId blir "best effort": vi försöker hitta i senaste snapshoten/Redis-index om tillgängligt.
-// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
-// Accepterar ?artwork=, ?token= eller ?id=
-// === PUBLIC RESOLVER: /public/printed/artwork-token ==================
-// Accepterar ?artwork=, ?token= eller ?id=
-// - Signerad token (p64url.<sig>): verifieras → hämtar projekt + aktiv snapshot.
-// - Legacy (t.ex. gammalt filnamn): söker i senaste ordrar.
+
 app.get('/public/printed/artwork-token', async (req, res) => {
   function sendErr(status, msg) {
     res.setHeader('Cache-Control', 'no-store');
@@ -1784,6 +1774,27 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     if (!raw) return sendErr(400, 'missing_token');
 
     const payload = verifyAndParseToken(raw);
+
+    // 🔹 NYTT: buy button-tokens med kind:'buybutton_artwork'
+    if (payload && payload.kind === 'buybutton_artwork') {
+      const imageUrl    = (payload.imageUrl || '').trim();
+      const artworkName = (payload.artworkName || '').trim();
+
+      if (!imageUrl) {
+        // Token finns men saknar användbar bild → behandla som “inte hittad”
+        return sendErr(404, 'not_found');
+      }
+
+      // Anpassat svar till /pages/printed-preview-koden:
+      //  - preview  → bild som ska visas
+      //  - filename/tryckfil → namn/label som visas
+      return sendOk({
+        preview:  imageUrl,
+        filename: artworkName || '',
+        tryckfil: artworkName || '',
+        token:    raw
+      });
+    }
 
     // 1) Nyare tokens med kind:'artwork'
     if (payload && payload.kind === 'artwork') {
@@ -1890,6 +1901,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
+
 
 
 // === PUBLIC REGISTER: /public/printed/artwork-register ==================
