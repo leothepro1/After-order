@@ -1345,7 +1345,7 @@ async function registerTokenInRedis(token, payload /* { kind, orderId, lineItemI
       'ver', ver
     ];
 
-    await redisCmd(['HSET', key, .flat]);
+    await redisCmd(['HSET', key, ...flat]);
 
     const ttl = Number(ARTWORK_TOKEN_TTL_SECONDS);
     if (Number.isFinite(ttl) && ttl > 0) {
