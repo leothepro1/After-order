@@ -4316,8 +4316,8 @@ try {
       console.warn('/proof/approve → appendActivity misslyckades:', e?.response?.data || e.message);
     }
       /* ======================= END ACTIVITY LOG ======================= */
-    // 🧹 NYTT: Dölj activity i aktiv share.snapshot för tokensidan, men behåll preview/product/qty
-    //        + markera denna proof-token som approved/hideCtas i snapshot (globalt, alla enheter)
+    // 🧹 NYTT: Lås aktiv share.snapshot för denna proof-token (serverdrivet)
+    //          – men rör inte aktivitetslistan (hideActivity tas bort här)
     try {
       const { metafieldId, projects: prj2 } = await readOrderProjects(orderId);
       if (metafieldId && Array.isArray(prj2)) {
@@ -4329,23 +4329,25 @@ try {
 
           if (activeIdx >= 0) {
             const snap = { ...(shares[activeIdx].snapshot || {}) };
+
             shares[activeIdx] = {
               ...shares[activeIdx],
               snapshot: {
                 ...snap,
-                hideActivity: true,
-                // 🔒 globalt godkänt-läge för just denna share/token
+                // 🔒 Lås just denna proof-länk i "godkänd men order ej klar"-läge
                 state: 'approved',
                 decision: 'approved',
                 approved: true,
                 hideCtas: true
+                // OBS: ingen hideActivity här → aktivitetslistan fortsätter funka
               }
             };
+
             prj2[idx] = { ...p, shares };
             await writeOrderProjects(metafieldId, prj2);
             try { await cacheOrderProjects(orderId, prj2); } catch {}
 
-            // 🔁 NYTT: snapshot för senaste share-läget
+            // Uppdatera snapshot-bilden i DB/Redis
             try {
               await syncSnapshotAfterMetafieldWrite(orderId, prj2);
             } catch {}
@@ -4355,6 +4357,7 @@ try {
     } catch (e) {
       console.warn('mark hideActivity on approve failed:', e?.response?.data || e.message);
     }
+
 
 
 
@@ -7538,9 +7541,6 @@ async function readOrderSummaryForOrder(orderId) {
   }
 }
 
-
-
-
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -7565,7 +7565,7 @@ app.get('/proof/share/:token', async (req, res) => {
     );
     if (!share) return res.status(404).json({ error: 'Not found' });
 
-    // Plocka ut snapshot för denna share (globalt läge)
+    // Plocka ut snapshot för just denna share (proof-token-läget)
     const snapshot = share && typeof share.snapshot === 'object'
       ? share.snapshot
       : null;
@@ -7593,6 +7593,7 @@ app.get('/proof/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
