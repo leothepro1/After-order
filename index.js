@@ -4315,9 +4315,9 @@ try {
     } catch (e) {
       console.warn('/proof/approve → appendActivity misslyckades:', e?.response?.data || e.message);
     }
-    /* ======================= END ACTIVITY LOG ======================= */
+      /* ======================= END ACTIVITY LOG ======================= */
     // 🧹 NYTT: Dölj activity i aktiv share.snapshot för tokensidan, men behåll preview/product/qty
-       // 🧹 NYTT: Dölj activity i aktiv share.snapshot för tokensidan, men behåll preview/product/qty
+    //        + markera denna proof-token som approved/hideCtas i snapshot (globalt, alla enheter)
     try {
       const { metafieldId, projects: prj2 } = await readOrderProjects(orderId);
       if (metafieldId && Array.isArray(prj2)) {
@@ -4326,38 +4326,37 @@ try {
           const p = prj2[idx];
           const shares = Array.isArray(p.shares) ? p.shares : [];
           const activeIdx = shares.findIndex(s => s && s.status === 'active');
-if (activeIdx >= 0) {
-  const snap = { ...(shares[activeIdx].snapshot || {}) };
-  shares[activeIdx] = {
-    ...shares[activeIdx],
-    snapshot: {
-      ...snap,
-      hideActivity: true,
-      // 🔒 Gör denna proof-token globalt låst som godkänd
-      state: 'approved',
-      decision: 'approved',
-      approved: true,
-      hideCtas: true
-    }
-  };
-  prj2[idx] = { ...p, shares };
-  await writeOrderProjects(metafieldId, prj2);
-  try { await cacheOrderProjects(orderId, prj2); } catch {}
 
-  // 🔁 NYTT: snapshot för senaste share-läget
-  try {
-    await syncSnapshotAfterMetafieldWrite(orderId, prj2);
-  } catch {}
-}
+          if (activeIdx >= 0) {
+            const snap = { ...(shares[activeIdx].snapshot || {}) };
+            shares[activeIdx] = {
+              ...shares[activeIdx],
+              snapshot: {
+                ...snap,
+                hideActivity: true,
+                // 🔒 globalt godkänt-läge för just denna share/token
+                state: 'approved',
+                decision: 'approved',
+                approved: true,
+                hideCtas: true
+              }
+            };
+            prj2[idx] = { ...p, shares };
+            await writeOrderProjects(metafieldId, prj2);
+            try { await cacheOrderProjects(orderId, prj2); } catch {}
 
-
+            // 🔁 NYTT: snapshot för senaste share-läget
+            try {
+              await syncSnapshotAfterMetafieldWrite(orderId, prj2);
+            } catch {}
+          }
         }
       }
     } catch (e) {
       console.warn('mark hideActivity on approve failed:', e?.response?.data || e.message);
     }
 
-  // === NYTT: Multi-produkt logik =
+
 
 
   // === NYTT: Multi-produkt logik ===
@@ -7558,11 +7557,18 @@ app.get('/proof/share/:token', async (req, res) => {
     const { projects } = await readOrderProjectsForRead(orderId);
     const proj = (projects || []).find(
       (p) => String(p.lineItemId) === String(lineItemId)
-...
+    );
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+
     const share = (Array.isArray(proj.shares) ? proj.shares : []).find(
       (s) => String(s.tid) === String(tid)
     );
     if (!share) return res.status(404).json({ error: 'Not found' });
+
+    // Plocka ut snapshot för denna share (globalt läge)
+    const snapshot = share && typeof share.snapshot === 'object'
+      ? share.snapshot
+      : null;
 
     // NYTT: hämta global ordersammanfattning från Postgres-snapshot (utan inloggad kund)
     let summary = null;
@@ -7571,11 +7577,6 @@ app.get('/proof/share/:token', async (req, res) => {
     } catch (e) {
       console.warn('/proof/share → readOrderSummaryForOrder failed:', e?.response?.data || e.message || e);
     }
-
-    // Exponera snapshot separat så frontend kan läsa state/approved/hideCtas globalt
-    const snapshot = share && typeof share.snapshot === 'object'
-      ? share.snapshot
-      : null;
 
     return res.json({
       orderId,
@@ -7592,6 +7593,7 @@ app.get('/proof/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
