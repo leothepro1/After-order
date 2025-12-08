@@ -4317,6 +4317,7 @@ try {
     }
     /* ======================= END ACTIVITY LOG ======================= */
     // 🧹 NYTT: Dölj activity i aktiv share.snapshot för tokensidan, men behåll preview/product/qty
+       // 🧹 NYTT: Dölj activity i aktiv share.snapshot för tokensidan, men behåll preview/product/qty
     try {
       const { metafieldId, projects: prj2 } = await readOrderProjects(orderId);
       if (metafieldId && Array.isArray(prj2)) {
@@ -4329,7 +4330,15 @@ if (activeIdx >= 0) {
   const snap = { ...(shares[activeIdx].snapshot || {}) };
   shares[activeIdx] = {
     ...shares[activeIdx],
-    snapshot: { ...snap, hideActivity: true }
+    snapshot: {
+      ...snap,
+      hideActivity: true,
+      // 🔒 Gör denna proof-token globalt låst som godkänd
+      state: 'approved',
+      decision: 'approved',
+      approved: true,
+      hideCtas: true
+    }
   };
   prj2[idx] = { ...p, shares };
   await writeOrderProjects(metafieldId, prj2);
@@ -4347,6 +4356,9 @@ if (activeIdx >= 0) {
     } catch (e) {
       console.warn('mark hideActivity on approve failed:', e?.response?.data || e.message);
     }
+
+  // === NYTT: Multi-produkt logik =
+
 
   // === NYTT: Multi-produkt logik ===
     const totalProjects = projects.length;
@@ -7530,7 +7542,6 @@ async function readOrderSummaryForOrder(orderId) {
 
 
 
-
 app.get('/proof/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -7547,9 +7558,7 @@ app.get('/proof/share/:token', async (req, res) => {
     const { projects } = await readOrderProjectsForRead(orderId);
     const proj = (projects || []).find(
       (p) => String(p.lineItemId) === String(lineItemId)
-    );
-    if (!proj) return res.status(404).json({ error: 'Not found' });
-
+...
     const share = (Array.isArray(proj.shares) ? proj.shares : []).find(
       (s) => String(s.tid) === String(tid)
     );
@@ -7563,12 +7572,18 @@ app.get('/proof/share/:token', async (req, res) => {
       console.warn('/proof/share → readOrderSummaryForOrder failed:', e?.response?.data || e.message || e);
     }
 
+    // Exponera snapshot separat så frontend kan läsa state/approved/hideCtas globalt
+    const snapshot = share && typeof share.snapshot === 'object'
+      ? share.snapshot
+      : null;
+
     return res.json({
       orderId,
       lineItemId,
       tid,
       project: proj,
       share,
+      snapshot,
       summary: summary || null
     });
 
@@ -7577,6 +7592,7 @@ app.get('/proof/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal_error' });
   }
 });
+
 
 
 
