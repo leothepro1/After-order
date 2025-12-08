@@ -3839,13 +3839,44 @@ app.get('/pages/korrektur', async (req, res) => {
           }
         }
 
-        if (snapshotProjects.length === 0) {
+      if (snapshotProjects.length === 0) {
           // Det finns snapshots, men inget med status "Korrektur redo"
           return res.json({
             message: 'Just nu har du ingenting att godkänna',
             projects: []
           });
         }
+
+        // === NYTT: Lägg till kontext per projekt ===
+        const projectsByOrder = {};
+        for (const snap of snapshots) {
+          const orderId = Number(snap.order_id || snap.orderId);
+          let arr = [];
+          if (snap.metafield_json && Array.isArray(snap.metafield_json)) {
+            arr = snap.metafield_json;
+          } else if (snap.metafield_json && typeof snap.metafield_json === 'object') {
+            if (Array.isArray(snap.metafield_json.projects)) {
+              arr = snap.metafield_json.projects;
+            }
+          } else if (snap.metafield_raw) {
+            try { arr = JSON.parse(snap.metafield_raw); } catch { arr = []; }
+          }
+          projectsByOrder[orderId] = arr;
+        }
+
+        snapshotProjects.forEach(proof => {
+          const orderId = proof.orderId;
+          const allProjectsInOrder = projectsByOrder[orderId] || [];
+          proof._context = {
+            totalProofsInOrder: allProjectsInOrder.length,
+            readyProofsInOrder: allProjectsInOrder.filter(p => 
+              String(p?.status) === 'Korrektur redo'
+            ).length,
+            approvedInOrder: allProjectsInOrder.filter(p => 
+              p.status === 'I produktion' || p.status === 'Godkänd'
+            ).length
+          };
+        });
 
         // ✅ Returnera direkt från Postgres – ingen Shopify-läsning
         return res.json({
@@ -3961,12 +3992,37 @@ app.get('/pages/korrektur', async (req, res) => {
       }
     }
 
-    if (results.length === 0) {
+   if (results.length === 0) {
       return res.json({
         message: 'Just nu har du ingenting att godkänna',
         projects: []
       });
     }
+
+    // === NYTT: Lägg till kontext per projekt (Shopify-fallback) ===
+    const projectsByOrder = {};
+    for (const e of edges) {
+      const orderId = Number(gidToId(e.node.id));
+      let arr = [];
+      try {
+        arr = e.node.metafield?.value ? JSON.parse(e.node.metafield.value) : [];
+      } catch { arr = []; }
+      projectsByOrder[orderId] = arr;
+    }
+
+    results.forEach(proof => {
+      const orderId = proof.orderId;
+      const allProjectsInOrder = projectsByOrder[orderId] || [];
+      proof._context = {
+        totalProofsInOrder: allProjectsInOrder.length,
+        readyProofsInOrder: allProjectsInOrder.filter(p => 
+          String(p?.status) === 'Korrektur redo'
+        ).length,
+        approvedInOrder: allProjectsInOrder.filter(p => 
+          p.status === 'I produktion' || p.status === 'Godkänd'
+        ).length
+      };
+    });
 
     return res.json({
       message: 'Godkänn korrektur',
@@ -4292,7 +4348,58 @@ if (activeIdx >= 0) {
       console.warn('mark hideActivity on approve failed:', e?.response?.data || e.message);
     }
 
-    res.sendStatus(200);
+  // === NYTT: Multi-produkt logik ===
+    const totalProjects = projects.length;
+    const approvedProjects = projects.filter(p => 
+      p.status === 'I produktion' || 
+      p.status === 'Godkänd'
+    ).length;
+
+    const allApproved = approvedProjects === totalProjects;
+
+    // === KRITISKT: Uppdatera order-tags ENDAST om alla är godkända ===
+    if (allApproved) {
+      try {
+        const tagsRes = await axios.get(
+          `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json?fields=id,tags`,
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+        const currentTags = (tagsRes.data.order?.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+        
+        // Ta bort "awaiting proof" och "proof ready", lägg till "in production"
+        const newTags = currentTags
+          .filter(t => !['pfy-awaiting-proof', 'pfy-proof-ready'].includes(t.toLowerCase()))
+          .concat(['pfy-in-production']);
+        
+        await axios.put(
+          `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+          { order: { id: orderId, tags: newTags.join(', ') } },
+          { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+        );
+      } catch (tagErr) {
+        console.warn('Kunde inte uppdatera order-tags:', tagErr?.response?.data || tagErr.message);
+      }
+    }
+
+    // Hitta nästa korrektur som är "Korrektur redo"
+    let nextProofToken = null;
+    if (!allApproved) {
+      const nextProject = projects.find(p => 
+        String(p.lineItemId) !== String(lineItemId) && 
+        (p.status === 'Korrektur redo' || p.status === 'korrektur redo')
+      );
+      if (nextProject && nextProject.latestToken) {
+        nextProofToken = nextProject.latestToken;
+      }
+    }
+
+    // Returnera metadata till frontend
+    res.json({ 
+      success: true,
+      allApproved,
+      remainingProofs: totalProjects - approvedProjects,
+      nextProofToken
+    });
   } catch (err) {
     console.error('❌ Fel vid /proof/approve:', err?.response?.data || err.message);
     res.status(500).json({ error: 'Kunde inte godkänna korrektur' });
