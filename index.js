@@ -4836,9 +4836,12 @@ function forward(toPath) {
 
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
-
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
+// X) /orders-meta/archive (POST) → /proxy/orders-meta/archive
+app.post('/orders-meta/archive', forward('/proxy/orders-meta/archive'));
+// Y) /apps/orders-meta/archive (POST) → /proxy/orders-meta/archive
+app.post('/apps/orders-meta/archive', forward('/proxy/orders-meta/archive'));
 
 // 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil
 app.post('/proxy/orders-meta/rename', async (req, res) => {
@@ -4944,6 +4947,132 @@ app.post('/proxy/orders-meta/rename', async (req, res) => {
   } catch (err) {
     console.error('POST /proxy/orders-meta/rename:', err?.response?.data || err.message);
     return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+
+app.post('/proxy/orders-meta/archive', async (req, res) => {
+  try {
+    // Verifiera App Proxy-signatur
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ ok: false, error: 'invalid_signature' });
+    }
+
+    // Kräv inloggad kund
+    const loggedInCustomerId = req.query.logged_in_customer_id;
+    if (!loggedInCustomerId) {
+      return res.status(401).json({ ok: false, error: 'not_logged_in' });
+    }
+
+    // Parsing och validering av input
+    const body = req.body || {};
+    const orderId = String(body.orderId || body.order_id || '').trim();
+    const lineItemId = String(body.lineItemId || body.line_item_id || '').trim();
+    const archivedRaw = body.archived !== undefined ? body.archived : body.archive;
+
+    // Konvertera arkiveringsstatus till boolean
+    let archivedBool;
+    if (typeof archivedRaw === 'boolean') {
+      archivedBool = archivedRaw;
+    } else if (typeof archivedRaw === 'string') {
+      const normalized = archivedRaw.trim().toLowerCase();
+      archivedBool = ['true', '1', 'yes', 'ja'].includes(normalized);
+    } else if (typeof archivedRaw === 'number') {
+      archivedBool = archivedRaw !== 0;
+    }
+
+    // Validera parametrar
+    if (!orderId || !lineItemId || archivedBool === undefined) {
+      console.warn('[archive] missing params:', { orderId, lineItemId, archivedRaw });
+      return res.status(400).json({ ok: false, error: 'missing_params' });
+    }
+
+    // Hämta order från Shopify
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`,
+      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN } }
+    );
+
+    // Validera order
+    if (!data?.order) {
+      return res.status(404).json({ ok: false, error: 'order_not_found' });
+    }
+
+    // Ägarcheck
+    const cidRaw = String(loggedInCustomerId || '').trim();
+    const cidNum = cidRaw.startsWith('gid://') ? cidRaw.split('/').pop() : cidRaw;
+    const ownerId = String(data.order?.customer?.id || '');
+    if (!ownerId.endsWith(cidNum)) {
+      return res.status(403).json({ ok: false, error: 'forbidden_not_owner' });
+    }
+
+    // Läs projects-metafältet
+    const { metafieldId, projects } = await readOrderProjects(orderId);
+    if (!metafieldId) {
+      return res.status(404).json({ ok: false, error: 'metafield_not_found' });
+    }
+
+    const arr = Array.isArray(projects) ? projects : [];
+
+    // Hitta rätt projekt
+    const idx = arr.findIndex(
+      p => String(p?.lineItemId || p?.line_id || '') === String(lineItemId)
+    );
+    if (idx < 0) {
+      return res.status(404).json({ ok: false, error: 'line_item_not_found' });
+    }
+
+    // Uppdatera projektet
+    const prev = arr[idx] || {};
+    const next = { ...prev };
+    next.archived = archivedBool;
+    next.archivedAt = archivedBool ? new Date().toISOString() : null;
+
+    const props = Array.isArray(next.properties) ? next.properties.slice() : [];
+    let archivePropFound = false;
+
+    for (const prop of props) {
+      const name = String(prop?.name || '');
+      if (name.toLowerCase() === 'archive') {
+        prop.value = archivedBool ? 'true' : 'false';
+        archivePropFound = true;
+      }
+    }
+
+    if (!archivePropFound) {
+      props.push({ name: 'Archive', value: archivedBool ? 'true' : 'false' });
+    }
+
+    next.properties = props;
+    arr[idx] = next;
+
+    // Skriv tillbaka metafältet
+    await writeOrderProjects(metafieldId, arr);
+
+    // Uppdatera cache och snapshot
+    try {
+      await cacheOrderProjects(orderId, arr);
+    } catch (e) {
+      console.warn('[archive] cacheOrderProjects failed:', e?.response?.data || e.message || e);
+    }
+
+    try {
+      await syncSnapshotAfterMetafieldWrite(orderId, arr);
+    } catch (e) {
+      console.warn('[archive] syncSnapshotAfterMetafieldWrite failed:', e?.response?.data || e.message || e);
+    }
+
+    // Returnera svar
+    return res.json({
+      ok: true,
+      orderId,
+      lineItemId,
+      archived: archivedBool
+    });
+
+  } catch (e) {
+    console.error('[archive] unexpected error:', e?.response?.data || e.message || e);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 
