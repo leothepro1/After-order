@@ -18,9 +18,9 @@ const app = express(); // ✅ Skapa app INNAN du använder den
 const ALLOWED_ORIGINS = ['https://pressify.se', 'https://www.pressify.se'];
 
 const CORS_OPTIONS = {
-  origin: ALLOWED_ORIGINS,                  // räcker – cors speglar origin om det matchar listan
+  origin: ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'], // Added X-Requested-With
   credentials: false
 };
 
