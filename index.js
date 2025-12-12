@@ -2309,7 +2309,9 @@ app.post('/apps/buy-button/register',       forward('/public/buy-button/register
 app.post('/apps/buy-button/artwork-token',          forward('/public/buy-button/artwork-token'));
 app.post('/apps/printed/buy-button/artwork-token',  forward('/public/buy-button/artwork-token'));
 app.post('/apps/pressify/buy-button/artwork-token', forward('/public/buy-button/artwork-token'));
-
+// Add these lines near your other alias routes
+app.post('/apps/cart-share/create', forward('/public/cart-share/create'));
+app.get('/apps/cart-share/resolve', forward('/public/cart-share/resolve'));
 
 
 
