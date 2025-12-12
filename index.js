@@ -351,16 +351,6 @@ const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL || 'https://pressify.se';
 
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
-function cartShareBuildRedisKey(tokenHash) {
-  const PREFIX = 'cart_share:';
-  return `${PREFIX}${tokenHash}`;
-}
-
-// Simulerad Redis-kommando för tillfället
-const redisCmd = async (command) => {
-  console.warn('[WARN] Använder simulerad redisCmd - ersätt med riktig Redis-implementation', command);
-  return null;
-};
 
 
 /**
