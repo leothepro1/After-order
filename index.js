@@ -160,8 +160,16 @@ function cartShareGenerateToken() {
 }
 
 function cartShareTokenHash(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
+  return crypto
+    .createHash('sha256')
+    .update(token)
+    .digest('hex');
 }
+
+function cartShareBuildRedisKey(tokenHash) {
+  return `cart_share:${tokenHash}`;
+}
+
 
 
 
