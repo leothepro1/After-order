@@ -345,11 +345,6 @@ const PRESSIFY_TEAM_ID_KEY = 'team_id';
 const PRESSIFY_TEAM_NAME_KEY = 'team_name';
 const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
 
-const CART_SHARE_TTL_SECONDS = parseInt(
-  process.env.CART_SHARE_TTL_SECONDS || '604800',
-  10
-);
-
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL || 'https://pressify.se';
 
