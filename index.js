@@ -1,6 +1,3 @@
-
-
-
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -344,6 +341,15 @@ const PRESSIFY_SCOPE_KEY = 'scope';
 const PRESSIFY_TEAM_ID_KEY = 'team_id';
 const PRESSIFY_TEAM_NAME_KEY = 'team_name';
 const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
+
+const CART_SHARE_TTL_SECONDS = parseInt(
+  process.env.CART_SHARE_TTL_SECONDS || '604800',
+  10
+);
+
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL || 'https://pressify.se';
+
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
 
@@ -2027,97 +2033,6 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
-// Consolidated Redis and Cart Share Configuration
-const CART_SHARE_TTL_SECONDS = Number.parseInt(
-  process.env.CART_SHARE_TTL_SECONDS ?? '3600',
-  10
-);
-
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://pressify.se';
-
-// Redis Configuration (node-redis v4) with safer connect handling
-const { createClient } = require('redis');
-
-const redisClient = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379',
-  socket: {
-    connectTimeout: 5000,
-    // NOTE: disconnectTimeout finns inte som v4 socket-option; lämnas bort medvetet
-  },
-});
-
-redisClient.on('error', (err) => {
-  console.error('Redis Client Error:', err);
-});
-
-let redisConnectPromise = null;
-
-// Ensure Connection with Retry Logic (single in-flight connect)
-async function connectRedis() {
-  if (redisClient.isOpen) return;
-
-  if (!redisConnectPromise) {
-    redisConnectPromise = redisClient.connect().catch((err) => {
-      redisConnectPromise = null;
-
-      console.error('Redis Connection Failed:', err);
-      setTimeout(() => {
-        // fire-and-forget retry; nästa anrop till connectRedis/redisCmd kan också trigga
-        connectRedis().catch(() => {});
-      }, 5000);
-
-      throw err;
-    });
-  }
-
-  await redisConnectPromise;
-}
-
-// Initialize Connection
-connectRedis().catch(() => {});
-
-// Unified Redis Command Wrapper with Enhanced Error Handling
-async function redisCmd(commands) {
-  try {
-    await connectRedis();
-
-    const [cmd, ...args] = commands;
-    const c = String(cmd || '').toUpperCase();
-
-    switch (c) {
-      case 'SET': {
-        // Expected: ['SET', key, value, 'EX', ttlSeconds]
-        const key = args[0];
-        const value = args[1];
-        const mode = String(args[2] || '').toUpperCase();
-        const ttl = Number(args[3] ?? CART_SHARE_TTL_SECONDS);
-
-        if (mode === 'EX') {
-          return redisClient.set(key, value, { EX: ttl });
-        }
-        return redisClient.set(key, value);
-      }
-
-      case 'GET': {
-        // Expected: ['GET', key]
-        return redisClient.get(args[0]);
-      }
-
-      default:
-        throw new Error(`Unsupported Redis command: ${cmd}`);
-    }
-  } catch (error) {
-    console.error('Redis Command Error:', error);
-    throw error;
-  }
-}
-
-// Build Redis Key for Cart Share
-function cartShareBuildRedisKey(tokenHash) {
-  return `cart_share:${tokenHash}`;
-}
-
-// Existing Cart Share Create Route
 app.post('/public/cart-share/create', async (req, res) => {
   try {
     const normalizedPayload = cartShareNormalizeAndValidatePayload(req.body);
@@ -2137,7 +2052,7 @@ app.post('/public/cart-share/create', async (req, res) => {
       ...normalizedPayload,
       createdAt: now.toISOString(),
       ttlSeconds: CART_SHARE_TTL_SECONDS,
-      expires_at: expiresAt.toISOString(),
+      expires_at: expiresAt.toISOString()
     });
 
     await redisCmd(['SET', redisKey, redisPayload, 'EX', CART_SHARE_TTL_SECONDS]);
@@ -2145,36 +2060,16 @@ app.post('/public/cart-share/create', async (req, res) => {
     return res.json({
       token,
       url: `${PUBLIC_BASE_URL}/cart?share_cart=${token}`,
-      expires_at: expiresAt.toISOString(),
+      expires_at: expiresAt.toISOString()
     });
   } catch (error) {
     console.error(
       'Cart share create error (hash):',
-      cartShareTokenHash(req.body?.token || 'unknown'),
-      error
+      cartShareTokenHash(req.body?.token || 'unknown')
     );
     return res.status(500).json({ error: 'server_error' });
   }
 });
-
-// Graceful Redis Shutdown
-async function shutdown() {
-  try {
-    if (redisClient.isOpen) {
-      await redisClient.quit();
-      console.log('Redis connection closed');
-    }
-  } catch (e) {
-    console.error('Redis shutdown error:', e);
-  } finally {
-    process.exit(0);
-  }
-}
-
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
-
 
 app.get('/public/cart-share/resolve', async (req, res) => {
   try {
