@@ -344,10 +344,6 @@ const PRESSIFY_SCOPE_KEY = 'scope';
 const PRESSIFY_TEAM_ID_KEY = 'team_id';
 const PRESSIFY_TEAM_NAME_KEY = 'team_name';
 const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
-
-const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL || 'https://pressify.se';
-
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
 
