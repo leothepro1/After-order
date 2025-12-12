@@ -9299,32 +9299,93 @@ app.post('/public/cart-share/create', async (req, res) => {
     return res.status(500).json({ error: 'server_error' });
   }
 });
-
 app.get('/public/cart-share/resolve', async (req, res) => {
   try {
-    const { token } = req.query;
+    console.log('[Cart Share Resolve] Incoming Request:', {
+      query: req.query,
+      headers: req.headers,
+      method: req.method,
+    });
 
+    const token = req.query?.token;
     if (!token) {
+      console.warn('[Cart Share Resolve] Missing Token');
       return res.status(400).json({ error: 'missing_token' });
     }
+
+    // Debug: Log token details
+    console.log('[Cart Share Resolve] Token received:', {
+      tokenLength: token.length,
+      tokenStart: token.substring(0, 10),
+    });
 
     const tokenHash = cartShareTokenHash(token);
     const redisKey = cartShareBuildRedisKey(tokenHash);
 
-    const redisResult = unwrapRedisValue(await redisCmd(['GET', redisKey]));
+    console.log('[Cart Share Resolve] Generated Details:', {
+      tokenHash,
+      redisKey,
+    });
+
+    // Verify Redis connection and command availability
+    if (typeof redisCmd !== 'function') {
+      console.error('[Cart Share Resolve] redisCmd is not a function');
+      return res.status(500).json({ error: 'redis_connection_error' });
+    }
+
+    let raw;
+    try {
+      raw = await redisCmd(['GET', redisKey]);
+    } catch (redisError) {
+      console.error('[Cart Share Resolve] Redis GET Error:', {
+        error: redisError.message,
+        stack: redisError.stack,
+      });
+      return res.status(500).json({ error: 'redis_get_failed' });
+    }
+
+    // If you use unwrapRedisValue elsewhere, keep it; otherwise, GET returns string|null in node-redis v4
+    const redisResult = typeof unwrapRedisValue === 'function' ? unwrapRedisValue(raw) : raw;
 
     if (!redisResult) {
+      console.warn('[Cart Share Resolve] Token Not Found or Expired', { 
+        token, 
+        redisKey,
+        rawRedisResult: raw
+      });
       return res.status(404).json({ error: 'not_found_or_expired' });
     }
 
-    const payload = JSON.parse(redisResult);
+    let payload;
+    try {
+      payload = JSON.parse(redisResult);
+    } catch (e) {
+      console.error('[Cart Share Resolve] Invalid JSON in Redis', { 
+        redisKey, 
+        redisResult, 
+        error: e.message 
+      });
+      return res.status(500).json({ error: 'invalid_redis_data' });
+    }
+
+    console.log('[Cart Share Resolve] Successful Response:', {
+      token,
+      hasPayload: !!payload,
+      itemCount: payload?.items?.length || 0,
+    });
+
     return res.json(payload);
   } catch (error) {
-    console.error(
-      'Cart share resolve error (hash):',
-      cartShareTokenHash(req.query?.token || 'unknown')
-    );
-    return res.status(500).json({ error: 'server_error' });
+    console.error('Cart share resolve error (full details):', {
+      error: error?.message,
+      stack: error?.stack,
+      query: req.query,
+      headers: req.headers,
+    });
+    return res.status(500).json({ 
+      error: 'server_error', 
+      details: error?.message 
+    });
   }
 });
 
