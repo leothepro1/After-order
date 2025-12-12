@@ -2036,6 +2036,71 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
+// Add these constants and functions before the route
+const CART_SHARE_TTL_SECONDS = Number.parseInt(process.env.CART_SHARE_TTL_SECONDS || '3600', 10); // Default 1 hour
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://pressify.se';
+
+// Redis configuration (node-redis v4)
+const { createClient } = require('redis');
+
+const redisClient = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379',
+});
+
+redisClient.on('error', (err) => console.error('Redis Client Error:', err));
+
+// Connect to Redis (avoid multiple connects)
+let redisConnectPromise = null;
+async function ensureRedisConnected() {
+  if (redisClient.isOpen) return;
+  if (!redisConnectPromise) {
+    redisConnectPromise = redisClient.connect().catch((e) => {
+      redisConnectPromise = null;
+      throw e;
+    });
+  }
+  await redisConnectPromise;
+}
+
+// Redis command wrapper (minimal, predictable)
+async function redisCmd(commands) {
+  await ensureRedisConnected();
+
+  const [cmd, ...args] = commands;
+  const c = String(cmd || '').toUpperCase();
+
+  switch (c) {
+    case 'SET': {
+      // Expected shape: ['SET', key, value, 'EX', ttlSeconds]
+      const key = args[0];
+      const value = args[1];
+      const mode = String(args[2] || '').toUpperCase();
+      const ttl = Number(args[3]);
+
+      if (mode === 'EX') {
+        return redisClient.set(key, value, { EX: ttl });
+      }
+      // If no EX provided, set without TTL
+      return redisClient.set(key, value);
+    }
+
+    case 'GET': {
+      // Expected: ['GET', key]
+      const key = args[0];
+      return redisClient.get(key);
+    }
+
+    default:
+      throw new Error(`Unsupported Redis command: ${cmd}`);
+  }
+}
+
+// Build Redis key for cart share
+function cartShareBuildRedisKey(tokenHash) {
+  return `cart_share:${tokenHash}`;
+}
+
+// Existing route
 app.post('/public/cart-share/create', async (req, res) => {
   try {
     const normalizedPayload = cartShareNormalizeAndValidatePayload(req.body);
@@ -2055,7 +2120,7 @@ app.post('/public/cart-share/create', async (req, res) => {
       ...normalizedPayload,
       createdAt: now.toISOString(),
       ttlSeconds: CART_SHARE_TTL_SECONDS,
-      expires_at: expiresAt.toISOString()
+      expires_at: expiresAt.toISOString(),
     });
 
     await redisCmd(['SET', redisKey, redisPayload, 'EX', CART_SHARE_TTL_SECONDS]);
@@ -2063,16 +2128,32 @@ app.post('/public/cart-share/create', async (req, res) => {
     return res.json({
       token,
       url: `${PUBLIC_BASE_URL}/cart?share_cart=${token}`,
-      expires_at: expiresAt.toISOString()
+      expires_at: expiresAt.toISOString(),
     });
   } catch (error) {
     console.error(
       'Cart share create error (hash):',
-      cartShareTokenHash(req.body?.token || 'unknown')
+      cartShareTokenHash(req.body?.token || 'unknown'),
+      error
     );
     return res.status(500).json({ error: 'server_error' });
   }
 });
+
+// Add Redis cleanup on server shutdown (SIGINT + SIGTERM)
+async function shutdown() {
+  try {
+    if (redisClient.isOpen) await redisClient.quit();
+  } catch (e) {
+    // ignore
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
 
 app.get('/public/cart-share/resolve', async (req, res) => {
   try {
