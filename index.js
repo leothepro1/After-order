@@ -32,7 +32,6 @@ app.options('*', cors(CORS_OPTIONS));      // preflight för alla paths
 
 app.use(compression({ level: 6, threshold: 1024 }));
 
-// CORS på fel-svar (t.ex. i catch)
 function setCorsOnError(req, res) {
   const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
@@ -40,6 +39,133 @@ function setCorsOnError(req, res) {
     res.setHeader('Vary', 'Origin');
   }
 }
+
+function unwrapRedisValue(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && value.result !== undefined) {
+    return value.result;
+  }
+  return null;
+}
+
+function cartShareNormalizeAndValidatePayload(payload) {
+  // Basic structure validation
+  if (
+    !payload ||
+    !payload.items ||
+    !Array.isArray(payload.items) ||
+    payload.items.length === 0
+  ) {
+    return { error: 'invalid_items' };
+  }
+
+  // Limit check
+  if (payload.items.length > 50) {
+    return { error: 'too_many_items' };
+  }
+
+  // Normalize and validate items
+  const normalizedItems = payload.items.map(item => {
+    // Variant ID validation
+    const variantId = Number(item.variant_id);
+    if (!Number.isInteger(variantId) || variantId <= 0) {
+      return { error: 'invalid_variant_id' };
+    }
+
+    // Quantity validation
+    const quantity = Number(item.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      return { error: 'invalid_quantity' };
+    }
+
+    // Properties normalization
+    let normalizedProperties = {};
+    if (item.properties) {
+      if (
+        typeof item.properties !== 'object' ||
+        Array.isArray(item.properties) ||
+        item.properties === null
+      ) {
+        return { error: 'invalid_properties' };
+      }
+
+      // Property key and value limits
+      const propertyKeys = Object.keys(item.properties);
+      if (propertyKeys.length > 100) {
+        return { error: 'too_many_properties' };
+      }
+
+      normalizedProperties = Object.fromEntries(
+        propertyKeys.map(key => {
+          if (key.length > 80) {
+            return { error: 'property_key_too_long' };
+          }
+          return [key, String(item.properties[key]).slice(0, 2000)];
+        })
+      );
+    }
+
+    return {
+      variant_id: variantId,
+      quantity,
+      properties: normalizedProperties
+    };
+  });
+
+  // Check for any errors in item normalization
+  const itemErrors = normalizedItems.find(item => item.error);
+  if (itemErrors) return itemErrors;
+
+  // Normalize cart attributes
+  let normalizedCartAttributes = {};
+  if (payload.cart_attributes) {
+    if (
+      typeof payload.cart_attributes !== 'object' ||
+      Array.isArray(payload.cart_attributes) ||
+      payload.cart_attributes === null
+    ) {
+      return { error: 'invalid_cart_attributes' };
+    }
+
+    normalizedCartAttributes = Object.fromEntries(
+      Object.entries(payload.cart_attributes).map(([key, value]) => {
+        if (key.length > 80) {
+          return { error: 'cart_attribute_key_too_long' };
+        }
+        return [key, String(value).slice(0, 2000)];
+      })
+    );
+  }
+
+  // Normalize note
+  const normalizedNote = payload.note
+    ? String(payload.note).slice(0, 2000)
+    : undefined;
+
+  // Payload size check
+  const normalizedPayload = {
+    items: normalizedItems,
+    cart_attributes: normalizedCartAttributes,
+    note: normalizedNote
+  };
+
+  const payloadString = JSON.stringify(normalizedPayload);
+  if (payloadString.length > 120_000) {
+    return { error: 'payload_too_large' };
+  }
+
+  return normalizedPayload;
+}
+
+function cartShareGenerateToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function cartShareTokenHash(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 
 
 const SHOP = process.env.SHOP;
@@ -218,6 +344,15 @@ const PRESSIFY_SCOPE_KEY = 'scope';
 const PRESSIFY_TEAM_ID_KEY = 'team_id';
 const PRESSIFY_TEAM_NAME_KEY = 'team_name';
 const PRESSIFY_DISCOUNT_CODE_KEY = 'discount_code';
+
+const CART_SHARE_TTL_SECONDS = parseInt(
+  process.env.CART_SHARE_TTL_SECONDS || '604800',
+  10
+);
+
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL || 'https://pressify.se';
+
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
 
@@ -1901,13 +2036,76 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
+app.post('/public/cart-share/create', async (req, res) => {
+  try {
+    const normalizedPayload = cartShareNormalizeAndValidatePayload(req.body);
+    if (normalizedPayload.error) {
+      return res.status(400).json({ error: normalizedPayload.error });
+    }
+
+    const token = cartShareGenerateToken();
+    const tokenHash = cartShareTokenHash(token);
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + CART_SHARE_TTL_SECONDS * 1000);
+
+    const redisKey = cartShareBuildRedisKey(tokenHash);
+
+    const redisPayload = JSON.stringify({
+      ...normalizedPayload,
+      createdAt: now.toISOString(),
+      ttlSeconds: CART_SHARE_TTL_SECONDS,
+      expires_at: expiresAt.toISOString()
+    });
+
+    await redisCmd(['SET', redisKey, redisPayload, 'EX', CART_SHARE_TTL_SECONDS]);
+
+    return res.json({
+      token,
+      url: `${PUBLIC_BASE_URL}/cart?share_cart=${token}`,
+      expires_at: expiresAt.toISOString()
+    });
+  } catch (error) {
+    console.error(
+      'Cart share create error (hash):',
+      cartShareTokenHash(req.body?.token || 'unknown')
+    );
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/public/cart-share/resolve', async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({ error: 'missing_token' });
+    }
+
+    const tokenHash = cartShareTokenHash(token);
+    const redisKey = cartShareBuildRedisKey(tokenHash);
+
+    const redisResult = unwrapRedisValue(
+      await redisCmd(['GET', redisKey])
+    );
+
+    if (!redisResult) {
+      return res.status(404).json({ error: 'not_found_or_expired' });
+    }
+
+    const payload = JSON.parse(redisResult);
+    return res.json(payload);
+  } catch (error) {
+    console.error(
+      'Cart share resolve error (hash):',
+      cartShareTokenHash(req.query?.token || 'unknown')
+    );
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
 
 
 
-// === PUBLIC REGISTER: /public/printed/artwork-register ==================
-// Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
-// === PUBLIC REGISTER: /public/printed/artwork-register ==================
-// Body: { kind:'artwork', orderId, lineItemId, preview?, tryckfil? }
 app.post('/public/printed/artwork-register', async (req, res) => {
   try {
     const { kind, orderId, lineItemId, preview, tryckfil } = req.body || {};
@@ -9028,8 +9226,77 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err?.message || 'Internal error' });
 });
 
+// Cart Share routes
+app.post('/public/cart-share/create', async (req, res) => {
+  try {
+    const normalizedPayload = cartShareNormalizeAndValidatePayload(req.body);
+    if (normalizedPayload.error) {
+      return res.status(400).json({ error: normalizedPayload.error });
+    }
+
+    const token = cartShareGenerateToken();
+    const tokenHash = cartShareTokenHash(token);
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + CART_SHARE_TTL_SECONDS * 1000);
+
+    const redisKey = cartShareBuildRedisKey(tokenHash);
+
+    const redisPayload = JSON.stringify({
+      ...normalizedPayload,
+      createdAt: now.toISOString(),
+      ttlSeconds: CART_SHARE_TTL_SECONDS,
+      expires_at: expiresAt.toISOString()
+    });
+
+    await redisCmd(['SET', redisKey, redisPayload, 'EX', CART_SHARE_TTL_SECONDS]);
+
+    return res.json({
+      token,
+      url: `${PUBLIC_BASE_URL}/cart?share_cart=${token}`,
+      expires_at: expiresAt.toISOString()
+    });
+  } catch (error) {
+    console.error(
+      'Cart share create error (hash):',
+      cartShareTokenHash(req.body?.token || 'unknown')
+    );
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/public/cart-share/resolve', async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({ error: 'missing_token' });
+    }
+
+    const tokenHash = cartShareTokenHash(token);
+    const redisKey = cartShareBuildRedisKey(tokenHash);
+
+    const redisResult = unwrapRedisValue(await redisCmd(['GET', redisKey]));
+
+    if (!redisResult) {
+      return res.status(404).json({ error: 'not_found_or_expired' });
+    }
+
+    const payload = JSON.parse(redisResult);
+    return res.json(payload);
+  } catch (error) {
+    console.error(
+      'Cart share resolve error (hash):',
+      cartShareTokenHash(req.query?.token || 'unknown')
+    );
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 // Starta servern
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log(`🚀 Kör på port ${PORT}`);
 });
+
