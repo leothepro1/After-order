@@ -2036,8 +2036,12 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
-// Add these constants and functions before the route
-const CART_SHARE_TTL_SECONDS = Number.parseInt(process.env.CART_SHARE_TTL_SECONDS || '3600', 10); // Default 1 hour
+// Använd befintlig definition om satt, annars fallback
+const CART_SHARE_TTL_SECONDS = Number.parseInt(
+  process.env.CART_SHARE_TTL_SECONDS ?? '3600',
+  10
+);
+
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://pressify.se';
 
 // Redis configuration (node-redis v4)
