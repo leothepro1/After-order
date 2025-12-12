@@ -2036,7 +2036,7 @@ app.get('/public/printed/artwork-token', async (req, res) => {
     return sendErr(500, 'internal_error');
   }
 });
-// Använd befintlig definition om satt, annars fallback
+// Consolidated Redis and Cart Share Configuration
 const CART_SHARE_TTL_SECONDS = Number.parseInt(
   process.env.CART_SHARE_TTL_SECONDS ?? '3600',
   10
@@ -2044,67 +2044,89 @@ const CART_SHARE_TTL_SECONDS = Number.parseInt(
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://pressify.se';
 
-// Redis configuration (node-redis v4)
+// Redis Configuration (node-redis v4) with safer connect handling
 const { createClient } = require('redis');
 
 const redisClient = createClient({
   url: process.env.REDIS_URL || 'redis://localhost:6379',
+  socket: {
+    connectTimeout: 5000,
+    // NOTE: disconnectTimeout finns inte som v4 socket-option; lämnas bort medvetet
+  },
 });
 
-redisClient.on('error', (err) => console.error('Redis Client Error:', err));
+redisClient.on('error', (err) => {
+  console.error('Redis Client Error:', err);
+});
 
-// Connect to Redis (avoid multiple connects)
 let redisConnectPromise = null;
-async function ensureRedisConnected() {
+
+// Ensure Connection with Retry Logic (single in-flight connect)
+async function connectRedis() {
   if (redisClient.isOpen) return;
+
   if (!redisConnectPromise) {
-    redisConnectPromise = redisClient.connect().catch((e) => {
+    redisConnectPromise = redisClient.connect().catch((err) => {
       redisConnectPromise = null;
-      throw e;
+
+      console.error('Redis Connection Failed:', err);
+      setTimeout(() => {
+        // fire-and-forget retry; nästa anrop till connectRedis/redisCmd kan också trigga
+        connectRedis().catch(() => {});
+      }, 5000);
+
+      throw err;
     });
   }
+
   await redisConnectPromise;
 }
 
-// Redis command wrapper (minimal, predictable)
+// Initialize Connection
+connectRedis().catch(() => {});
+
+// Unified Redis Command Wrapper with Enhanced Error Handling
 async function redisCmd(commands) {
-  await ensureRedisConnected();
+  try {
+    await connectRedis();
 
-  const [cmd, ...args] = commands;
-  const c = String(cmd || '').toUpperCase();
+    const [cmd, ...args] = commands;
+    const c = String(cmd || '').toUpperCase();
 
-  switch (c) {
-    case 'SET': {
-      // Expected shape: ['SET', key, value, 'EX', ttlSeconds]
-      const key = args[0];
-      const value = args[1];
-      const mode = String(args[2] || '').toUpperCase();
-      const ttl = Number(args[3]);
+    switch (c) {
+      case 'SET': {
+        // Expected: ['SET', key, value, 'EX', ttlSeconds]
+        const key = args[0];
+        const value = args[1];
+        const mode = String(args[2] || '').toUpperCase();
+        const ttl = Number(args[3] ?? CART_SHARE_TTL_SECONDS);
 
-      if (mode === 'EX') {
-        return redisClient.set(key, value, { EX: ttl });
+        if (mode === 'EX') {
+          return redisClient.set(key, value, { EX: ttl });
+        }
+        return redisClient.set(key, value);
       }
-      // If no EX provided, set without TTL
-      return redisClient.set(key, value);
-    }
 
-    case 'GET': {
-      // Expected: ['GET', key]
-      const key = args[0];
-      return redisClient.get(key);
-    }
+      case 'GET': {
+        // Expected: ['GET', key]
+        return redisClient.get(args[0]);
+      }
 
-    default:
-      throw new Error(`Unsupported Redis command: ${cmd}`);
+      default:
+        throw new Error(`Unsupported Redis command: ${cmd}`);
+    }
+  } catch (error) {
+    console.error('Redis Command Error:', error);
+    throw error;
   }
 }
 
-// Build Redis key for cart share
+// Build Redis Key for Cart Share
 function cartShareBuildRedisKey(tokenHash) {
   return `cart_share:${tokenHash}`;
 }
 
-// Existing route
+// Existing Cart Share Create Route
 app.post('/public/cart-share/create', async (req, res) => {
   try {
     const normalizedPayload = cartShareNormalizeAndValidatePayload(req.body);
@@ -2144,12 +2166,15 @@ app.post('/public/cart-share/create', async (req, res) => {
   }
 });
 
-// Add Redis cleanup on server shutdown (SIGINT + SIGTERM)
+// Graceful Redis Shutdown
 async function shutdown() {
   try {
-    if (redisClient.isOpen) await redisClient.quit();
+    if (redisClient.isOpen) {
+      await redisClient.quit();
+      console.log('Redis connection closed');
+    }
   } catch (e) {
-    // ignore
+    console.error('Redis shutdown error:', e);
   } finally {
     process.exit(0);
   }
@@ -2157,6 +2182,7 @@ async function shutdown() {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
 
 
 app.get('/public/cart-share/resolve', async (req, res) => {
