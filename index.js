@@ -2035,15 +2035,15 @@ app.get('/public/printed/artwork-token', async (req, res) => {
 });
 app.post('/public/cart-share/create', async (req, res) => {
   try {
-    console.log('[Cart Share Create] Incoming Request:', {
+    // Debugging: Log the entire incoming request body
+    console.log('Cart Share Create - Incoming Request:', {
       body: req.body,
       headers: req.headers,
-      method: req.method,
     });
 
     const normalizedPayload = cartShareNormalizeAndValidatePayload(req.body);
     if (normalizedPayload.error) {
-      console.warn('[Cart Share Create] Payload Validation Error:', normalizedPayload.error);
+      console.warn('Cart Share Validation Error:', normalizedPayload.error);
       return res.status(400).json({ error: normalizedPayload.error });
     }
 
@@ -2053,7 +2053,7 @@ app.post('/public/cart-share/create', async (req, res) => {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + CART_SHARE_TTL_SECONDS * 1000);
 
-    const redisKey = cartShareBuildRedisKey(tokenHash);
+    const redisKey = `cart_share:${tokenHash}`;
 
     const redisPayload = JSON.stringify({
       ...normalizedPayload,
@@ -2064,26 +2064,25 @@ app.post('/public/cart-share/create', async (req, res) => {
 
     await redisCmd(['SET', redisKey, redisPayload, 'EX', CART_SHARE_TTL_SECONDS]);
 
-    const responseBody = {
+    const shareUrl = `${PUBLIC_BASE_URL}/cart?share_cart=${token}`;
+
+    console.log('Cart Share Create - Generated Share URL:', shareUrl);
+
+    return res.json({
       token,
-      url: `${PUBLIC_BASE_URL}/cart?share_cart=${token}`,
+      url: shareUrl,
       expires_at: expiresAt.toISOString(),
-    };
-
-    console.log('[Cart Share Create] Successful Response:', responseBody);
-
-    return res.json(responseBody);
+    });
   } catch (error) {
-    console.error('Cart share create error (full details):', {
+    console.error('Cart share create error:', {
       error: error?.message,
       stack: error?.stack,
       body: req.body,
-      headers: req.headers,
     });
-
     return res.status(500).json({ error: 'server_error' });
   }
 });
+
 
 app.get('/public/cart-share/resolve', async (req, res) => {
   try {
