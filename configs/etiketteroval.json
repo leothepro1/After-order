@@ -33,7 +33,7 @@
   "captionLinkHref": "https://pressify.se",
   "captionLinkLabel": "pressify.se",
   "ctaText": "Kontakta oss",
-  "ctaHref": "https://pressify.se"
+  "ctaHref": "https://pressify.se/pages/kontakta-oss"
 },
       "ui": { "component": "shared-select" },
       "export": true
