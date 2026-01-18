@@ -229,7 +229,7 @@ async function pgQuery(text, params) {
   if (!pgPool) {
     throw new Error('pgPool inte initialiserad – saknar DATABASE_URL');
   }
-  const client = await pgPool.connect();
+ const client = await pgPool.connect();
   try {
     return await client.query(text, params);
   } finally {
@@ -241,6 +241,8 @@ async function pgQuery(text, params) {
 const ORDERS_SNAPSHOT_TABLE = 'orders_snapshot';
 // Tabell för Pressify Teams-medlemmar
 const TEAM_MEMBERS_TABLE = 'team_members';
+// Tabell för publika reviews (permalinks)
+const PUBLIC_REVIEWS_TABLE = 'public_reviews';
 
 async function ensureOrdersSnapshotTable() {
   if (!pgPool) {
@@ -330,9 +332,48 @@ async function ensureTeamMembersTable() {
   await pgQuery(ddl);
 }
 
+// Tabell för publika reviews (permalinks)
+async function ensurePublicReviewsTable() {
+  if (!pgPool) {
+    console.warn('[public_reviews] Hoppar över init – pgPool saknas');
+    return;
+  }
+
+  const ddl = `
+    CREATE TABLE IF NOT EXISTS ${PUBLIC_REVIEWS_TABLE} (
+      id                BIGSERIAL PRIMARY KEY,
+      token             TEXT UNIQUE,
+      status            TEXT NOT NULL DEFAULT 'published',
+      product_key       TEXT,
+      product_id        BIGINT,
+      order_id          BIGINT,
+      line_item_id      BIGINT,
+      customer_id       BIGINT,
+      rating            SMALLINT,
+      title             TEXT,
+      body              TEXT,
+      would_order_again BOOLEAN,
+      display_name      TEXT,
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_public_reviews_created_at
+      ON ${PUBLIC_REVIEWS_TABLE}(created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_public_reviews_product_time
+      ON ${PUBLIC_REVIEWS_TABLE}(product_key, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_public_reviews_product_id_time
+      ON ${PUBLIC_REVIEWS_TABLE}(product_id, created_at DESC);
+  `;
+
+  await pgQuery(ddl);
+}
+
 // Initiera tabeller vid start (ingen automatisk backfill längre)
 ensureOrdersSnapshotTable()
   .then(() => ensureTeamMembersTable())
+  .then(() => ensurePublicReviewsTable())
   .catch((err) => {
     console.error('[orders_snapshot] init-fel:', err?.message || err);
   });
@@ -1710,6 +1751,191 @@ async function writeProductReviews(productId, metafieldId, reviewsArray) {
 
 
 /* ===== END REVIEWS helpers ===== */
+
+/* ===== PUBLIC REVIEWS (PERMALINKS + CATEGORY LIST) ===== */
+const REVIEW_TOKEN_START_AT = parseInt(process.env.REVIEW_TOKEN_START_AT || '100', 10);
+const REVIEWS_ADMIN_SECRET = String(process.env.REVIEWS_ADMIN_SECRET || '');
+
+function buildPublicReviewTokenFromId(id) {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const base = Number.isFinite(REVIEW_TOKEN_START_AT) ? REVIEW_TOKEN_START_AT : 100;
+  return String(n + (base - 1));
+}
+
+const PRODUCT_HANDLE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+const productHandleCache = new Map(); // productId -> { at, handle }
+
+async function getProductHandleCached(productId) {
+  const pid = Number(productId);
+  if (!pid || Number.isNaN(pid)) return null;
+
+  const now = Date.now();
+  const hit = productHandleCache.get(pid);
+  if (hit && (now - hit.at) < PRODUCT_HANDLE_CACHE_TTL_MS) {
+    return hit.handle || null;
+  }
+
+  try {
+    const { data } = await axios.get(
+      `https://${SHOP}/admin/api/2025-07/products/${pid}.json`,
+      {
+        headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN },
+        params: { fields: 'id,handle' }
+      }
+    );
+    const handle = data?.product?.handle ? String(data.product.handle) : null;
+    productHandleCache.set(pid, { at: now, handle });
+    return handle;
+  } catch (e) {
+    console.warn('getProductHandleCached():', e?.response?.data || e.message);
+    productHandleCache.set(pid, { at: now, handle: null });
+    return null;
+  }
+}
+
+function reviewTokenCacheKey(token) {
+  return `review:token:${token}`;
+}
+function reviewProductZKey(productKey) {
+  return `z:reviews:product:${productKey}`;
+}
+
+async function cacheSetPublicReview(token, obj) {
+  if (!token) return;
+  const payload = JSON.stringify(obj || null);
+  try {
+    await redisCmd(['SET', reviewTokenCacheKey(token), payload]);
+  } catch (e) {
+    console.warn('[cacheSetPublicReview] err:', e?.response?.data || e.message);
+  }
+}
+
+async function cacheZAddPublicReview(productKey, createdAtIso, token) {
+  if (!productKey || !token) return;
+  const score = Date.parse(createdAtIso || '') || Date.now();
+  try {
+    await redisCmd(['ZADD', reviewProductZKey(productKey), String(score), String(token)]);
+  } catch (e) {
+    console.warn('[cacheZAddPublicReview] err:', e?.response?.data || e.message);
+  }
+}
+
+async function cacheGetPublicReview(token) {
+  if (!token) return null;
+  try {
+    const res = await redisCmd(['GET', reviewTokenCacheKey(token)]);
+    const raw = res && (res.result ?? res);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function cacheGetPublicReviewTokensForProduct(productKey, start, stop) {
+  if (!productKey) return null;
+  try {
+    const res = await redisCmd(['ZREVRANGE', reviewProductZKey(productKey), String(start), String(stop)]);
+    const arr = res && (res.result ?? res);
+    if (!Array.isArray(arr)) return null;
+    return arr.map(String);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function dbInsertPublicReviewDraft(row) {
+  const r = row || {};
+  const q = `
+    INSERT INTO ${PUBLIC_REVIEWS_TABLE} (
+      token, status, product_key, product_id, order_id, line_item_id, customer_id,
+      rating, title, body, would_order_again, display_name, created_at
+    ) VALUES (
+      NULL, $1, $2, $3, $4, $5, $6,
+      $7, $8, $9, $10, $11, COALESCE($12::timestamptz, NOW())
+    )
+    RETURNING id, created_at
+  `;
+  const params = [
+    r.status || 'published',
+    r.product_key || null,
+    r.product_id != null ? Number(r.product_id) : null,
+    r.order_id != null ? Number(r.order_id) : null,
+    r.line_item_id != null ? Number(r.line_item_id) : null,
+    r.customer_id != null ? Number(r.customer_id) : null,
+    r.rating != null ? Number(r.rating) : null,
+    r.title != null ? String(r.title) : null,
+    r.body != null ? String(r.body) : null,
+    typeof r.would_order_again === 'boolean' ? r.would_order_again : (r.would_order_again != null ? !!r.would_order_again : null),
+    r.display_name != null ? String(r.display_name) : null,
+    r.created_at || null
+  ];
+  const out = await pgQuery(q, params);
+  return out?.rows?.[0] || null;
+}
+
+async function dbUpdatePublicReviewToken(id, token) {
+  const q = `
+    UPDATE ${PUBLIC_REVIEWS_TABLE}
+    SET token = $2
+    WHERE id = $1
+    RETURNING token
+  `;
+  const out = await pgQuery(q, [Number(id), String(token)]);
+  return out?.rows?.[0]?.token || null;
+}
+
+async function dbGetPublicReviewByToken(token) {
+  const q = `
+    SELECT
+      id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
+      rating, title, body, would_order_again, display_name, created_at
+    FROM ${PUBLIC_REVIEWS_TABLE}
+    WHERE token = $1
+    LIMIT 1
+  `;
+  const out = await pgQuery(q, [String(token)]);
+  return out?.rows?.[0] || null;
+}
+
+async function dbListPublicReviewsByProductKey(productKey, limit, offset) {
+  const lim = Math.max(1, Math.min(200, Number(limit) || 24));
+  const off = Math.max(0, Number(offset) || 0);
+
+  const q = `
+    SELECT
+      id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
+      rating, title, body, would_order_again, display_name, created_at
+    FROM ${PUBLIC_REVIEWS_TABLE}
+    WHERE product_key = $1
+      AND status = 'published'
+      AND token IS NOT NULL
+    ORDER BY created_at DESC, id DESC
+    LIMIT $2 OFFSET $3
+  `;
+  const out = await pgQuery(q, [String(productKey), lim, off]);
+  return Array.isArray(out?.rows) ? out.rows : [];
+}
+
+function shapePublicReviewRow(row) {
+  if (!row) return null;
+  return {
+    token: row.token,
+    product_key: row.product_key,
+    product_id: row.product_id,
+    order_id: row.order_id,
+    line_item_id: row.line_item_id,
+    customer_id: row.customer_id,
+    rating: row.rating,
+    title: row.title,
+    body: row.body,
+    would_order_again: row.would_order_again,
+    display_name: row.display_name,
+    created_at: row.created_at
+  };
+}
+/* ===== END PUBLIC REVIEWS ===== */
 
 // Snapshot helpers
 function safeProjectFields(p){
@@ -7967,8 +8193,6 @@ app.get('/proof/share/:token', async (req, res) => {
 
 
 
-
-
 app.get('/review/share/:token', async (req, res) => {
   try {
     const token = req.params.token || '';
@@ -8047,6 +8271,134 @@ app.get('/review/share/:token', async (req, res) => {
   }
 });
 
+
+
+
+/* ===== PUBLIC REVIEWS: READ (TOKEN) ===== */
+app.get('/public/reviews/:token', async (req, res) => {
+  try {
+    const token = String(req.params.token || '').trim();
+    if (!token) return res.status(400).json({ ok: false, error: 'missing_token' });
+
+    // 1) Redis först
+    const cached = await cacheGetPublicReview(token);
+    if (cached && cached.token) {
+      res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+      return res.json({ ok: true, review: cached });
+    }
+
+    // 2) DB fallback
+    const row = await dbGetPublicReviewByToken(token);
+    if (!row || !row.token) return res.status(404).json({ ok: false, error: 'not_found' });
+
+    const shaped = shapePublicReviewRow(row);
+    if (shaped) {
+      await cacheSetPublicReview(token, shaped);
+      if (shaped.product_key) {
+        await cacheZAddPublicReview(String(shaped.product_key), shaped.created_at, token);
+      }
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+    return res.json({ ok: true, review: shaped });
+  } catch (e) {
+    console.error('GET /public/reviews/:token:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+/* ===== PUBLIC REVIEWS: LIST (CATEGORY) ===== */
+app.get('/public/reviews/categories/:productKey', async (req, res) => {
+  try {
+    const productKey = String(req.params.productKey || '').trim();
+    if (!productKey) return res.status(400).json({ ok: false, error: 'missing_product_key' });
+
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '24', 10)));
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10));
+
+    // 1) Redis ZSET först (snabbt)
+    let tokens = await cacheGetPublicReviewTokensForProduct(productKey, offset, offset + limit - 1);
+    let items = [];
+
+    if (Array.isArray(tokens) && tokens.length > 0) {
+      for (const t of tokens) {
+        const obj = await cacheGetPublicReview(t);
+        if (obj && obj.token) {
+          items.push(obj);
+        }
+      }
+    }
+
+    // 2) Om cache är tom/otillräcklig → DB
+    if (items.length === 0) {
+      const rows = await dbListPublicReviewsByProductKey(productKey, limit, offset);
+      items = rows.map(shapePublicReviewRow).filter(Boolean);
+
+      // skriv tillbaka cache
+      for (const it of items) {
+        await cacheSetPublicReview(it.token, it);
+        await cacheZAddPublicReview(productKey, it.created_at, it.token);
+      }
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+    return res.json({ ok: true, product_key: productKey, limit, offset, reviews: items });
+  } catch (e) {
+    console.error('GET /public/reviews/categories/:productKey:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+/* ===== ADMIN: BULK RESERVE TOKENS (MVP) ===== */
+app.post('/admin/reviews/bulk-reserve', async (req, res) => {
+  try {
+    const secret = String(req.get('x-admin-secret') || req.query.secret || '').trim();
+    if (!REVIEWS_ADMIN_SECRET || secret !== REVIEWS_ADMIN_SECRET) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const count = Math.max(1, Math.min(500, parseInt(req.body?.count || '30', 10)));
+    const productKey = req.body?.product_key != null ? String(req.body.product_key).trim() : null;
+
+    const tokens = [];
+    for (let i = 0; i < count; i++) {
+      const ins = await dbInsertPublicReviewDraft({
+        status: 'reserved',
+        product_key: productKey,
+        created_at: new Date().toISOString()
+      });
+
+      const token = buildPublicReviewTokenFromId(ins?.id);
+      if (!token) continue;
+
+      await dbUpdatePublicReviewToken(ins.id, token);
+
+      const shaped = shapePublicReviewRow({
+        token,
+        status: 'reserved',
+        product_key: productKey,
+        created_at: ins.created_at
+      });
+
+      if (shaped) {
+        await cacheSetPublicReview(token, shaped);
+        if (productKey) {
+          await cacheZAddPublicReview(productKey, shaped.created_at, token);
+        }
+      }
+
+      tokens.push(token);
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, count: tokens.length, tokens });
+  } catch (e) {
+    console.error('POST /admin/reviews/bulk-reserve:', e?.response?.data || e.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
 
 
 
@@ -8132,6 +8484,57 @@ app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
     const nextReviews = [entry, ...(Array.isArray(reviews) ? reviews : [])].slice(0, 500);
 
     await writeProductReviews(productId, revMfId, nextReviews);
+
+    // ===== NYTT: skapa permanent public review (DB + Redis, utan TTL) =====
+    try {
+      const productKey = (await getProductHandleCached(productId)) || (productId != null ? String(productId) : null);
+
+      const ins = await dbInsertPublicReviewDraft({
+        status: 'published',
+        product_key: productKey,
+        product_id: productId != null ? Number(productId) : null,
+        order_id: Number(orderId),
+        line_item_id: Number(lineItemId),
+        customer_id: order.customer?.id != null ? Number(order.customer.id) : null,
+        rating: Number(rating),
+        title: String(title),
+        body: String(body),
+        would_order_again: !!again,
+        display_name: String(displayName),
+        created_at: entry.createdAt
+      });
+
+      const publicToken = buildPublicReviewTokenFromId(ins?.id);
+      if (publicToken) {
+        await dbUpdatePublicReviewToken(ins.id, publicToken);
+
+        const shaped = shapePublicReviewRow({
+          token: publicToken,
+          status: 'published',
+          product_key: productKey,
+          product_id: productId != null ? Number(productId) : null,
+          order_id: Number(orderId),
+          line_item_id: Number(lineItemId),
+          customer_id: order.customer?.id != null ? Number(order.customer.id) : null,
+          rating: Number(rating),
+          title: String(title),
+          body: String(body),
+          would_order_again: !!again,
+          display_name: String(displayName),
+          created_at: ins.created_at
+        });
+
+        if (shaped) {
+          await cacheSetPublicReview(publicToken, shaped);
+          if (productKey) {
+            await cacheZAddPublicReview(String(productKey), shaped.created_at, publicToken);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[public_reviews] create failed:', e?.response?.data || e.message);
+    }
+    // ===== END NYTT =====
 
       const updated = { ...(p.review || {}), status: 'done', submittedAt: nowIso() };
     projects[idx] = { ...p, review: updated };
