@@ -350,6 +350,7 @@ async function ensurePublicReviewsTable() {
       line_item_id      BIGINT,
       customer_id       BIGINT,
       preview_img       TEXT,
+      profile_img       TEXT,
       rating            SMALLINT,
       title             TEXT,
       body              TEXT,
@@ -360,6 +361,9 @@ async function ensurePublicReviewsTable() {
 
     ALTER TABLE ${PUBLIC_REVIEWS_TABLE}
       ADD COLUMN IF NOT EXISTS preview_img TEXT;
+
+    ALTER TABLE ${PUBLIC_REVIEWS_TABLE}
+      ADD COLUMN IF NOT EXISTS profile_img TEXT;
 
     CREATE INDEX IF NOT EXISTS idx_public_reviews_created_at
       ON ${PUBLIC_REVIEWS_TABLE}(created_at DESC);
@@ -1848,16 +1852,15 @@ async function cacheGetPublicReviewTokensForProduct(productKey, start, stop) {
     return null;
   }
 }
-
 async function dbInsertPublicReviewDraft(row) {
   const r = row || {};
   const q = `
     INSERT INTO ${PUBLIC_REVIEWS_TABLE} (
       token, status, product_key, product_id, order_id, line_item_id, customer_id,
-      preview_img, rating, title, body, would_order_again, display_name, created_at
+      preview_img, profile_img, rating, title, body, would_order_again, display_name, created_at
     ) VALUES (
       NULL, $1, $2, $3, $4, $5, $6,
-      $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW())
+      $7, $8, $9, $10, $11, $12, $13, COALESCE($14::timestamptz, NOW())
     )
     RETURNING id, created_at
   `;
@@ -1869,6 +1872,7 @@ async function dbInsertPublicReviewDraft(row) {
     r.line_item_id != null ? Number(r.line_item_id) : null,
     r.customer_id != null ? Number(r.customer_id) : null,
     r.preview_img != null ? String(r.preview_img) : null,
+    r.profile_img != null ? String(r.profile_img) : null,
     r.rating != null ? Number(r.rating) : null,
     r.title != null ? String(r.title) : null,
     r.body != null ? String(r.body) : null,
@@ -1895,7 +1899,7 @@ async function dbGetPublicReviewByToken(token) {
   const q = `
     SELECT
       id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
-      preview_img, rating, title, body, would_order_again, display_name, created_at
+      preview_img, profile_img, rating, title, body, would_order_again, display_name, created_at
     FROM ${PUBLIC_REVIEWS_TABLE}
     WHERE token = $1
     LIMIT 1
@@ -1911,7 +1915,7 @@ async function dbListPublicReviewsByProductKey(productKey, limit, offset) {
   const q = `
     SELECT
       id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
-      preview_img, rating, title, body, would_order_again, display_name, created_at
+      preview_img, profile_img, rating, title, body, would_order_again, display_name, created_at
     FROM ${PUBLIC_REVIEWS_TABLE}
     WHERE product_key = $1
       AND status = 'published'
@@ -1933,6 +1937,7 @@ function shapePublicReviewRow(row) {
     line_item_id: row.line_item_id,
     customer_id: row.customer_id,
     preview_img: row.preview_img || null,
+    profile_img: row.profile_img || null,
     rating: row.rating,
     title: row.title,
     body: row.body,
@@ -8356,8 +8361,6 @@ app.get('/public/reviews/categories/:productKey', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
-
-/* ===== ADMIN: BULK RESERVE TOKENS (MVP) ===== */
 app.post('/admin/reviews/bulk-reserve', async (req, res) => {
   try {
     const secret = String(req.get('x-admin-secret') || req.query.secret || '').trim();
@@ -8402,6 +8405,93 @@ app.post('/admin/reviews/bulk-reserve', async (req, res) => {
     return res.json({ ok: true, count: tokens.length, tokens });
   } catch (e) {
     console.error('POST /admin/reviews/bulk-reserve:', e?.response?.data || e.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+/* ===== ADMIN: CREATE REVIEW (FRONTEND TOOL) =====
+   POST /admin/reviews/create
+   Headers: x-admin-secret: <REVIEWS_ADMIN_SECRET>
+   Body: {
+     product_key, product_id?, preview_img?,
+     display_name, profile_img?,
+     rating, title, body, would_order_again,
+     created_at?
+   }
+*/
+app.post('/admin/reviews/create', async (req, res) => {
+  try {
+    const secret = String(req.get('x-admin-secret') || req.query.secret || '').trim();
+    if (!REVIEWS_ADMIN_SECRET || secret !== REVIEWS_ADMIN_SECRET) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const b = req.body || {};
+
+    const productKey = String(b.product_key || '').trim();
+    if (!productKey) return res.status(400).json({ ok: false, error: 'missing_product_key' });
+
+    let rating = parseInt(b.rating, 10);
+    if (!(rating >= 1 && rating <= 5)) return res.status(400).json({ ok: false, error: 'invalid_rating' });
+
+    const title = String(b.title || '').trim();
+    const body = String(b.body || '').trim();
+    const displayName = String(b.display_name || '').trim();
+    if (!displayName || !title || !body) return res.status(400).json({ ok: false, error: 'missing_fields' });
+
+    const again = (function(v){
+      if (typeof v === 'boolean') return v;
+      if (typeof v === 'number') return v !== 0;
+      if (typeof v === 'string') return /^(true|1|yes|ja)$/i.test(v);
+      return false;
+    })(b.would_order_again);
+
+    const previewImg = b.preview_img != null ? String(b.preview_img).trim() : null;
+    const profileImg = b.profile_img != null ? String(b.profile_img).trim() : null;
+
+    const ins = await dbInsertPublicReviewDraft({
+      status: 'published',
+      product_key: productKey,
+      product_id: b.product_id != null ? Number(b.product_id) : null,
+      preview_img: previewImg || null,
+      profile_img: profileImg || null,
+      rating: Number(rating),
+      title: String(title),
+      body: String(body),
+      would_order_again: !!again,
+      display_name: String(displayName),
+      created_at: b.created_at || null
+    });
+
+    const token = buildPublicReviewTokenFromId(ins?.id);
+    if (!token) return res.status(500).json({ ok: false, error: 'token_failed' });
+
+    await dbUpdatePublicReviewToken(ins.id, token);
+
+    const shaped = shapePublicReviewRow({
+      token,
+      status: 'published',
+      product_key: productKey,
+      product_id: b.product_id != null ? Number(b.product_id) : null,
+      preview_img: previewImg || null,
+      profile_img: profileImg || null,
+      rating: Number(rating),
+      title: String(title),
+      body: String(body),
+      would_order_again: !!again,
+      display_name: String(displayName),
+      created_at: ins.created_at
+    });
+
+    if (shaped) {
+      await cacheSetPublicReview(token, shaped);
+      await cacheZAddPublicReview(String(productKey), shaped.created_at, token);
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, token, review: shaped });
+  } catch (e) {
+    console.error('POST /admin/reviews/create:', e?.response?.data || e.message);
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
