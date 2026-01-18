@@ -8304,41 +8304,27 @@ app.get('/review/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-
 /* ===== PUBLIC REVIEWS: READ (TOKEN) ===== */
 app.get('/public/reviews/:token', async (req, res) => {
   try {
     const raw = String(req.params.token || '').trim();
     if (!raw) return res.status(400).json({ ok: false, error: 'missing_token' });
 
-    // 1) Redis först (endast om raw ser ut som en token vi cache:ar på)
     const cached = await cacheGetPublicReview(raw);
     if (cached && cached.token) {
       res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
       return res.json({ ok: true, review: cached });
     }
 
-    // 2) DB: försök som token först
     let row = await dbGetPublicReviewByToken(raw);
 
-    // 3) Fallback: om inte hittad som token, men raw är ett heltal → tolka som DB-id
-    //    + extra fallback: om raw ser ut som "public token" (id + offset) men token-kolumnen saknas på äldre rader,
-    //      härled DB-id = raw - (base - 1) och försök läsa på id.
+    // Fallback: raw är ett heltal -> tolka som DB-id
     if (!row) {
-      const maybeInt = parseInt(raw, 10);
-      if (Number.isFinite(maybeInt) && String(maybeInt) === raw) {
-        let byId = await dbGetPublicReviewById(maybeInt);
-
-        if (!byId) {
-          const base = Number.isFinite(REVIEW_TOKEN_START_AT) ? REVIEW_TOKEN_START_AT : 100;
-          const derivedId = maybeInt - (base - 1);
-          if (Number.isFinite(derivedId) && derivedId > 0 && derivedId !== maybeInt) {
-            byId = await dbGetPublicReviewById(derivedId);
-          }
-        }
+      const maybeId = parseInt(raw, 10);
+      if (Number.isFinite(maybeId) && String(maybeId) === raw) {
+        const byId = await dbGetPublicReviewById(maybeId);
 
         if (byId) {
-          // Om token saknas i DB-raden (edge case), generera & skriv tillbaka
           if (!byId.token) {
             const computed = buildPublicReviewTokenFromId(byId.id);
             if (computed) {
@@ -8355,7 +8341,6 @@ app.get('/public/reviews/:token', async (req, res) => {
 
     const shaped = shapePublicReviewRow(row);
 
-    // Cachea alltid på "riktiga" token-värdet (inte nödvändigtvis raw)
     if (shaped && shaped.token) {
       await cacheSetPublicReview(String(shaped.token), shaped);
       if (shaped.product_key) {
@@ -8371,6 +8356,7 @@ app.get('/public/reviews/:token', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 
 
 
