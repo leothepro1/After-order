@@ -349,6 +349,7 @@ async function ensurePublicReviewsTable() {
       order_id          BIGINT,
       line_item_id      BIGINT,
       customer_id       BIGINT,
+      preview_img       TEXT,
       rating            SMALLINT,
       title             TEXT,
       body              TEXT,
@@ -356,6 +357,9 @@ async function ensurePublicReviewsTable() {
       display_name      TEXT,
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE ${PUBLIC_REVIEWS_TABLE}
+      ADD COLUMN IF NOT EXISTS preview_img TEXT;
 
     CREATE INDEX IF NOT EXISTS idx_public_reviews_created_at
       ON ${PUBLIC_REVIEWS_TABLE}(created_at DESC);
@@ -1850,10 +1854,10 @@ async function dbInsertPublicReviewDraft(row) {
   const q = `
     INSERT INTO ${PUBLIC_REVIEWS_TABLE} (
       token, status, product_key, product_id, order_id, line_item_id, customer_id,
-      rating, title, body, would_order_again, display_name, created_at
+      preview_img, rating, title, body, would_order_again, display_name, created_at
     ) VALUES (
       NULL, $1, $2, $3, $4, $5, $6,
-      $7, $8, $9, $10, $11, COALESCE($12::timestamptz, NOW())
+      $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW())
     )
     RETURNING id, created_at
   `;
@@ -1864,6 +1868,7 @@ async function dbInsertPublicReviewDraft(row) {
     r.order_id != null ? Number(r.order_id) : null,
     r.line_item_id != null ? Number(r.line_item_id) : null,
     r.customer_id != null ? Number(r.customer_id) : null,
+    r.preview_img != null ? String(r.preview_img) : null,
     r.rating != null ? Number(r.rating) : null,
     r.title != null ? String(r.title) : null,
     r.body != null ? String(r.body) : null,
@@ -1890,7 +1895,7 @@ async function dbGetPublicReviewByToken(token) {
   const q = `
     SELECT
       id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
-      rating, title, body, would_order_again, display_name, created_at
+      preview_img, rating, title, body, would_order_again, display_name, created_at
     FROM ${PUBLIC_REVIEWS_TABLE}
     WHERE token = $1
     LIMIT 1
@@ -1906,7 +1911,7 @@ async function dbListPublicReviewsByProductKey(productKey, limit, offset) {
   const q = `
     SELECT
       id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
-      rating, title, body, would_order_again, display_name, created_at
+      preview_img, rating, title, body, would_order_again, display_name, created_at
     FROM ${PUBLIC_REVIEWS_TABLE}
     WHERE product_key = $1
       AND status = 'published'
@@ -1927,6 +1932,7 @@ function shapePublicReviewRow(row) {
     order_id: row.order_id,
     line_item_id: row.line_item_id,
     customer_id: row.customer_id,
+    preview_img: row.preview_img || null,
     rating: row.rating,
     title: row.title,
     body: row.body,
@@ -8485,9 +8491,10 @@ app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
 
     await writeProductReviews(productId, revMfId, nextReviews);
 
-    // ===== NYTT: skapa permanent public review (DB + Redis, utan TTL) =====
+    // ===== NYTT: skapa permanent public review (preview_img sparas) =====
     try {
       const productKey = (await getProductHandleCached(productId)) || (productId != null ? String(productId) : null);
+      const previewImg = p.previewUrl || p.preview_img || null;
 
       const ins = await dbInsertPublicReviewDraft({
         status: 'published',
@@ -8496,6 +8503,7 @@ app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
         order_id: Number(orderId),
         line_item_id: Number(lineItemId),
         customer_id: order.customer?.id != null ? Number(order.customer.id) : null,
+        preview_img: previewImg,
         rating: Number(rating),
         title: String(title),
         body: String(body),
@@ -8516,6 +8524,7 @@ app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
           order_id: Number(orderId),
           line_item_id: Number(lineItemId),
           customer_id: order.customer?.id != null ? Number(order.customer.id) : null,
+          preview_img: previewImg,
           rating: Number(rating),
           title: String(title),
           body: String(body),
@@ -8562,6 +8571,7 @@ app.post('/proxy/orders-meta/reviews/submit', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 
 app.post('/proxy/orders-meta/order/cancel', async (req, res) => {
