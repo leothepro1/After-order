@@ -5312,6 +5312,15 @@ function forward(toPath) {
   };
 }
 
+// ===== PUBLIC REVIEWS VIA APP PROXY (READ) =====
+
+// Shopify App Proxy -> server path /proxy/orders-meta/...
+app.get('/proxy/orders-meta/public/reviews/:token', forward('/public/reviews/:token'));
+app.get('/proxy/orders-meta/public/reviews/categories/:productKey', forward('/public/reviews/categories/:productKey'));
+
+// Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy
+app.get('/apps/orders-meta/public/reviews/:token', forward('/proxy/orders-meta/public/reviews/:token'));
+app.get('/apps/orders-meta/public/reviews/categories/:productKey', forward('/proxy/orders-meta/public/reviews/categories/:productKey'));
 
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
