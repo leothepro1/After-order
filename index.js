@@ -9162,6 +9162,92 @@ app.post('/proxy/orders-meta/reviews/create', async (req, res) => {
 app.post('/proxy/order/cancel', forward('/proxy/orders-meta/order/cancel'));
 
 /* ====== END SIMPLE CANCEL VIA APP PROXY ====== */
+/* ===== NYTT: skapa PUBLIC review direkt (manual/admin-tool via App Proxy) =====
+   POST /apps/orders-meta/reviews/public-create   (Shopify App Proxy → server: /proxy/orders-meta/reviews/public-create)
+   Body: {
+     product_key, product_id?, preview_img?, profile_img?,
+     display_name, rating, title, body, would_order_again, created_at?
+   }
+*/
+app.post('/proxy/orders-meta/reviews/public-create', async (req, res) => {
+  try {
+    // 1) Verifiera App Proxy-signatur (krävs om du går via /apps/*)
+    if (!verifyAppProxySignature(req.url.split('?')[1] || '')) {
+      return res.status(403).json({ ok: false, error: 'invalid_signature' });
+    }
+
+    const b = req.body || {};
+
+    const productKey = String(b.product_key || '').trim();
+    if (!productKey) return res.status(400).json({ ok: false, error: 'missing_product_key' });
+
+    let rating = parseInt(b.rating, 10);
+    if (!(rating >= 1 && rating <= 5)) return res.status(400).json({ ok: false, error: 'invalid_rating' });
+
+    const title = String(b.title || '').trim();
+    const body = String(b.body || '').trim();
+    const displayName = String(b.display_name || '').trim();
+    if (!displayName || !title || !body) return res.status(400).json({ ok: false, error: 'missing_fields' });
+
+    const again = (function(v){
+      if (typeof v === 'boolean') return v;
+      if (typeof v === 'number') return v !== 0;
+      if (typeof v === 'string') return /^(true|1|yes|ja)$/i.test(v);
+      return false;
+    })(b.would_order_again);
+
+    const previewImg = b.preview_img != null ? String(b.preview_img).trim() : null;
+    const profileImg = b.profile_img != null ? String(b.profile_img).trim() : null;
+
+    const ins = await dbInsertPublicReviewDraft({
+      status: 'published',
+      product_key: productKey,
+      product_id: b.product_id != null ? Number(b.product_id) : null,
+      preview_img: previewImg || null,
+      profile_img: profileImg || null,
+      rating: Number(rating),
+      title: String(title),
+      body: String(body),
+      would_order_again: !!again,
+      display_name: String(displayName),
+      created_at: b.created_at || null
+    });
+
+    const token = buildPublicReviewTokenFromId(ins?.id);
+    if (!token) return res.status(500).json({ ok: false, error: 'token_failed' });
+
+    await dbUpdatePublicReviewToken(ins.id, token);
+
+    const shaped = shapePublicReviewRow({
+      token,
+      status: 'published',
+      product_key: productKey,
+      product_id: b.product_id != null ? Number(b.product_id) : null,
+      preview_img: previewImg || null,
+      profile_img: profileImg || null,
+      rating: Number(rating),
+      title: String(title),
+      body: String(body),
+      would_order_again: !!again,
+      display_name: String(displayName),
+      created_at: ins.created_at
+    });
+
+    if (shaped) {
+      await cacheSetPublicReview(token, shaped);
+      await cacheZAddPublicReview(String(productKey), shaped.created_at, token);
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ ok: true, token, review: shaped });
+  } catch (e) {
+    console.error('POST /proxy/orders-meta/reviews/public-create:', e?.response?.data || e.message);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+// Alias om din App Proxy mappar /apps/orders-meta/... till /... utan /proxy (du använder forward()-mönstret i filen)
+app.post('/apps/orders-meta/reviews/public-create', forward('/proxy/orders-meta/reviews/public-create'));
 
 // ===== ADMIN: Backfill för alla kunder (skapa referlink om saknas) =====
 app.post('/admin/referlink/backfill', async (req, res) => {
