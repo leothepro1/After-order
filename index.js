@@ -8305,7 +8305,6 @@ app.get('/review/share/:token', async (req, res) => {
   }
 });
 
-
 /* ===== PUBLIC REVIEWS: READ (TOKEN) ===== */
 app.get('/public/reviews/:token', async (req, res) => {
   try {
@@ -8323,10 +8322,20 @@ app.get('/public/reviews/:token', async (req, res) => {
     let row = await dbGetPublicReviewByToken(raw);
 
     // 3) Fallback: om inte hittad som token, men raw är ett heltal → tolka som DB-id
+    //    + extra fallback: om raw ser ut som "public token" (id + offset) men token-kolumnen saknas på äldre rader,
+    //      härled DB-id = raw - (base - 1) och försök läsa på id.
     if (!row) {
-      const maybeId = parseInt(raw, 10);
-      if (Number.isFinite(maybeId) && String(maybeId) === raw) {
-        const byId = await dbGetPublicReviewById(maybeId);
+      const maybeInt = parseInt(raw, 10);
+      if (Number.isFinite(maybeInt) && String(maybeInt) === raw) {
+        let byId = await dbGetPublicReviewById(maybeInt);
+
+        if (!byId) {
+          const base = Number.isFinite(REVIEW_TOKEN_START_AT) ? REVIEW_TOKEN_START_AT : 100;
+          const derivedId = maybeInt - (base - 1);
+          if (Number.isFinite(derivedId) && derivedId > 0 && derivedId !== maybeInt) {
+            byId = await dbGetPublicReviewById(derivedId);
+          }
+        }
 
         if (byId) {
           // Om token saknas i DB-raden (edge case), generera & skriv tillbaka
@@ -8362,6 +8371,7 @@ app.get('/public/reviews/:token', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 
 
 /* ===== PUBLIC REVIEWS: LIST (CATEGORY) ===== */
