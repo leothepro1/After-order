@@ -1894,7 +1894,6 @@ async function dbUpdatePublicReviewToken(id, token) {
   const out = await pgQuery(q, [Number(id), String(token)]);
   return out?.rows?.[0]?.token || null;
 }
-
 async function dbGetPublicReviewByToken(token) {
   const q = `
     SELECT
@@ -1905,6 +1904,19 @@ async function dbGetPublicReviewByToken(token) {
     LIMIT 1
   `;
   const out = await pgQuery(q, [String(token)]);
+  return out?.rows?.[0] || null;
+}
+
+async function dbGetPublicReviewById(id) {
+  const q = `
+    SELECT
+      id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
+      preview_img, profile_img, rating, title, body, would_order_again, display_name, created_at
+    FROM ${PUBLIC_REVIEWS_TABLE}
+    WHERE id = $1
+    LIMIT 1
+  `;
+  const out = await pgQuery(q, [Number(id)]);
   return out?.rows?.[0] || null;
 }
 
@@ -8294,30 +8306,51 @@ app.get('/review/share/:token', async (req, res) => {
 });
 
 
-
-
 /* ===== PUBLIC REVIEWS: READ (TOKEN) ===== */
 app.get('/public/reviews/:token', async (req, res) => {
   try {
-    const token = String(req.params.token || '').trim();
-    if (!token) return res.status(400).json({ ok: false, error: 'missing_token' });
+    const raw = String(req.params.token || '').trim();
+    if (!raw) return res.status(400).json({ ok: false, error: 'missing_token' });
 
-    // 1) Redis först
-    const cached = await cacheGetPublicReview(token);
+    // 1) Redis först (endast om raw ser ut som en token vi cache:ar på)
+    const cached = await cacheGetPublicReview(raw);
     if (cached && cached.token) {
       res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
       return res.json({ ok: true, review: cached });
     }
 
-    // 2) DB fallback
-    const row = await dbGetPublicReviewByToken(token);
+    // 2) DB: försök som token först
+    let row = await dbGetPublicReviewByToken(raw);
+
+    // 3) Fallback: om inte hittad som token, men raw är ett heltal → tolka som DB-id
+    if (!row) {
+      const maybeId = parseInt(raw, 10);
+      if (Number.isFinite(maybeId) && String(maybeId) === raw) {
+        const byId = await dbGetPublicReviewById(maybeId);
+
+        if (byId) {
+          // Om token saknas i DB-raden (edge case), generera & skriv tillbaka
+          if (!byId.token) {
+            const computed = buildPublicReviewTokenFromId(byId.id);
+            if (computed) {
+              const updatedToken = await dbUpdatePublicReviewToken(byId.id, computed);
+              byId.token = updatedToken || computed;
+            }
+          }
+          row = byId;
+        }
+      }
+    }
+
     if (!row || !row.token) return res.status(404).json({ ok: false, error: 'not_found' });
 
     const shaped = shapePublicReviewRow(row);
-    if (shaped) {
-      await cacheSetPublicReview(token, shaped);
+
+    // Cachea alltid på "riktiga" token-värdet (inte nödvändigtvis raw)
+    if (shaped && shaped.token) {
+      await cacheSetPublicReview(String(shaped.token), shaped);
       if (shaped.product_key) {
-        await cacheZAddPublicReview(String(shaped.product_key), shaped.created_at, token);
+        await cacheZAddPublicReview(String(shaped.product_key), shaped.created_at, String(shaped.token));
       }
     }
 
@@ -8329,6 +8362,7 @@ app.get('/public/reviews/:token', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 
 /* ===== PUBLIC REVIEWS: LIST (CATEGORY) ===== */
 app.get('/public/reviews/categories/:productKey', async (req, res) => {
