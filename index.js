@@ -5344,51 +5344,6 @@ app.post('/orders-meta/archive', forward('/proxy/orders-meta/archive'));
 app.post('/apps/orders-meta/archive', forward('/proxy/orders-meta/archive'));
 
 
-app.get('/apps/orders-meta/public/reviews/:token', async (req, res) => {
-  try {
-    const token = req.params.token;
-    
-    // PostgreSQL query to fetch review
-    const query = `
-      SELECT * FROM ${PUBLIC_REVIEWS_TABLE} 
-      WHERE token = $1
-    `;
-    
-    const result = await pgQuery(query, [token]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ 
-        ok: false, 
-        error: 'not_found' 
-      });
-    }
-    
-    const review = result.rows[0];
-    
-    res.json({ 
-      review: {
-        token: review.token,
-        display_name: review.display_name,
-        product_key: review.product_key,
-        product_id: review.product_id,
-        rating: review.rating,
-        title: review.title,
-        body: review.body,
-        would_order_again: review.would_order_again,
-        preview_img: review.preview_img,
-        profile_img: review.profile_img,
-        created_at: review.created_at
-      }
-    });
-  } catch (error) {
-    console.error('Review lookup error:', error);
-    res.status(500).json({ 
-      ok: false, 
-      error: 'server_error' 
-    });
-  }
-});
-
 // 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil
 app.post('/proxy/orders-meta/rename', async (req, res) => {
   try {
