@@ -5311,18 +5311,27 @@ app.get('/proxy/link', async (req, res) => {
 // Ex: Shopify proxar /apps/orders-meta/link → din server /link
 // Vi skickar internt vidare till den säkrade /proxy/link (utan redirect).
 // ============================================================
-<!-- AFTER -->
+
 function forward(toPath) {
   return (req, res, next) => {
     const origUrl = req.url;
     const qs = origUrl.includes('?') ? origUrl.slice(origUrl.indexOf('?')) : '';
-    req.url = `${toPath}${qs}`;
+
+    // Ersätt Express-parametrar i toPath (ex: /public/reviews/:token) med req.params (ex: { token: "116" })
+    const resolvedPath = String(toPath).replace(/:([A-Za-z0-9_]+)/g, (m, key) => {
+      const v = req && req.params ? req.params[key] : undefined;
+      return v == null ? m : encodeURIComponent(String(v));
+    });
+
+    req.url = `${resolvedPath}${qs}`;
+
     return app._router.handle(req, res, (err) => {
       req.url = origUrl;
       if (err) return next(err);
     });
   };
 }
+
 
 // ===== PUBLIC REVIEWS VIA APP PROXY (READ) =====
 
