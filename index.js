@@ -2555,6 +2555,8 @@ app.post('/apps/pressify/buy-button/artwork-token', forward('/public/buy-button/
 // Add these lines near your other alias routes
 app.post('/apps/cart-share/create', forward('/public/cart-share/create'));
 app.get('/apps/cart-share/resolve', forward('/public/cart-share/resolve'));
+app.get('/apps/public/reviews/:token', forward('/public/reviews/:token'));
+app.get('/apps/public/reviews/categories/:productKey', forward('/public/reviews/categories/:productKey'));
 
 
 
