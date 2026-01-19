@@ -1801,13 +1801,21 @@ async function getProductHandleCached(productId) {
     return null;
   }
 }
-
 function reviewTokenCacheKey(token) {
   return `review:token:${token}`;
 }
 function reviewProductZKey(productKey) {
   return `z:reviews:product:${productKey}`;
 }
+
+/** NEW: stats-cache per product */
+function reviewProductStatsKey(productKey) {
+  return `reviews:stats:product:${productKey}:v1`;
+}
+
+// TTL för stats (kortare än “handle-cache”, men fortfarande aggressivt för fart)
+// 5–15 min är rimligt. Jag sätter 10 min här.
+const REVIEW_STATS_TTL_SECONDS = 10 * 60;
 
 async function cacheSetPublicReview(token, obj) {
   if (!token) return;
@@ -1852,6 +1860,38 @@ async function cacheGetPublicReviewTokensForProduct(productKey, start, stop) {
     return null;
   }
 }
+
+/** NEW: get/set stats */
+async function cacheGetPublicReviewStatsForProduct(productKey) {
+  if (!productKey) return null;
+  try {
+    const res = await redisCmd(['GET', reviewProductStatsKey(productKey)]);
+    const raw = res && (res.result ?? res);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSetPublicReviewStatsForProduct(productKey, statsObj) {
+  if (!productKey) return;
+  try {
+    const payload = JSON.stringify(statsObj || null);
+    await redisCmd(['SET', reviewProductStatsKey(productKey), payload, 'EX', String(REVIEW_STATS_TTL_SECONDS)]);
+  } catch (e) {
+    console.warn('[cacheSetPublicReviewStatsForProduct] err:', e?.response?.data || e.message);
+  }
+}
+
+/** NEW: invalidate stats on writes */
+async function cacheInvalidatePublicReviewStatsForProduct(productKey) {
+  if (!productKey) return;
+  try {
+    await redisCmd(['DEL', reviewProductStatsKey(productKey)]);
+  } catch {}
+}
+
 async function dbInsertPublicReviewDraft(row) {
   const r = row || {};
   const q = `
@@ -1919,7 +1959,6 @@ async function dbGetPublicReviewById(id) {
   const out = await pgQuery(q, [Number(id)]);
   return out?.rows?.[0] || null;
 }
-
 async function dbListPublicReviewsByProductKey(productKey, limit, offset) {
   const lim = Math.max(1, Math.min(200, Number(limit) || 24));
   const off = Math.max(0, Number(offset) || 0);
@@ -1938,6 +1977,33 @@ async function dbListPublicReviewsByProductKey(productKey, limit, offset) {
   const out = await pgQuery(q, [String(productKey), lim, off]);
   return Array.isArray(out?.rows) ? out.rows : [];
 }
+
+/** NEW: aggregate stats for the whole scope */
+async function dbGetPublicReviewStatsByProductKey(productKey) {
+  const q = `
+    SELECT
+      COUNT(*)::int AS total_reviews,
+      COALESCE(AVG(rating), 0)::float AS avg_rating,
+      COALESCE(AVG(CASE WHEN would_order_again IS TRUE THEN 1 ELSE 0 END), 0)::float AS would_order_again_rate
+    FROM ${PUBLIC_REVIEWS_TABLE}
+    WHERE product_key = $1
+      AND status = 'published'
+      AND token IS NOT NULL
+  `;
+  const out = await pgQuery(q, [String(productKey)]);
+  const r = out?.rows?.[0] || null;
+
+  const total = r?.total_reviews != null ? Number(r.total_reviews) : 0;
+  const avg = r?.avg_rating != null ? Number(r.avg_rating) : 0;
+  const rate = r?.would_order_again_rate != null ? Number(r.would_order_again_rate) : 0;
+
+  return {
+    total_reviews: Number.isFinite(total) ? total : 0,
+    avg_rating: Number.isFinite(avg) ? avg : 0,
+    would_order_again_pct: Number.isFinite(rate) ? Math.round(rate * 100) : 0
+  };
+}
+
 
 function shapePublicReviewRow(row) {
   if (!row) return null;
@@ -5332,16 +5398,25 @@ function forward(toPath) {
   };
 }
 
-
-// ===== PUBLIC REVIEWS VIA APP PROXY (READ) =====
-
-// Shopify App Proxy -> server path /proxy/orders-meta/...
 app.get('/proxy/orders-meta/public/reviews/:token', forward('/public/reviews/:token'));
 app.get('/proxy/orders-meta/public/reviews/categories/:productKey', forward('/public/reviews/categories/:productKey'));
+
+// NEW: summary forward
+app.get(
+  '/proxy/orders-meta/public/reviews/categories/:productKey/summary',
+  forward('/public/reviews/categories/:productKey/summary')
+);
 
 // Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy
 app.get('/apps/orders-meta/public/reviews/:token', forward('/proxy/orders-meta/public/reviews/:token'));
 app.get('/apps/orders-meta/public/reviews/categories/:productKey', forward('/proxy/orders-meta/public/reviews/categories/:productKey'));
+
+// NEW: summary alias forward
+app.get(
+  '/apps/orders-meta/public/reviews/categories/:productKey/summary',
+  forward('/proxy/orders-meta/public/reviews/categories/:productKey/summary')
+);
+
 
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
@@ -8459,6 +8534,58 @@ app.post('/admin/reviews/bulk-reserve', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+/* ===== PUBLIC REVIEWS: SUMMARY (LATEST + STATS) ===== */
+app.get('/public/reviews/categories/:productKey/summary', async (req, res) => {
+  try {
+    const productKey = String(req.params.productKey || '').trim();
+    if (!productKey) return res.status(400).json({ ok: false, error: 'missing_product_key' });
+
+    // Default: senaste 5
+    const limit = Math.max(1, Math.min(50, parseInt(req.query.limit || '5', 10)));
+
+    // --------- 1) REVIEWS (Redis-first, reuse din befintliga modell) ----------
+    let tokens = await cacheGetPublicReviewTokensForProduct(productKey, 0, limit - 1);
+    let items = [];
+
+    if (Array.isArray(tokens) && tokens.length > 0) {
+      for (const t of tokens) {
+        const obj = await cacheGetPublicReview(t);
+        if (obj && obj.token) items.push(obj);
+      }
+    }
+
+    if (items.length === 0) {
+      const rows = await dbListPublicReviewsByProductKey(productKey, limit, 0);
+      items = rows.map(shapePublicReviewRow).filter(Boolean);
+
+      for (const it of items) {
+        await cacheSetPublicReview(it.token, it);
+        await cacheZAddPublicReview(productKey, it.created_at, it.token);
+      }
+    }
+
+    // --------- 2) STATS (Redis-first, DB fallback) ----------
+    let stats = await cacheGetPublicReviewStatsForProduct(productKey);
+
+    if (!stats || typeof stats.total_reviews !== 'number') {
+      stats = await dbGetPublicReviewStatsByProductKey(productKey);
+      await cacheSetPublicReviewStatsForProduct(productKey, stats);
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+    return res.json({
+      ok: true,
+      product_key: productKey,
+      limit,
+      stats,
+      reviews: items
+    });
+  } catch (e) {
+    console.error('GET /public/reviews/categories/:productKey/summary:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
 
 /* ===== ADMIN: CREATE REVIEW (FRONTEND TOOL) =====
    POST /admin/reviews/create
@@ -8534,10 +8661,14 @@ app.post('/admin/reviews/create', async (req, res) => {
       created_at: ins.created_at
     });
 
-    if (shaped) {
-      await cacheSetPublicReview(token, shaped);
-      await cacheZAddPublicReview(String(productKey), shaped.created_at, token);
-    }
+if (shaped) {
+  await cacheSetPublicReview(token, shaped);
+  await cacheZAddPublicReview(String(productKey), shaped.created_at, token);
+
+  // NEW: invalidate stats so next read recomputes
+  await cacheInvalidatePublicReviewStatsForProduct(String(productKey));
+}
+
 
     res.setHeader('Cache-Control', 'no-store');
     return res.json({ ok: true, token, review: shaped });
