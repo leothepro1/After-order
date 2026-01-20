@@ -5581,6 +5581,11 @@ function forward(toPath) {
 app.get('/proxy/orders-meta/public/reviews/:token', forward('/public/reviews/:token'));
 app.get('/proxy/orders-meta/public/reviews/categories/:productKey', forward('/public/reviews/categories/:productKey'));
 
+app.get(
+  '/proxy/orders-meta/public/reviews/summary',
+  forward('/public/reviews/summary')
+);
+
 // NEW: summary forward
 app.get(
   '/proxy/orders-meta/public/reviews/categories/:productKey/summary',
@@ -5620,7 +5625,11 @@ app.get(
   '/apps/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
   forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary')
 );
-
+// ✅ NEW: GLOBAL summary alias
+app.get(
+  '/apps/orders-meta/public/reviews/summary',
+  forward('/proxy/orders-meta/public/reviews/summary')
+);
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
@@ -8645,6 +8654,33 @@ app.get('/public/reviews/:token', async (req, res) => {
   }
 });
 
+app.get('/public/reviews/summary', async (req, res) => {
+  try {
+    // Anpassa till din db-klient: pool.query / prisma / osv.
+    // Viktigt: matcha exakt samma public-kriterier som era andra public-endpoints:
+    // status='published' AND token IS NOT NULL
+    const q = `
+      SELECT
+        COUNT(*)::int AS total_reviews,
+        COALESCE(ROUND(AVG(rating)::numeric, 2), 0)::float AS avg_rating
+      FROM public_reviews
+      WHERE status = 'published'
+        AND token IS NOT NULL
+    `;
+    const r = await pool.query(q);
+    const row = r.rows && r.rows[0] ? r.rows[0] : { total_reviews: 0, avg_rating: 0 };
+
+    return res.json({
+      ok: true,
+      stats: {
+        total_reviews: Number(row.total_reviews || 0),
+        avg_rating: Number(row.avg_rating || 0)
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
 
 
 /* ===== PUBLIC REVIEWS: LIST (CATEGORY) ===== */
