@@ -1761,6 +1761,7 @@ async function writeProductReviews(productId, metafieldId, reviewsArray) {
 /* ===== END REVIEWS helpers ===== */
 
 /* ===== PUBLIC REVIEWS (PERMALINKS + CATEGORY LIST) ===== */
+/* ===== PUBLIC REVIEWS (PERMALINKS + CATEGORY LIST) ===== */
 const REVIEW_TOKEN_START_AT = parseInt(process.env.REVIEW_TOKEN_START_AT || '100', 10);
 const REVIEWS_ADMIN_SECRET = String(process.env.REVIEWS_ADMIN_SECRET || '');
 
@@ -1892,6 +1893,126 @@ async function cacheInvalidatePublicReviewStatsForProduct(productKey) {
   } catch {}
 }
 
+/* ===== CATEGORY SCOPE (Shopify collection handle -> product handles[]) ===== */
+function reviewCategoryHandlesKey(categoryKey) {
+  return `reviews:category:handles:${categoryKey}:v1`;
+}
+function reviewCategoryStatsKey(categoryKey) {
+  return `reviews:stats:category:${categoryKey}:v1`;
+}
+
+// cache 30 min för handle-listan (collection membership ändras inte superofta)
+const REVIEW_CATEGORY_HANDLES_TTL_SECONDS = 30 * 60;
+
+async function cacheGetProductHandlesForCategory(categoryKey) {
+  if (!categoryKey) return null;
+  try {
+    const res = await redisCmd(['GET', reviewCategoryHandlesKey(categoryKey)]);
+    const raw = res && (res.result ?? res);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.map(String).filter(Boolean) : null;
+  } catch {
+    return null;
+  }
+}
+async function cacheSetProductHandlesForCategory(categoryKey, handles) {
+  if (!categoryKey) return;
+  try {
+    const payload = JSON.stringify(Array.isArray(handles) ? handles : []);
+    await redisCmd([
+      'SET',
+      reviewCategoryHandlesKey(categoryKey),
+      payload,
+      'EX',
+      String(REVIEW_CATEGORY_HANDLES_TTL_SECONDS)
+    ]);
+  } catch (e) {
+    console.warn('[cacheSetProductHandlesForCategory] err:', e?.response?.data || e.message);
+  }
+}
+
+async function cacheGetPublicReviewStatsForCategory(categoryKey) {
+  if (!categoryKey) return null;
+  try {
+    const res = await redisCmd(['GET', reviewCategoryStatsKey(categoryKey)]);
+    const raw = res && (res.result ?? res);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+async function cacheSetPublicReviewStatsForCategory(categoryKey, statsObj) {
+  if (!categoryKey) return;
+  try {
+    const payload = JSON.stringify(statsObj || null);
+    await redisCmd(['SET', reviewCategoryStatsKey(categoryKey), payload, 'EX', String(REVIEW_STATS_TTL_SECONDS)]);
+  } catch (e) {
+    console.warn('[cacheSetPublicReviewStatsForCategory] err:', e?.response?.data || e.message);
+  }
+}
+
+async function shopifyGetProductHandlesForCollectionHandle(collectionHandle) {
+  const handle = String(collectionHandle || '').trim();
+  if (!handle) return [];
+
+  const handles = [];
+  let after = null;
+  let guard = 0;
+
+  while (guard++ < 50) {
+    const query = `
+      query ReviewsCollectionHandles($handle: String!, $first: Int!, $after: String) {
+        collectionByHandle(handle: $handle) {
+          id
+          handle
+          products(first: $first, after: $after) {
+            edges { cursor node { handle } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    `;
+
+    const data = await shopifyGraphQL(query, {
+      handle,
+      first: 250,
+      after
+    });
+
+    const col = data?.data?.collectionByHandle;
+    if (!col) return [];
+
+    const edges = col?.products?.edges || [];
+    for (const e of edges) {
+      const h = e?.node?.handle ? String(e.node.handle) : '';
+      if (h) handles.push(h);
+    }
+
+    const pi = col?.products?.pageInfo;
+    if (!pi?.hasNextPage) break;
+    after = pi?.endCursor || null;
+    if (!after) break;
+  }
+
+  // uniq + stable order
+  return Array.from(new Set(handles));
+}
+
+async function resolveProductHandlesForCategory(categoryKey) {
+  const key = String(categoryKey || '').trim();
+  if (!key) return [];
+
+  const cached = await cacheGetProductHandlesForCategory(key);
+  if (Array.isArray(cached) && cached.length) return cached;
+
+  const handles = await shopifyGetProductHandlesForCollectionHandle(key);
+  await cacheSetProductHandlesForCategory(key, handles);
+
+  return handles;
+}
+
 async function dbInsertPublicReviewDraft(row) {
   const r = row || {};
   const q = `
@@ -1978,6 +2099,31 @@ async function dbListPublicReviewsByProductKey(productKey, limit, offset) {
   return Array.isArray(out?.rows) ? out.rows : [];
 }
 
+async function dbListPublicReviewsByProductKeys(productKeys, limit, offset) {
+  const keys = Array.isArray(productKeys)
+    ? Array.from(new Set(productKeys.map(v => String(v || '').trim()).filter(Boolean)))
+    : [];
+
+  if (keys.length === 0) return [];
+
+  const lim = Math.max(1, Math.min(200, Number(limit) || 24));
+  const off = Math.max(0, Number(offset) || 0);
+
+  const q = `
+    SELECT
+      id, token, status, product_key, product_id, order_id, line_item_id, customer_id,
+      preview_img, profile_img, rating, title, body, would_order_again, display_name, created_at
+    FROM ${PUBLIC_REVIEWS_TABLE}
+    WHERE product_key = ANY($1::text[])
+      AND status = 'published'
+      AND token IS NOT NULL
+    ORDER BY created_at DESC, id DESC
+    LIMIT $2 OFFSET $3
+  `;
+  const out = await pgQuery(q, [keys, lim, off]);
+  return Array.isArray(out?.rows) ? out.rows : [];
+}
+
 /** NEW: aggregate stats for the whole scope */
 async function dbGetPublicReviewStatsByProductKey(productKey) {
   const q = `
@@ -1991,6 +2137,40 @@ async function dbGetPublicReviewStatsByProductKey(productKey) {
       AND token IS NOT NULL
   `;
   const out = await pgQuery(q, [String(productKey)]);
+  const r = out?.rows?.[0] || null;
+
+  const total = r?.total_reviews != null ? Number(r.total_reviews) : 0;
+  const avg = r?.avg_rating != null ? Number(r.avg_rating) : 0;
+  const rate = r?.would_order_again_rate != null ? Number(r.would_order_again_rate) : 0;
+
+  return {
+    total_reviews: Number.isFinite(total) ? total : 0,
+    avg_rating: Number.isFinite(avg) ? avg : 0,
+    would_order_again_pct: Number.isFinite(rate) ? Math.round(rate * 100) : 0
+  };
+}
+
+async function dbGetPublicReviewStatsByProductKeys(productKeys) {
+  const keys = Array.isArray(productKeys)
+    ? Array.from(new Set(productKeys.map(v => String(v || '').trim()).filter(Boolean)))
+    : [];
+
+  if (keys.length === 0) {
+    return { total_reviews: 0, avg_rating: 0, would_order_again_pct: 0 };
+  }
+
+  const q = `
+    SELECT
+      COUNT(*)::int AS total_reviews,
+      COALESCE(AVG(rating), 0)::float AS avg_rating,
+      COALESCE(AVG(CASE WHEN would_order_again IS TRUE THEN 1 ELSE 0 END), 0)::float AS would_order_again_rate
+    FROM ${PUBLIC_REVIEWS_TABLE}
+    WHERE product_key = ANY($1::text[])
+      AND status = 'published'
+      AND token IS NOT NULL
+  `;
+
+  const out = await pgQuery(q, [keys]);
   const r = out?.rows?.[0] || null;
 
   const total = r?.total_reviews != null ? Number(r.total_reviews) : 0;
@@ -2025,6 +2205,7 @@ function shapePublicReviewRow(row) {
   };
 }
 /* ===== END PUBLIC REVIEWS ===== */
+
 
 // Snapshot helpers
 function safeProjectFields(p){
@@ -8444,7 +8625,6 @@ app.get('/public/reviews/:token', async (req, res) => {
 
 
 
-
 /* ===== PUBLIC REVIEWS: LIST (CATEGORY) ===== */
 app.get('/public/reviews/categories/:productKey', async (req, res) => {
   try {
@@ -8487,6 +8667,111 @@ app.get('/public/reviews/categories/:productKey', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
+/* ===== PUBLIC REVIEWS: LIST (CATEGORY-SCOPE via Shopify collection handle) ===== */
+app.get('/public/reviews/scopes/category/:categoryKey', async (req, res) => {
+  try {
+    const categoryKey = String(req.params.categoryKey || '').trim();
+    if (!categoryKey) return res.status(400).json({ ok: false, error: 'missing_category_key' });
+
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '24', 10)));
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10));
+
+    const productKeys = await resolveProductHandlesForCategory(categoryKey);
+
+    if (!Array.isArray(productKeys) || productKeys.length === 0) {
+      res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+      return res.json({
+        ok: true,
+        category_key: categoryKey,
+        product_keys: [],
+        limit,
+        offset,
+        reviews: []
+      });
+    }
+
+    const rows = await dbListPublicReviewsByProductKeys(productKeys, limit, offset);
+    const items = rows.map(shapePublicReviewRow).filter(Boolean);
+
+    // skriv tillbaka cache (token + per-product ZSET)
+    for (const it of items) {
+      await cacheSetPublicReview(it.token, it);
+      if (it.product_key) {
+        await cacheZAddPublicReview(String(it.product_key), it.created_at, it.token);
+      }
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+    return res.json({
+      ok: true,
+      category_key: categoryKey,
+      product_keys: productKeys,
+      limit,
+      offset,
+      reviews: items
+    });
+  } catch (e) {
+    console.error('GET /public/reviews/scopes/category/:categoryKey:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+/* ===== PUBLIC REVIEWS: SUMMARY (CATEGORY-SCOPE latest + stats) ===== */
+app.get('/public/reviews/scopes/category/:categoryKey/summary', async (req, res) => {
+  try {
+    const categoryKey = String(req.params.categoryKey || '').trim();
+    if (!categoryKey) return res.status(400).json({ ok: false, error: 'missing_category_key' });
+
+    const limit = Math.max(1, Math.min(50, parseInt(req.query.limit || '5', 10)));
+
+    const productKeys = await resolveProductHandlesForCategory(categoryKey);
+
+    if (!Array.isArray(productKeys) || productKeys.length === 0) {
+      res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+      return res.json({
+        ok: true,
+        category_key: categoryKey,
+        product_keys: [],
+        limit,
+        stats: { total_reviews: 0, avg_rating: 0, would_order_again_pct: 0 },
+        reviews: []
+      });
+    }
+
+    const rows = await dbListPublicReviewsByProductKeys(productKeys, limit, 0);
+    const items = rows.map(shapePublicReviewRow).filter(Boolean);
+
+    for (const it of items) {
+      await cacheSetPublicReview(it.token, it);
+      if (it.product_key) {
+        await cacheZAddPublicReview(String(it.product_key), it.created_at, it.token);
+      }
+    }
+
+    let stats = await cacheGetPublicReviewStatsForCategory(categoryKey);
+    if (!stats || typeof stats.total_reviews !== 'number') {
+      stats = await dbGetPublicReviewStatsByProductKeys(productKeys);
+      await cacheSetPublicReviewStatsForCategory(categoryKey, stats);
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+    return res.json({
+      ok: true,
+      category_key: categoryKey,
+      product_keys: productKeys,
+      limit,
+      stats,
+      reviews: items
+    });
+  } catch (e) {
+    console.error('GET /public/reviews/scopes/category/:categoryKey/summary:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
 app.post('/admin/reviews/bulk-reserve', async (req, res) => {
   try {
     const secret = String(req.get('x-admin-secret') || req.query.secret || '').trim();
@@ -8534,6 +8819,7 @@ app.post('/admin/reviews/bulk-reserve', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 /* ===== PUBLIC REVIEWS: SUMMARY (LATEST + STATS) ===== */
 app.get('/public/reviews/categories/:productKey/summary', async (req, res) => {
   try {
