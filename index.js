@@ -5578,7 +5578,6 @@ function forward(toPath) {
     });
   };
 }
-
 app.get('/proxy/orders-meta/public/reviews/:token', forward('/public/reviews/:token'));
 app.get('/proxy/orders-meta/public/reviews/categories/:productKey', forward('/public/reviews/categories/:productKey'));
 
@@ -5586,6 +5585,18 @@ app.get('/proxy/orders-meta/public/reviews/categories/:productKey', forward('/pu
 app.get(
   '/proxy/orders-meta/public/reviews/categories/:productKey/summary',
   forward('/public/reviews/categories/:productKey/summary')
+);
+
+/* ============================
+   NEW: CATEGORY-SCOPE forward
+   ============================ */
+app.get(
+  '/proxy/orders-meta/public/reviews/scopes/category/:categoryKey',
+  forward('/public/reviews/scopes/category/:categoryKey')
+);
+app.get(
+  '/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
+  forward('/public/reviews/scopes/category/:categoryKey/summary')
 );
 
 // Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy
@@ -5597,6 +5608,7 @@ app.get(
   '/apps/orders-meta/public/reviews/categories/:productKey/summary',
   forward('/proxy/orders-meta/public/reviews/categories/:productKey/summary')
 );
+
 /* ============================
    NEW: CATEGORY-SCOPE alias
    ============================ */
