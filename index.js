@@ -2124,6 +2124,8 @@ async function dbListPublicReviewsByProductKeys(productKeys, limit, offset) {
   return Array.isArray(out?.rows) ? out.rows : [];
 }
 
+
+
 /** NEW: aggregate stats for the whole scope */
 async function dbGetPublicReviewStatsByProductKey(productKey) {
   const q = `
