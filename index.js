@@ -5586,7 +5586,6 @@ function forward(toPath) {
 // PUBLIC REVIEWS (App Proxy) → /proxy/orders-meta/...
 // Viktigt: statiska routes FÖRST, parametriska SISTA
 // ============================
-
 // ✅ GLOBAL summary forward (MÅSTE ligga före :token)
 app.get(
   '/proxy/orders-meta/public/reviews/summary',
@@ -5618,9 +5617,16 @@ app.get(
 );
 
 // Existing: single review (MÅSTE ligga sist i denna grupp)
+// ⬇️ Guard: om token råkar bli "summary" så ska vi INTE behandla det som review-token.
 app.get(
   '/proxy/orders-meta/public/reviews/:token',
-  forward('/public/reviews/:token')
+  (req, res, next) => {
+    const tok = String(req.params.token || '');
+    if (tok === 'summary') {
+      return forward('/public/reviews/summary')(req, res, next);
+    }
+    return forward('/public/reviews/:token')(req, res, next);
+  }
 );
 
 
@@ -5660,9 +5666,16 @@ app.get(
 );
 
 // Existing: single review alias (MÅSTE ligga sist)
+// ⬇️ Guard: om token råkar bli "summary" så ska vi INTE forwarda till :token.
 app.get(
   '/apps/orders-meta/public/reviews/:token',
-  forward('/proxy/orders-meta/public/reviews/:token')
+  (req, res, next) => {
+    const tok = String(req.params.token || '');
+    if (tok === 'summary') {
+      return forward('/proxy/orders-meta/public/reviews/summary')(req, res, next);
+    }
+    return forward('/proxy/orders-meta/public/reviews/:token')(req, res, next);
+  }
 );
 
 
