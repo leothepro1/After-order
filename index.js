@@ -5582,59 +5582,90 @@ function forward(toPath) {
       if (err) return next(err);
     });
   };
-}
-app.get('/proxy/orders-meta/public/reviews/:token', forward('/public/reviews/:token'));
-app.get('/proxy/orders-meta/public/reviews/categories/:productKey', forward('/public/reviews/categories/:productKey'));
+}// ============================
+// PUBLIC REVIEWS (App Proxy) → /proxy/orders-meta/...
+// Viktigt: statiska routes FÖRST, parametriska SISTA
+// ============================
 
+// ✅ GLOBAL summary forward (MÅSTE ligga före :token)
 app.get(
   '/proxy/orders-meta/public/reviews/summary',
   forward('/public/reviews/summary')
 );
 
-// NEW: summary forward
+/* ============================
+   CATEGORY-SCOPE forward
+   ============================ */
+app.get(
+  '/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
+  forward('/public/reviews/scopes/category/:categoryKey/summary')
+);
+app.get(
+  '/proxy/orders-meta/public/reviews/scopes/category/:categoryKey',
+  forward('/public/reviews/scopes/category/:categoryKey')
+);
+
+// ✅ Product summary forward (lägg före categories/:productKey om du vill vara helt safe)
 app.get(
   '/proxy/orders-meta/public/reviews/categories/:productKey/summary',
   forward('/public/reviews/categories/:productKey/summary')
 );
 
+// Existing: product list forward
+app.get(
+  '/proxy/orders-meta/public/reviews/categories/:productKey',
+  forward('/public/reviews/categories/:productKey')
+);
+
+// Existing: single review (MÅSTE ligga sist i denna grupp)
+app.get(
+  '/proxy/orders-meta/public/reviews/:token',
+  forward('/public/reviews/:token')
+);
+
+
+// ============================
+// Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy
+// Samma ordningsregel här
+// ============================
+
+// ✅ GLOBAL summary alias (MÅSTE ligga före :token)
+app.get(
+  '/apps/orders-meta/public/reviews/summary',
+  forward('/proxy/orders-meta/public/reviews/summary')
+);
+
 /* ============================
-   NEW: CATEGORY-SCOPE forward
+   CATEGORY-SCOPE alias
    ============================ */
 app.get(
-  '/proxy/orders-meta/public/reviews/scopes/category/:categoryKey',
-  forward('/public/reviews/scopes/category/:categoryKey')
+  '/apps/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
+  forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary')
 );
 app.get(
-  '/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
-  forward('/public/reviews/scopes/category/:categoryKey/summary')
+  '/apps/orders-meta/public/reviews/scopes/category/:categoryKey',
+  forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey')
 );
 
-// Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy
-app.get('/apps/orders-meta/public/reviews/:token', forward('/proxy/orders-meta/public/reviews/:token'));
-app.get('/apps/orders-meta/public/reviews/categories/:productKey', forward('/proxy/orders-meta/public/reviews/categories/:productKey'));
-
-// NEW: summary alias forward
+// ✅ Product summary alias
 app.get(
   '/apps/orders-meta/public/reviews/categories/:productKey/summary',
   forward('/proxy/orders-meta/public/reviews/categories/:productKey/summary')
 );
 
-/* ============================
-   NEW: CATEGORY-SCOPE alias
-   ============================ */
+// Existing: product list alias
 app.get(
-  '/apps/orders-meta/public/reviews/scopes/category/:categoryKey',
-  forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey')
+  '/apps/orders-meta/public/reviews/categories/:productKey',
+  forward('/proxy/orders-meta/public/reviews/categories/:productKey')
 );
+
+// Existing: single review alias (MÅSTE ligga sist)
 app.get(
-  '/apps/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
-  forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary')
+  '/apps/orders-meta/public/reviews/:token',
+  forward('/proxy/orders-meta/public/reviews/:token')
 );
-// ✅ NEW: GLOBAL summary alias
-app.get(
-  '/apps/orders-meta/public/reviews/summary',
-  forward('/proxy/orders-meta/public/reviews/summary')
-);
+
+
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 // 5) /apps/orders-meta/rename (POST) → /proxy/orders-meta/rename
@@ -5643,6 +5674,7 @@ app.post('/apps/orders-meta/rename', forward('/proxy/orders-meta/rename'));
 app.post('/orders-meta/archive', forward('/proxy/orders-meta/archive'));
 // Y) /apps/orders-meta/archive (POST) → /proxy/orders-meta/archive
 app.post('/apps/orders-meta/archive', forward('/proxy/orders-meta/archive'));
+
 
 
 // 4b) BACKEND: /proxy/orders-meta/rename – uppdaterar tryckfil
