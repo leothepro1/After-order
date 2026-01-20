@@ -8655,34 +8655,42 @@ app.get('/public/reviews/:token', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
-
+// AFTER
 app.get('/public/reviews/summary', async (req, res) => {
   try {
-    // Anpassa till din db-klient: pool.query / prisma / osv.
-    // Viktigt: matcha exakt samma public-kriterier som era andra public-endpoints:
+    // Matchar kriterierna du använder överallt annars:
     // status='published' AND token IS NOT NULL
+    // Viktigt: använd samma Postgres-klient som resten av filen (pgQuery + PUBLIC_REVIEWS_TABLE).
     const q = `
       SELECT
         COUNT(*)::int AS total_reviews,
-        COALESCE(ROUND(AVG(rating)::numeric, 2), 0)::float AS avg_rating
-      FROM public_reviews
+        COALESCE(AVG(rating), 0)::float AS avg_rating
+      FROM ${PUBLIC_REVIEWS_TABLE}
       WHERE status = 'published'
         AND token IS NOT NULL
     `;
-    const r = await pool.query(q);
-    const row = r.rows && r.rows[0] ? r.rows[0] : { total_reviews: 0, avg_rating: 0 };
 
+    const out = await pgQuery(q, []);
+    const r = out?.rows?.[0] || { total_reviews: 0, avg_rating: 0 };
+
+    const total = r.total_reviews != null ? Number(r.total_reviews) : 0;
+    const avg = r.avg_rating != null ? Number(r.avg_rating) : 0;
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
     return res.json({
       ok: true,
       stats: {
-        total_reviews: Number(row.total_reviews || 0),
-        avg_rating: Number(row.avg_rating || 0)
+        total_reviews: Number.isFinite(total) ? total : 0,
+        avg_rating: Number.isFinite(avg) ? avg : 0
       }
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: 'server_error' });
+    console.error('GET /public/reviews/summary:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
 
 
 /* ===== PUBLIC REVIEWS: LIST (CATEGORY) ===== */
