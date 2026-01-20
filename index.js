@@ -5597,7 +5597,17 @@ app.get(
   '/apps/orders-meta/public/reviews/categories/:productKey/summary',
   forward('/proxy/orders-meta/public/reviews/categories/:productKey/summary')
 );
-
+/* ============================
+   NEW: CATEGORY-SCOPE alias
+   ============================ */
+app.get(
+  '/apps/orders-meta/public/reviews/scopes/category/:categoryKey',
+  forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey')
+);
+app.get(
+  '/apps/orders-meta/public/reviews/scopes/category/:categoryKey/summary',
+  forward('/proxy/orders-meta/public/reviews/scopes/category/:categoryKey/summary')
+);
 
 // 4) /orders-meta/rename (POST) → /proxy/orders-meta/rename
 app.post('/orders-meta/rename', forward('/proxy/orders-meta/rename'));
