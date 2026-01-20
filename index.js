@@ -8661,9 +8661,6 @@ app.get('/public/reviews/:token', async (req, res) => {
 // AFTER
 app.get('/public/reviews/summary', async (req, res) => {
   try {
-    // Viktigt: stats ska inte bero på token.
-    // Token behövs för länkning, men inte för att räkna/snitta.
-    // Vi räknar bara rows som faktiskt har rating.
     const q = `
       SELECT
         COUNT(*) FILTER (WHERE rating IS NOT NULL)::int AS total_reviews,
@@ -8692,6 +8689,15 @@ app.get('/public/reviews/summary', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
+
+/* ===== APP PROXY ALIAS: GLOBAL SUMMARY =====
+   Storefront anropar /apps/orders-meta/... → Shopify App Proxy → server: /proxy/orders-meta/...
+*/
+app.get('/proxy/orders-meta/public/reviews/summary', forward('/public/reviews/summary'));
+
+// Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy (samma mönster som du använder för public-create)
+app.get('/apps/orders-meta/public/reviews/summary', forward('/proxy/orders-meta/public/reviews/summary'));
+
 
 
 
