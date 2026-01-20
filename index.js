@@ -8651,7 +8651,42 @@ app.get('/review/share/:token', async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
-/* ===== PUBLIC REVIEWS: READ (TOKEN) ===== */
+
+app.get('/public/reviews/summary', async (req, res) => {
+  try {
+    const q = `
+      SELECT
+        COUNT(*) FILTER (WHERE rating IS NOT NULL)::int AS total_reviews,
+        COALESCE(AVG(rating) FILTER (WHERE rating IS NOT NULL), 0)::float AS avg_rating
+      FROM ${PUBLIC_REVIEWS_TABLE}
+      WHERE status = 'published'
+    `;
+
+    const out = await pgQuery(q, []);
+    const r = out?.rows?.[0] || { total_reviews: 0, avg_rating: 0 };
+
+    const total = r.total_reviews != null ? Number(r.total_reviews) : 0;
+    const avg = r.avg_rating != null ? Number(r.avg_rating) : 0;
+
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
+    return res.json({
+      ok: true,
+      stats: {
+        total_reviews: Number.isFinite(total) ? total : 0,
+        avg_rating: Number.isFinite(avg) ? avg : 0
+      }
+    });
+  } catch (e) {
+    console.error('GET /public/reviews/summary:', e?.response?.data || e.message);
+    setCorsOnError(req, res);
+    return res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+app.get('/proxy/orders-meta/public/reviews/summary', forward('/public/reviews/summary'));
+
+app.get('/apps/orders-meta/public/reviews/summary', forward('/proxy/orders-meta/public/reviews/summary'));
+
 app.get('/public/reviews/:token', async (req, res) => {
   try {
     const raw = String(req.params.token || '').trim();
@@ -8703,45 +8738,6 @@ app.get('/public/reviews/:token', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'internal' });
   }
 });
-// AFTER
-app.get('/public/reviews/summary', async (req, res) => {
-  try {
-    const q = `
-      SELECT
-        COUNT(*) FILTER (WHERE rating IS NOT NULL)::int AS total_reviews,
-        COALESCE(AVG(rating) FILTER (WHERE rating IS NOT NULL), 0)::float AS avg_rating
-      FROM ${PUBLIC_REVIEWS_TABLE}
-      WHERE status = 'published'
-    `;
-
-    const out = await pgQuery(q, []);
-    const r = out?.rows?.[0] || { total_reviews: 0, avg_rating: 0 };
-
-    const total = r.total_reviews != null ? Number(r.total_reviews) : 0;
-    const avg = r.avg_rating != null ? Number(r.avg_rating) : 0;
-
-    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=600');
-    return res.json({
-      ok: true,
-      stats: {
-        total_reviews: Number.isFinite(total) ? total : 0,
-        avg_rating: Number.isFinite(avg) ? avg : 0
-      }
-    });
-  } catch (e) {
-    console.error('GET /public/reviews/summary:', e?.response?.data || e.message);
-    setCorsOnError(req, res);
-    return res.status(500).json({ ok: false, error: 'internal' });
-  }
-});
-
-/* ===== APP PROXY ALIAS: GLOBAL SUMMARY =====
-   Storefront anropar /apps/orders-meta/... → Shopify App Proxy → server: /proxy/orders-meta/...
-*/
-app.get('/proxy/orders-meta/public/reviews/summary', forward('/public/reviews/summary'));
-
-// Alias om din App Proxy mappar /apps/orders-meta/. till /. utan /proxy (samma mönster som du använder för public-create)
-app.get('/apps/orders-meta/public/reviews/summary', forward('/proxy/orders-meta/public/reviews/summary'));
 
 
 
