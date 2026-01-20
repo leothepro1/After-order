@@ -2130,13 +2130,15 @@ async function dbListPublicReviewsByProductKeys(productKeys, limit, offset) {
 async function dbGetPublicReviewStatsByProductKey(productKey) {
   const q = `
     SELECT
-      COUNT(*)::int AS total_reviews,
-      COALESCE(AVG(rating), 0)::float AS avg_rating,
-      COALESCE(AVG(CASE WHEN would_order_again IS TRUE THEN 1 ELSE 0 END), 0)::float AS would_order_again_rate
+      COUNT(*) FILTER (WHERE rating IS NOT NULL)::int AS total_reviews,
+      COALESCE(AVG(rating) FILTER (WHERE rating IS NOT NULL), 0)::float AS avg_rating,
+      COALESCE(
+        AVG(CASE WHEN would_order_again IS TRUE THEN 1 ELSE 0 END)
+        FILTER (WHERE rating IS NOT NULL),
+      0)::float AS would_order_again_rate
     FROM ${PUBLIC_REVIEWS_TABLE}
     WHERE product_key = $1
       AND status = 'published'
-      AND token IS NOT NULL
   `;
   const out = await pgQuery(q, [String(productKey)]);
   const r = out?.rows?.[0] || null;
@@ -2151,6 +2153,7 @@ async function dbGetPublicReviewStatsByProductKey(productKey) {
     would_order_again_pct: Number.isFinite(rate) ? Math.round(rate * 100) : 0
   };
 }
+
 
 async function dbGetPublicReviewStatsByProductKeys(productKeys) {
   const keys = Array.isArray(productKeys)
@@ -8658,16 +8661,15 @@ app.get('/public/reviews/:token', async (req, res) => {
 // AFTER
 app.get('/public/reviews/summary', async (req, res) => {
   try {
-    // Matchar kriterierna du använder överallt annars:
-    // status='published' AND token IS NOT NULL
-    // Viktigt: använd samma Postgres-klient som resten av filen (pgQuery + PUBLIC_REVIEWS_TABLE).
+    // Viktigt: stats ska inte bero på token.
+    // Token behövs för länkning, men inte för att räkna/snitta.
+    // Vi räknar bara rows som faktiskt har rating.
     const q = `
       SELECT
-        COUNT(*)::int AS total_reviews,
-        COALESCE(AVG(rating), 0)::float AS avg_rating
+        COUNT(*) FILTER (WHERE rating IS NOT NULL)::int AS total_reviews,
+        COALESCE(AVG(rating) FILTER (WHERE rating IS NOT NULL), 0)::float AS avg_rating
       FROM ${PUBLIC_REVIEWS_TABLE}
       WHERE status = 'published'
-        AND token IS NOT NULL
     `;
 
     const out = await pgQuery(q, []);
