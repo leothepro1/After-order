@@ -2899,6 +2899,7 @@ function propsObjToArray(obj){
   return out;
 }
 // --- hidden property for internal linking (döljs i checkout) ---
+// --- hidden property for internal linking (döljs i checkout) ---
 const HIDDEN_PRODUCT_ID_KEY = '_product_id';
 function appendHiddenProp(props, name, value) {
   const arr = Array.isArray(props) ? props : [];
@@ -2907,6 +2908,22 @@ function appendHiddenProp(props, name, value) {
   const exists = arr.some(p => String(p?.name || '').toLowerCase() === String(name).toLowerCase());
   return exists ? arr : [...arr, { name, value: val }];
 }
+
+// ✅ LÄGG TILL DENNA (saknas i din deploy)
+function appendHiddenIds(props, pid, vid) {
+  const arr = Array.isArray(props) ? props.slice() : [];
+  const lower = new Set(arr.map(p => String(p?.name || '').toLowerCase()));
+  const add = (name, value) => {
+    const v = String(value ?? '').trim();
+    if (!v) return;
+    if (!lower.has(name.toLowerCase())) arr.push({ name, value: v });
+  };
+  // Dolda fält (Shopify visar inte properties som börjar med "_")
+  add('_product_id', pid);
+  add('_variant_id', vid);
+  return arr;
+}
+
 function appendHiddenCurrency(props, currency) {
   const arr = Array.isArray(props) ? props.slice() : [];
   const lower = new Set(arr.map(p => String(p?.name || '').toLowerCase()));
@@ -2923,6 +2940,7 @@ function appendHiddenCurrency(props, currency) {
 
   return arr;
 }
+
 
 
 // Array/Obj → sanerad array
