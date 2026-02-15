@@ -3139,153 +3139,161 @@ async function handleDraftCreate(req, res){
 
     let payloadToShopify = null;
 
-    // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
-    if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft_order.line_items)) {
-      const incoming = body.shopify.draft_order;
-// Bygg taxable-kartor en gång
-const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
-const pTaxMap = await getProductDefaultTaxableMap((incoming.line_items || []).map(li => li.product_id).filter(Boolean));
+  // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
+if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft_order.line_items)) {
+  const incoming = body.shopify.draft_order;
 
-const cleanLines = incoming.line_items.map(li => {
-  const qty = Math.max(1, parseInt(li.quantity || 1, 10));
-  let props = appendHiddenIds(sanitizeProps(li.properties || []), li.product_id, li.variant_id);
-props = appendHiddenCurrency(props, requestedCurrency);
+  // Bygg taxable-kartor en gång
+  const vTaxMap = await getVariantTaxableMap((incoming.line_items || []).map(li => li.variant_id).filter(Boolean));
+  const pTaxMap = await getProductDefaultTaxableMap((incoming.line_items || []).map(li => li.product_id).filter(Boolean));
 
-  const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
+  const cleanLines = incoming.line_items.map(li => {
+    const qty = Math.max(1, parseInt(li.quantity || 1, 10));
 
-  const vid = li.variant_id;
-  const pid = li.product_id;
-  const inferredTaxable =
-    typeof vTaxMap[vid] === 'boolean' ? vTaxMap[vid] :
-    (typeof pTaxMap[pid] === 'boolean' ? pTaxMap[pid] : true);
+    let props = appendHiddenIds(sanitizeProps(li.properties || []), li.product_id, li.variant_id);
+    props = appendHiddenCurrency(props, requestedCurrency);
 
-if (hasCustomPrice) {
-    return {
-      custom: true,
-      title: String(li.title || 'Trycksak'),
+    const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
+
+    const vid = li.variant_id;
+    const pid = li.product_id;
+    const inferredTaxable =
+      typeof vTaxMap[vid] === 'boolean' ? vTaxMap[vid] :
+      (typeof pTaxMap[pid] === 'boolean' ? pTaxMap[pid] : true);
+
+    if (hasCustomPrice) {
+      return {
+        custom: true,
+        title: String(li.title || 'Trycksak'),
+        quantity: qty,
+        price: normalizePrice(li.price),
+        taxable: inferredTaxable,
+        requires_shipping: true,
+        properties: props
+      };
+    }
+
+    const out = {
+      ...(li.variant_id ? { variant_id: li.variant_id } : {}),
       quantity: qty,
-      price: normalizePrice(li.price),
-      taxable: inferredTaxable,          // ⬅️ lägg på taxable
-      requires_shipping: true,
-      properties: props 
+      properties: props
     };
-  }
 
-  const out = {
-    ...(li.variant_id ? { variant_id: li.variant_id } : {}),
-    quantity: qty,
-    properties: props
+    if (li.applied_discount) {
+      const ad = li.applied_discount || {};
+      out.applied_discount = {
+        title: String(ad.title || 'Pressify pris'),
+        value_type: ad.value_type === 'fixed_amount' ? 'fixed_amount' : 'percentage',
+        value: Number.isFinite(Number(ad.value)) ? String(ad.value) : '0'
+      };
+    }
+
+    if (!out.variant_id) {
+      return {
+        custom: true,
+        title: String(li.title || 'Trycksak'),
+        quantity: qty,
+        price: normalizePrice(0),
+        taxable: inferredTaxable,
+        requires_shipping: true,
+        properties: props
+      };
+    }
+
+    return out;
+  });
+
+  const shopCfg = await getShopTaxConfig();
+  const baseDraft = {
+    ...incoming,
+    line_items: cleanLines,
+    ...(body.note ? { note: body.note } : {}),
+    taxes_included: shopCfg.taxes_included,
+    tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
   };
 
-  if (li.applied_discount) {
-    const ad = li.applied_discount || {};
-    out.applied_discount = {
-      title: String(ad.title || 'Pressify pris'),
-      value_type: ad.value_type === 'fixed_amount' ? 'fixed_amount' : 'percentage',
-      value: Number.isFinite(Number(ad.value)) ? String(ad.value) : '0'
-    };
+  const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
+
+  if (!note_attributes.some(a => a && a.name === '_pressify_currency')) {
+    note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
   }
 
-  if (!out.variant_id) {
-    return {
-      custom: true,
-      title: String(li.title || 'Trycksak'),
-      quantity: qty,
-      price: normalizePrice(0),
-      taxable: inferredTaxable,          // ⬅️ även här
-      requires_shipping: true,
-      properties: props 
-    };
-  }
-  return out;
-});
-
-
-
-const shopCfg = await getShopTaxConfig();
-const baseDraft = {
-  ...incoming,
-  line_items: cleanLines,
-  ...(body.note ? { note: body.note } : {}),
-  taxes_included: shopCfg.taxes_included,
-  tags: incoming.tags ? String(incoming.tags) : 'pressify,draft-checkout'
-};
-
-// Pressify: scope/team + rabattkod i note_attributes + metafields
-const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
-
-
-note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
-
-payloadToShopify = {
-  draft_order: {
-    ...baseDraft,
-    ...(note_attributes.length ? { note_attributes } : {}),
-    ...(metafields.length ? { metafields } : {})
-  }
-};
-
+  payloadToShopify = {
+    draft_order: {
+      ...baseDraft,
+      ...(note_attributes.length ? { note_attributes } : {}),
+      ...(metafields.length ? { metafields } : {})
+    }
+  };
 }
 
-   if (!payloadToShopify) {
-      const items = Array.isArray(body.lineItems) ? body.lineItems :
-                    Array.isArray(body.lines)     ? body.lines     : [];
-      if (!items.length) {
-        return res.status(400).json({ error: 'Inga rader i payload' });
-      }
+// B) Annars: bygg från generiska lineItems/lines
+if (!payloadToShopify) {
+  const items = Array.isArray(body.lineItems) ? body.lineItems :
+                Array.isArray(body.lines)     ? body.lines     : [];
+  if (!items.length) {
+    return res.status(400).json({ error: 'Inga rader i payload' });
+  }
 
-      const shopCfg = await getShopTaxConfig();
-      const line_items = await buildCustomLinesFromGeneric(items, requestedCurrency);
+  const shopCfg = await getShopTaxConfig();
+  const line_items = await buildCustomLinesFromGeneric(items, requestedCurrency);
 
-      // Basdraft utan rabatt på raderna – litar på custom-priser från cart.js
-      const baseDraft = {
-        line_items,
-        ...(body.note ? { note: body.note } : {}),
-        ...(body.customerId ? { customer: { id: body.customerId } } : {}),
-        taxes_included: shopCfg.taxes_included,
-        tags: 'pressify,draft-checkout'
-      };
+  const baseDraft = {
+    line_items,
+    ...(body.note ? { note: body.note } : {}),
+    ...(body.customerId ? { customer: { id: body.customerId } } : {}),
+    taxes_included: shopCfg.taxes_included,
+    tags: 'pressify,draft-checkout'
+  };
 
-      const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
+  const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
 
-      // ✅ valuta-stämpel på ordernivå (matchar A-pathen)
-      if (!note_attributes.some(a => a && a.name === '_pressify_currency')) {
-        note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
-      }
+  if (!note_attributes.some(a => a && a.name === '_pressify_currency')) {
+    note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
+  }
 
-      payloadToShopify = {
-        draft_order: {
-          ...baseDraft,
-          ...(note_attributes.length ? { note_attributes } : {}),
-          ...(metafields.length ? { metafields } : {})
-        }
-      };
-  } // ✅ STÄNG if (!payloadToShopify) HÄR
+  payloadToShopify = {
+    draft_order: {
+      ...baseDraft,
+      ...(note_attributes.length ? { note_attributes } : {}),
+      ...(metafields.length ? { metafields } : {})
+    }
+  };
+}
 
-  // 4) Skicka till Shopify (ska köras oavsett om payload kom från A-path eller B-path)
-  payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
+// 4) Skicka till Shopify (oavsett A eller B)
+payloadToShopify = purgeInvalidEmails(payloadToShopify);
 
-  const r = await axios.post(
+let r;
+try {
+  r = await axios.post(
     `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
     payloadToShopify,
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
   );
+} catch (err) {
+  // Gör felet synligt (så du slipper “internal”)
+  const status = err?.response?.status || 500;
+  const data = err?.response?.data || { message: err?.message || 'shopify_error' };
+  console.error('[draft create] shopify error:', status, data);
+  try { setCorsOnError(req, res); } catch {}
+  return res.status(502).json({ error: 'shopify_error', status, data });
+}
 
+const draft = r.data?.draft_order;
+if (!draft || !draft.invoice_url) {
+  return res.status(502).json({ error: 'draft_order saknar invoice_url' });
+}
 
-    const draft = r.data?.draft_order;
-    if (!draft || !draft.invoice_url) {
-      return res.status(502).json({ error: 'draft_order saknar invoice_url' });
-    }
+return res.json({
+  ok: true,
+  draft_order_id: draft.id,
+  name: draft.name,
+  invoice_url: draft.invoice_url,
+  invoiceUrl: draft.invoice_url,
+  url: draft.invoice_url
+});
 
-    // 5) Svara uniformt (frontend letar flera nycklar)
-    return res.json({
-      ok: true,
-      draft_order_id: draft.id,
-      name: draft.name,
-      invoice_url: draft.invoice_url,
-      invoiceUrl: draft.invoice_url,
-      url: draft.invoice_url
-    });
   } catch (e){
     console.error('[draft create] error:', e?.response?.data || e.message);
     try { setCorsOnError(req, res); } catch {}
