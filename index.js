@@ -3227,7 +3227,7 @@ payloadToShopify = {
 
 }
 
-  if (!payloadToShopify) {
+   if (!payloadToShopify) {
       const items = Array.isArray(body.lineItems) ? body.lineItems :
                     Array.isArray(body.lines)     ? body.lines     : [];
       if (!items.length) {
@@ -3246,28 +3246,31 @@ payloadToShopify = {
         tags: 'pressify,draft-checkout'
       };
 
-  const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
+      const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
 
-  // ✅ valuta-stämpel på ordernivå (matchar A-pathen)
-  if (!note_attributes.some(a => a && a.name === '_pressify_currency')) {
-    note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
-  }
+      // ✅ valuta-stämpel på ordernivå (matchar A-pathen)
+      if (!note_attributes.some(a => a && a.name === '_pressify_currency')) {
+        note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
+      }
 
-  payloadToShopify = {
-    draft_order: {
-      ...baseDraft,
-      ...(note_attributes.length ? { note_attributes } : {}),
-      ...(metafields.length ? { metafields } : {})
-    }
-  };
-    // 4) Skicka till Shopify
-    payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
-      
-    const r = await axios.post(
-      `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
-      payloadToShopify,
-      { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
-    );
+      payloadToShopify = {
+        draft_order: {
+          ...baseDraft,
+          ...(note_attributes.length ? { note_attributes } : {}),
+          ...(metafields.length ? { metafields } : {})
+        }
+      };
+  } // ✅ STÄNG if (!payloadToShopify) HÄR
+
+  // 4) Skicka till Shopify (ska köras oavsett om payload kom från A-path eller B-path)
+  payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
+
+  const r = await axios.post(
+    `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
+    payloadToShopify,
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
+  );
+
 
     const draft = r.data?.draft_order;
     if (!draft || !draft.invoice_url) {
