@@ -15,8 +15,12 @@ const { Pool } = require('pg'); // 🔌 Postgres-klient
 const app = express(); // ✅ Skapa app INNAN du använder den
 
 // CORS – en gång (inkl. preflight) + helper för fel
-const ALLOWED_ORIGINS = ['https://pressify.se', 'https://www.pressify.se'];
-
+const ALLOWED_ORIGINS = [
+  'https://pressify.se',
+  'https://www.pressify.se',
+  'https://stikaro.com',
+  'https://www.stikaro.com'
+];
 const CORS_OPTIONS = {
   origin: ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
