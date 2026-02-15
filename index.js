@@ -410,10 +410,22 @@ const PUBLIC_BASE_URL =
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
 
-/**
- * Normaliserar scope/team från payloadet som kommer från cart.js
- * scope: "personal" (default) eller "team"
- */
+function pfExtractCurrencyFromPayload(body = {}) {
+  const raw =
+    body.currency ??
+    body.presentmentCurrency ??
+    body.presentment_currency ??
+    body.currencyCode ??
+    body.currency_code ??
+    null;
+
+  const cur = String(raw || '').trim().toUpperCase();
+
+  if (cur === 'EUR') return 'EUR';
+  return 'SEK';
+}
+
+
 function pfExtractScopeFromPayload(body = {}) {
   const rawScope = String(body.scope || '').toLowerCase();
   const scope = rawScope === 'team' ? 'team' : 'personal';
@@ -2895,19 +2907,23 @@ function appendHiddenProp(props, name, value) {
   const exists = arr.some(p => String(p?.name || '').toLowerCase() === String(name).toLowerCase());
   return exists ? arr : [...arr, { name, value: val }];
 }
-function appendHiddenIds(props, pid, vid) {
+function appendHiddenCurrency(props, currency) {
   const arr = Array.isArray(props) ? props.slice() : [];
   const lower = new Set(arr.map(p => String(p?.name || '').toLowerCase()));
+
   const add = (name, value) => {
     const v = String(value ?? '').trim();
     if (!v) return;
     if (!lower.has(name.toLowerCase())) arr.push({ name, value: v });
   };
-  // Dolda fält (Shopify visar inte properties som börjar med "_")
-  add('_product_id', pid);
-  add('_variant_id', vid);
+
+  // 🔒 currency måste finnas för framtida EUR
+  const cur = String(currency || '').trim().toUpperCase();
+  add('_currency', cur === 'EUR' ? 'EUR' : 'SEK');
+
   return arr;
 }
+
 
 // Array/Obj → sanerad array
 function sanitizeProps(props){
@@ -2924,7 +2940,7 @@ function sanitizeProps(props){
   return out;
 }
 
-async function buildCustomLinesFromGeneric(items){
+async function buildCustomLinesFromGeneric(items, requestedCurrency = 'SEK'){
   const lines = [];
 
   // Batcha uppslag av taxable
@@ -2946,10 +2962,12 @@ async function buildCustomLinesFromGeneric(items){
         return map.get('_total_price') ?? map.get('total_price');
       } catch { return null; }
     })();
+
     const lineTotal =
       !isBlank(rawTotalProp) ? num(rawTotalProp) :
       (typeof it.custom_line_total === 'number' ? it.custom_line_total :
       (typeof it.line_price_hint === 'number' ? it.line_price_hint : 0));
+
     const unitCustom = qty > 0
       ? (typeof it.custom_price === 'number' ? it.custom_price : Number((lineTotal/qty).toFixed(2)))
       : 0;
@@ -2957,7 +2975,14 @@ async function buildCustomLinesFromGeneric(items){
     // Bestäm taxable
     const vid = it.variantId || it.variant_id;
     const pid = it.productId  || it.product_id;
-    const propsSafe = appendHiddenIds(sanitizeProps(propsArr), pid, vid);
+
+    // Sanera + append hidden ids
+    let propsSafe = appendHiddenIds(sanitizeProps(propsArr), pid, vid);
+
+    // 🔒 Sätt alltid currency som hidden prop (för framtida draft-routing)
+    // Default = requestedCurrency (SEK idag)
+    propsSafe = appendHiddenCurrency(propsSafe, requestedCurrency);
+
     let taxable = true; // default moms = på
     if (vid && typeof vTaxMap[vid] === 'boolean') {
       taxable = vTaxMap[vid];
@@ -2977,6 +3002,7 @@ async function buildCustomLinesFromGeneric(items){
   }
   return lines;
 }
+
 
 // --- helpers för pris och email ---
 
@@ -3102,11 +3128,15 @@ function purgeInvalidEmails(payload) {
 }
 
 
-// 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
-// 3) Huvud-handler: tar emot flera möjliga format och skapar draft_order
+
 async function handleDraftCreate(req, res){
   try{
     const body = req.body || {};
+
+    // 🔒 Default = SEK (påverkar inte live .se)
+    // När frontend senare skickar EUR kan vi använda detta.
+    const requestedCurrency = pfExtractCurrencyFromPayload(body);
+
     let payloadToShopify = null;
 
     // A) Om frontend skickar ett färdigt shopify.draft_order → sanera + vidarebefordra
@@ -3118,7 +3148,9 @@ const pTaxMap = await getProductDefaultTaxableMap((incoming.line_items || []).ma
 
 const cleanLines = incoming.line_items.map(li => {
   const qty = Math.max(1, parseInt(li.quantity || 1, 10));
-  const props = appendHiddenIds(sanitizeProps(li.properties || []), li.product_id, li.variant_id);
+  let props = appendHiddenIds(sanitizeProps(li.properties || []), li.product_id, li.variant_id);
+props = appendHiddenCurrency(props, requestedCurrency);
+
   const hasCustomPrice = (typeof li.price !== 'undefined') || !!li.custom;
 
   const vid = li.variant_id;
@@ -3182,6 +3214,9 @@ const baseDraft = {
 // Pressify: scope/team + rabattkod i note_attributes + metafields
 const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
 
+
+note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
+
 payloadToShopify = {
   draft_order: {
     ...baseDraft,
@@ -3189,6 +3224,7 @@ payloadToShopify = {
     ...(metafields.length ? { metafields } : {})
   }
 };
+
 }
 
   if (!payloadToShopify) {
@@ -3199,7 +3235,7 @@ payloadToShopify = {
       }
 
       const shopCfg = await getShopTaxConfig();
-      const line_items = await buildCustomLinesFromGeneric(items);
+      const line_items = await buildCustomLinesFromGeneric(items, requestedCurrency);
 
       // Basdraft utan rabatt på raderna – litar på custom-priser från cart.js
       const baseDraft = {
@@ -3210,18 +3246,20 @@ payloadToShopify = {
         tags: 'pressify,draft-checkout'
       };
 
-      // Pressify: scope/team + rabattkod i note_attributes + metafields
-      const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
+  const { note_attributes, metafields } = pfBuildDraftOrderMeta(baseDraft, body);
 
-      payloadToShopify = {
-        draft_order: {
-          ...baseDraft,
-          ...(note_attributes.length ? { note_attributes } : {}),
-          ...(metafields.length ? { metafields } : {})
-        }
-      };
+  // ✅ valuta-stämpel på ordernivå (matchar A-pathen)
+  if (!note_attributes.some(a => a && a.name === '_pressify_currency')) {
+    note_attributes.push({ name: '_pressify_currency', value: requestedCurrency });
+  }
+
+  payloadToShopify = {
+    draft_order: {
+      ...baseDraft,
+      ...(note_attributes.length ? { note_attributes } : {}),
+      ...(metafields.length ? { metafields } : {})
     }
-
+  };
     // 4) Skicka till Shopify
     payloadToShopify = purgeInvalidEmails(payloadToShopify); // ✅ ta bort ogiltiga email 
       
@@ -9993,9 +10031,13 @@ const PRESSIFY_CARRIER_ROUTE = '/carrier/pressify/rates';
 const PRESSIFY_REGISTER_ROUTE = '/carrier/pressify/register';
 
 const PRESSIFY_CARRIER_NAME   = 'Pressify Delivery Dates'; // visas i Admin
-const PRESSIFY_CURRENCY       = 'SEK';
-const PRESSIFY_EXPRESS_ORE    = 24900; // 249 kr i öre
-const PRESSIFY_STANDARD_ORE   = 0;     // 0 kr
+
+// 🔒 Default = SEK (påverkar inte .se)
+// ⚠️ Valuta ska senare styras av Shopify Markets / request-context
+const PRESSIFY_DEFAULT_CURRENCY = 'SEK';
+
+const PRESSIFY_EXPRESS_ORE    = 24900; // 249 kr i öre (SEK)
+const PRESSIFY_STANDARD_ORE   = 0;     // 0 kr (SEK)
 const PRESSIFY_DEFAULT_STD    = { minDays: 2, maxDays: 4 };
 const PRESSIFY_DEFAULT_EXP    = { minDays: 0, maxDays: 1 };
 const PRESSIFY_MS_PER_DAY     = 86_400_000;
@@ -10217,26 +10259,28 @@ const expTo   = pressifyAddBusinessDays(now, useExp.maxDays);
     const expDesc = pressifySvShortRange(expFrom, expTo);
 
     // Exakt två rater, titlar utan datum – och utan min/max_delivery_date
-    const rates = [
-      {
-        service_name: 'Standard frakt',
-        service_code: 'STANDARD',
-        total_price: String(PRESSIFY_STANDARD_ORE),
-        currency: PRESSIFY_CURRENCY,
-        description: stdDesc,
-        phone_required: false
-      },
-      {
-        service_name: 'Expressfrakt',
-        service_code: 'EXPRESS',
-        total_price: String(PRESSIFY_EXPRESS_ORE),
-        currency: PRESSIFY_CURRENCY,
-        description: expDesc,
-        phone_required: false
-      }
-    ];
+ const currency = PRESSIFY_DEFAULT_CURRENCY;
 
-    return res.json({ rates });
+const rates = [
+  {
+    service_name: 'Standard frakt',
+    service_code: 'STANDARD',
+    total_price: String(PRESSIFY_STANDARD_ORE),
+    currency,
+    description: stdDesc,
+    phone_required: false
+  },
+  {
+    service_name: 'Expressfrakt',
+    service_code: 'EXPRESS',
+    total_price: String(PRESSIFY_EXPRESS_ORE),
+    currency,
+    description: expDesc,
+    phone_required: false
+  }
+];
+
+return res.json({ rates });
   } catch (e) {
     // Failsafe: defaults i arbetsdagar
     try {
@@ -10249,12 +10293,14 @@ const expTo   = pressifyAddBusinessDays(now, useExp.maxDays);
       const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
       const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
 
-      return res.json({
-        rates: [
-          { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(PRESSIFY_STANDARD_ORE), currency: PRESSIFY_CURRENCY, description: stdDesc, phone_required: false },
-          { service_name: 'Expressfrakt',  service_code: 'EXPRESS',  total_price: String(PRESSIFY_EXPRESS_ORE), currency: PRESSIFY_CURRENCY, description: expDesc, phone_required: false }
-        ]
-      });
+    const currency = PRESSIFY_DEFAULT_CURRENCY;
+
+return res.json({
+  rates: [
+    { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(PRESSIFY_STANDARD_ORE), currency, description: stdDesc, phone_required: false },
+    { service_name: 'Expressfrakt',  service_code: 'EXPRESS',  total_price: String(PRESSIFY_EXPRESS_ORE), currency, description: expDesc, phone_required: false }
+  ]
+});
     } catch {
       return res.json({ rates: [] });
     }
