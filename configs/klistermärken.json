@@ -5,6 +5,13 @@
   "currency": "SEK",
 
   "options": [
+      {
+    "id": "currency",
+    "label": "Currency",
+    "type": "hidden",
+    "default": "SEK",
+    "export": false
+  },
     {
       "id": "size",
       "label": "Storlek (BxH)",
