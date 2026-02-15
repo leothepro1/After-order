@@ -10062,11 +10062,25 @@ const PRESSIFY_REGISTER_ROUTE = '/carrier/pressify/register';
 const PRESSIFY_CARRIER_NAME   = 'Pressify Delivery Dates'; // visas i Admin
 
 // 🔒 Default = SEK (påverkar inte .se)
-// ⚠️ Valuta ska senare styras av Shopify Markets / request-context
 const PRESSIFY_DEFAULT_CURRENCY = 'SEK';
 
-const PRESSIFY_EXPRESS_ORE    = 24900; // 249 kr i öre (SEK)
-const PRESSIFY_STANDARD_ORE   = 0;     // 0 kr (SEK)
+// Shopify CarrierService använder "minor units" i total_price (t.ex. öre/cents).
+// Vi håller SEK och lägger till fasta EUR-belopp i cents (ingen FX, bara stabilt).
+const PRESSIFY_EXPRESS_MINOR_BY_CURRENCY  = { SEK: 24900, EUR: 2490 }; // 249 kr / €24.90
+const PRESSIFY_STANDARD_MINOR_BY_CURRENCY = { SEK: 0,     EUR: 0    };
+
+// Plocka currency från Shopify rate-request först, annars fallback via locale, annars default SEK.
+function pressifyPickCarrierCurrency(rateReq) {
+  const c = String(rateReq?.currency || '').trim().toUpperCase();
+  if (c === 'SEK' || c === 'EUR') return c;
+
+  const loc = String(rateReq?.locale || '').trim().toLowerCase();
+  if (loc.startsWith('sv')) return 'SEK';
+  if (loc) return 'EUR';
+
+  return PRESSIFY_DEFAULT_CURRENCY;
+}
+
 const PRESSIFY_DEFAULT_STD    = { minDays: 2, maxDays: 4 };
 const PRESSIFY_DEFAULT_EXP    = { minDays: 0, maxDays: 1 };
 const PRESSIFY_MS_PER_DAY     = 86_400_000;
@@ -10288,13 +10302,17 @@ const expTo   = pressifyAddBusinessDays(now, useExp.maxDays);
     const expDesc = pressifySvShortRange(expFrom, expTo);
 
     // Exakt två rater, titlar utan datum – och utan min/max_delivery_date
- const currency = PRESSIFY_DEFAULT_CURRENCY;
+ // Exakt två rater, titlar utan datum – och utan min/max_delivery_date
+const currency = pressifyPickCarrierCurrency(rateReq);
+
+const standardMinor = PRESSIFY_STANDARD_MINOR_BY_CURRENCY[currency] ?? PRESSIFY_STANDARD_MINOR_BY_CURRENCY[PRESSIFY_DEFAULT_CURRENCY];
+const expressMinor  = PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[currency]  ?? PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[PRESSIFY_DEFAULT_CURRENCY];
 
 const rates = [
   {
     service_name: 'Standard frakt',
     service_code: 'STANDARD',
-    total_price: String(PRESSIFY_STANDARD_ORE),
+    total_price: String(standardMinor),
     currency,
     description: stdDesc,
     phone_required: false
@@ -10302,7 +10320,7 @@ const rates = [
   {
     service_name: 'Expressfrakt',
     service_code: 'EXPRESS',
-    total_price: String(PRESSIFY_EXPRESS_ORE),
+    total_price: String(expressMinor),
     currency,
     description: expDesc,
     phone_required: false
@@ -10310,6 +10328,7 @@ const rates = [
 ];
 
 return res.json({ rates });
+
   } catch (e) {
     // Failsafe: defaults i arbetsdagar
     try {
@@ -10319,17 +10338,21 @@ return res.json({ rates });
       const dfExpFrom = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.minDays);
       const dfExpTo   = pressifyAddBusinessDays(now, PRESSIFY_DEFAULT_EXP.maxDays);
 
-      const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
-      const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
+   const stdDesc = pressifySvShortRange(dfStdFrom, dfStdTo);
+const expDesc = pressifySvShortRange(dfExpFrom, dfExpTo);
 
-    const currency = PRESSIFY_DEFAULT_CURRENCY;
+const currency = pressifyPickCarrierCurrency(rateReq);
+
+const standardMinor = PRESSIFY_STANDARD_MINOR_BY_CURRENCY[currency] ?? PRESSIFY_STANDARD_MINOR_BY_CURRENCY[PRESSIFY_DEFAULT_CURRENCY];
+const expressMinor  = PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[currency]  ?? PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[PRESSIFY_DEFAULT_CURRENCY];
 
 return res.json({
   rates: [
-    { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(PRESSIFY_STANDARD_ORE), currency, description: stdDesc, phone_required: false },
-    { service_name: 'Expressfrakt',  service_code: 'EXPRESS',  total_price: String(PRESSIFY_EXPRESS_ORE), currency, description: expDesc, phone_required: false }
+    { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(standardMinor), currency, description: stdDesc, phone_required: false },
+    { service_name: 'Expressfrakt',  service_code: 'EXPRESS',  total_price: String(expressMinor),  currency, description: expDesc, phone_required: false }
   ]
 });
+
     } catch {
       return res.json({ rates: [] });
     }
