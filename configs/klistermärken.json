@@ -26,7 +26,12 @@
         { "value": 4, "code": "12x10", "label": "12x10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
         { "value": 5, "code": "14x12", "label": "14×12 cm", "w_cm": 12, "h_cm": 12, "area_cm2": 144 },
         { "value": 6, "code": "16x14", "label": "16×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 },
-        { "value": "custom", "code": "custom", "label": "Egen storlek (cm)" }
+{
+  "value": "custom",
+  "code": "custom",
+  "label": "Egen storlek (cm)",
+  "i18n": { "en": { "label": "Custom size (cm)" } }
+}
       ],
       "customTierRules": {
         "type": "area_cm2",
