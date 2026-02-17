@@ -3321,8 +3321,13 @@ if (!payloadToShopify) {
 
 // 4) Skicka till Shopify (oavsett A eller B)
 payloadToShopify = purgeInvalidEmails(payloadToShopify);
-
 let r;
+
+// ✅ LYFT upp så de finns när du returnerar JSON efter try/catch
+let SHOP_USED = null;
+let ACCESS_TOKEN_USED = null;
+let currency_used = null;
+
 try {
   const pick = pfPickShopByCurrency(requestedCurrency);
   if (pick && pick.error) {
@@ -3334,7 +3339,10 @@ try {
     });
   }
 
-  const { shop: SHOP_USED, token: ACCESS_TOKEN_USED, currency_used } = pick;
+  // ✅ Sätt variablerna här, men de är deklarerade utanför
+  SHOP_USED = pick.shop;
+  ACCESS_TOKEN_USED = pick.token;
+  currency_used = pick.currency_used;
 
   r = await axios.post(
     `https://${SHOP_USED}/admin/api/2025-07/draft_orders.json`,
@@ -3343,7 +3351,6 @@ try {
   );
 
 } catch (err) {
-  // Gör felet synligt (så du slipper “internal”)
   const status = err?.response?.status || 500;
   const data = err?.response?.data || { message: err?.message || 'shopify_error' };
   console.error('[draft create] shopify error:', status, data);
@@ -3356,24 +3363,25 @@ if (!draft || !draft.invoice_url) {
   return res.status(502).json({ error: 'draft_order saknar invoice_url' });
 }
 
-  const localeFromClient = body.locale || body.lang || body.language || null;
-  const localizedInvoiceUrl = pfAppendLocaleToInvoiceUrl(draft.invoice_url, localeFromClient);
+const localeFromClient = body.locale || body.lang || body.language || null;
+const localizedInvoiceUrl = pfAppendLocaleToInvoiceUrl(draft.invoice_url, localeFromClient);
 
-  return res.json({
-    ok: true,
-    draft_order_id: draft.id,
-    name: draft.name,
+return res.json({
+  ok: true,
+  draft_order_id: draft.id,
+  name: draft.name,
 
-    // ✅ alltid den URL vi vill att frontend ska redirecta till
-    invoice_url: localizedInvoiceUrl,
-    invoiceUrl: localizedInvoiceUrl,
-    url: localizedInvoiceUrl,
+  // ✅ alltid den URL vi vill att frontend ska redirecta till
+  invoice_url: localizedInvoiceUrl,
+  invoiceUrl: localizedInvoiceUrl,
+  url: localizedInvoiceUrl,
 
-    // ✅ robust sanity info för frontend (förhindrar fel redirect)
-    currency_used,
-    shop_used: SHOP_USED,
-    locale_used: (String(localeFromClient || '').toLowerCase().startsWith('sv') ? 'sv' : 'en')
-  });
+  // ✅ robust sanity info för frontend (förhindrar fel redirect)
+  currency_used,
+  shop_used: SHOP_USED,
+  locale_used: (String(localeFromClient || '').toLowerCase().startsWith('sv') ? 'sv' : 'en')
+});
+
 
 
   } catch (e){
