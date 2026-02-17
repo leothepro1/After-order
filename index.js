@@ -16,8 +16,8 @@ const app = express(); // ✅ Skapa app INNAN du använder den
 
 // CORS – en gång (inkl. preflight) + helper för fel
 const ALLOWED_ORIGINS = [
-  'https://pressify.se',
-  'https://www.pressify.se',
+  'https://stikaro.se',
+  'https://www.stikaro.se',
   'https://stikaro.com',
   'https://www.stikaro.com'
 ];
@@ -445,7 +445,7 @@ const CART_SHARE_TTL_SECONDS = parseInt(
 );
 
 const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL || 'https://pressify.se';
+  process.env.PUBLIC_BASE_URL || 'https://stikaro.com';
 
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
@@ -687,7 +687,7 @@ function pfBuildDraftOrderMeta(baseDraft = {}, body = {}) {
 }
 // överst bland konfig:
 // Publik butik (för delningslänkar till Shopify-sidan)
-const STORE_BASE = (process.env.STORE_BASE || 'https://pressify.se').replace(/\/$/, '');
+const STORE_BASE = (process.env.STORE_BASE || 'https://stikaro.com').replace(/\/$/, '');
 
 const PUBLIC_PROOF_PATH = process.env.PUBLIC_PROOF_PATH || '/pages/proof';
 function adminHeaders(extra = {}) {
