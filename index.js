@@ -3388,28 +3388,84 @@ try {
     return [];
   };
 
-  const restDraft = payloadToShopify?.draft_order || {};
-  const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
+const restDraft = payloadToShopify?.draft_order || {};
+const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
 
-  const gqlLineItems = restLineItems
-    .map(li => {
-      const variantId = toVariantGid(li.variant_id);
-      if (!variantId) return null;
+const toVariantGid = (variantId) => {
+  const n = Number(variantId);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return `gid://shopify/ProductVariant/${n}`;
+};
 
-      const qty = Number(li.quantity);
-      const price = Number(li.price);
+const propsToCustomAttributes = (props) => {
+  // Shopify REST kan skicka properties som array [{name,value}] eller object
+  if (!props) return [];
+  if (Array.isArray(props)) {
+    return props
+      .map(p => ({ key: String(p?.name ?? '').trim(), value: String(p?.value ?? '').trim() }))
+      .filter(a => a.key && a.value !== 'undefined');
+  }
+  if (typeof props === 'object') {
+    return Object.entries(props)
+      .map(([k, v]) => ({ key: String(k).trim(), value: String(v ?? '').trim() }))
+      .filter(a => a.key && a.value !== 'undefined');
+  }
+  return [];
+};
 
-      return {
-        variantId,
-        quantity: (Number.isFinite(qty) && qty > 0) ? qty : 1,
+const toMoney = (v) => {
+  const n = Number(String(v ?? '').replace(',', '.'));
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
 
-        // ✅ custom price per rad (i presentment currency)
-        originalUnitPrice: (Number.isFinite(price) && price >= 0) ? price : 0,
+const gqlLineItems = restLineItems
+  .map(li => {
+    const qty = Math.max(1, parseInt(li.quantity || 1, 10));
+    const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
 
-        customAttributes: propsToCustomAttributes(li.properties || li.custom_attributes || null)
-      };
-    })
-    .filter(Boolean);
+    // 1) Variant-rad (har variant_id)
+    const variantGid = toVariantGid(li.variant_id);
+    if (variantGid) {
+      const out = { variantId: variantGid, quantity: qty };
+      if (attrs.length) out.customAttributes = attrs;
+
+      // Om du vill tvinga pris även på variant-rader (valfritt):
+      // if (typeof li.price !== 'undefined') out.originalUnitPrice = toMoney(li.price);
+
+      return out;
+    }
+
+    // 2) Custom-rad (saknar variant_id, men har title + price)
+    // Viktigt: detta är dina rader när backend satte custom:true pga prisoverride
+    const title = String(li.title || 'Trycksak').trim();
+    const price = toMoney(li.price);
+
+    // Om title saknas helt och pris = 0, är raden i praktiken ogiltig
+    if (!title) return null;
+
+    const out = {
+      title,
+      quantity: qty,
+      originalUnitPrice: price
+    };
+    if (attrs.length) out.customAttributes = attrs;
+
+    return out;
+  })
+  .filter(Boolean);
+
+if (!gqlLineItems.length) {
+  // Gör felet självinstruerande istället för "502 bad gateway"
+  return res.status(400).json({
+    error: 'no_line_items_after_mapping',
+    message: 'Efter mappning till GraphQL blev lineItems tomt. Kontrollera att line_items innehåller variant_id eller custom title/price.',
+    debug: {
+      incoming_count: restLineItems.length,
+      incoming_sample: restLineItems.slice(0, 2)
+    }
+  });
+}
+
 
   const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
 
