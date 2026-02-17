@@ -10386,7 +10386,7 @@ const expressMinor  = PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[currency]  ?? PRESSIFY_
 
 const rates = [
   {
-    service_name: 'Standard frakt',
+    service_name: 'Standard',
     service_code: 'STANDARD',
     total_price: String(standardMinor),
     currency,
@@ -10424,8 +10424,8 @@ const expressMinor  = PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[currency]  ?? PRESSIFY_
 
 return res.json({
   rates: [
-    { service_name: 'Standard frakt', service_code: 'STANDARD', total_price: String(standardMinor), currency, description: stdDesc, phone_required: false },
-    { service_name: 'Expressfrakt',  service_code: 'EXPRESS',  total_price: String(expressMinor),  currency, description: expDesc, phone_required: false }
+    { service_name: 'Standard', service_code: 'STANDARD', total_price: String(standardMinor), currency, description: stdDesc, phone_required: false },
+    { service_name: 'Express',  service_code: 'EXPRESS',  total_price: String(expressMinor),  currency, description: expDesc, phone_required: false }
   ]
 });
 
