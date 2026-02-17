@@ -3343,14 +3343,88 @@ try {
     });
   }
 
-  // ✅ Sätt variablerna här, men de är deklarerade utanför
-  SHOP_USED = pick.shop;
+ SHOP_USED = pick.shop;
   ACCESS_TOKEN_USED = pick.token;
-  currency_used = pick.currency_used;
+  currency_used = pick.currency_used; // "SEK" eller "EUR" (din egen logik)
+
+  // ✅ GraphQL mutation (DraftOrderInput stödjer presentmentCurrencyCode)
+  const DRAFT_ORDER_CREATE_MUTATION = `
+    mutation draftOrderCreate($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder {
+          id
+          name
+          invoiceUrl
+          currencyCode
+          presentmentCurrencyCode
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  // --- helpers lokalt i blocket (ok) ---
+  const toVariantGid = (variantId) => {
+    const n = Number(variantId);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return `gid://shopify/ProductVariant/${n}`;
+  };
+
+  const propsToCustomAttributes = (props) => {
+    if (!props) return [];
+    if (Array.isArray(props)) {
+      return props
+        .map(p => ({
+          key: String(p?.name ?? '').trim(),
+          value: String(p?.value ?? '').trim()
+        }))
+        .filter(a => a.key && a.value !== 'undefined');
+    }
+    if (typeof props === 'object') {
+      return Object.entries(props)
+        .map(([k, v]) => ({ key: String(k).trim(), value: String(v ?? '').trim() }))
+        .filter(a => a.key && a.value !== 'undefined');
+    }
+    return [];
+  };
+
+  const restDraft = payloadToShopify?.draft_order || {};
+  const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
+
+  const gqlLineItems = restLineItems
+    .map(li => {
+      const variantId = toVariantGid(li.variant_id);
+      if (!variantId) return null;
+
+      const qty = Number(li.quantity);
+      const price = Number(li.price);
+
+      return {
+        variantId,
+        quantity: (Number.isFinite(qty) && qty > 0) ? qty : 1,
+
+        // ✅ custom price per rad (i presentment currency)
+        originalUnitPrice: (Number.isFinite(price) && price >= 0) ? price : 0,
+
+        customAttributes: propsToCustomAttributes(li.properties || li.custom_attributes || null)
+      };
+    })
+    .filter(Boolean);
+
+  const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
+
+  const gqlInput = {
+    note: restDraft.note || 'Pressify Draft från varukorg',
+
+    // ✅ DETTA gör att checkout kan bli EUR (istället för bara "engelsk SEK")
+    presentmentCurrencyCode: requestedPresentment,
+
+    lineItems: gqlLineItems
+  };
 
   r = await axios.post(
-    `https://${SHOP_USED}/admin/api/2025-07/draft_orders.json`,
-    payloadToShopify,
+    `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
+    { query: DRAFT_ORDER_CREATE_MUTATION, variables: { input: gqlInput } },
     { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN_USED, 'Content-Type':'application/json' } }
   );
 
@@ -3362,30 +3436,41 @@ try {
   return res.status(502).json({ error: 'shopify_error', status, data });
 }
 
-const draft = r.data?.draft_order;
-if (!draft || !draft.invoice_url) {
-  return res.status(502).json({ error: 'draft_order saknar invoice_url' });
+// ✅ GraphQL-parsning (inte REST)
+const userErrors = r?.data?.data?.draftOrderCreate?.userErrors || [];
+if (userErrors.length) {
+  return res.status(502).json({
+    error: 'shopify_user_errors',
+    userErrors
+  });
+}
+
+const draft = r?.data?.data?.draftOrderCreate?.draftOrder;
+if (!draft || !draft.invoiceUrl) {
+  return res.status(502).json({ error: 'draft_order saknar invoiceUrl' });
 }
 
 const localeFromClient = body.locale || body.lang || body.language || null;
-const localizedInvoiceUrl = pfAppendLocaleToInvoiceUrl(draft.invoice_url, localeFromClient);
+const localizedInvoiceUrl = pfAppendLocaleToInvoiceUrl(draft.invoiceUrl, localeFromClient);
 
 return res.json({
   ok: true,
   draft_order_id: draft.id,
   name: draft.name,
 
-  // ✅ alltid den URL vi vill att frontend ska redirecta till
   invoice_url: localizedInvoiceUrl,
   invoiceUrl: localizedInvoiceUrl,
   url: localizedInvoiceUrl,
 
-  // ✅ robust sanity info för frontend (förhindrar fel redirect)
-  currency_used,
+  // ✅ Detta ska nu matcha vad checkout visar
+  currency_used: String(draft.presentmentCurrencyCode || requestedPresentment || '').toUpperCase(),
   shop_used: SHOP_USED,
-  locale_used: (String(localeFromClient || '').toLowerCase().startsWith('sv') ? 'sv' : 'en')
-});
+  locale_used: (String(localeFromClient || '').toLowerCase().startsWith('sv') ? 'sv' : 'en'),
 
+  // (valfritt) extra debug
+  shop_currency: draft.currencyCode,
+  presentment_currency: draft.presentmentCurrencyCode
+});
 
 
   } catch (e){
