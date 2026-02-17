@@ -3391,77 +3391,126 @@ try {
     return [];
   };
 
-  const restDraft = payloadToShopify?.draft_order || {};
+ const restDraft = payloadToShopify?.draft_order || {};
   const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
 
-  const toMoney = (v) => {
+  const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
+
+  const toMoneyNumber = (v) => {
     const n = Number(String(v ?? '').replace(',', '.'));
     return Number.isFinite(n) && n >= 0 ? n : 0;
   };
 
+  const toMoneyInput = (v) => {
+    const n = toMoneyNumber(v);
+    return {
+      amount: n.toFixed(2),
+      currencyCode: requestedPresentment
+    };
+  };
 
-const gqlLineItems = restLineItems
-  .map(li => {
-    const qty = Math.max(1, parseInt(li.quantity || 1, 10));
-    const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
+  const desiredCartTotal = (() => {
+    const raw =
+      body?.cart_total_override ??
+      body?.cartTotalOverride ??
+      body?.cart_total ??
+      body?.cartTotal ??
+      null;
 
-    // 1) Variant-rad (har variant_id)
-    const variantGid = toVariantGid(li.variant_id);
-    if (variantGid) {
-      const out = { variantId: variantGid, quantity: qty };
+    const n = toMoneyNumber(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  })();
+
+  const getLineUnit = (li) => {
+    // Prioritet: din custom_line_total / custom_price / price
+    // (Frontend skickar unit-pris i "price"/"custom_price" redan i rätt currency)
+    if (li && typeof li.custom_price !== 'undefined') return toMoneyNumber(li.custom_price);
+    if (li && typeof li.price !== 'undefined') return toMoneyNumber(li.price);
+    return 0;
+  };
+
+  const sumFromGql = (items) => {
+    return (items || []).reduce((acc, it) => {
+      const qty = Math.max(1, parseInt(it?.quantity || 1, 10));
+      const amt = Number(it?.originalUnitPrice?.amount || 0);
+      return acc + (Number.isFinite(amt) ? (amt * qty) : 0);
+    }, 0);
+  };
+
+  let gqlLineItems = restLineItems
+    .map(li => {
+      const qty = Math.max(1, parseInt(li.quantity || 1, 10));
+      const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
+
+      // 1) Variant-rad (har variant_id) — MÅSTE tvinga originalUnitPrice för att inte falla tillbaka till variantpris (särskilt i EUR)
+      const variantGid = toVariantGid(li.variant_id);
+      if (variantGid) {
+        const unit = getLineUnit(li);
+        const out = {
+          variantId: variantGid,
+          quantity: qty,
+          originalUnitPrice: toMoneyInput(unit)
+        };
+        if (attrs.length) out.customAttributes = attrs;
+        return out;
+      }
+
+      // 2) Custom-rad (saknar variant_id, men har title + price)
+      const title = String(li.title || 'Trycksak').trim();
+      const unit = getLineUnit(li);
+
+      if (!title) return null;
+
+      const out = {
+        title,
+        quantity: qty,
+        originalUnitPrice: toMoneyInput(unit)
+      };
       if (attrs.length) out.customAttributes = attrs;
 
-      // Om du vill tvinga pris även på variant-rader (valfritt):
-      // if (typeof li.price !== 'undefined') out.originalUnitPrice = toMoney(li.price);
-
       return out;
+    })
+    .filter(Boolean);
+
+  if (!gqlLineItems.length) {
+    return res.status(400).json({
+      error: 'no_line_items_after_mapping',
+      message: 'Efter mappning till GraphQL blev lineItems tomt. Kontrollera att line_items innehåller variant_id eller custom title/price.',
+      debug: {
+        incoming_count: restLineItems.length,
+        incoming_sample: restLineItems.slice(0, 2)
+      }
+    });
+  }
+
+  // ✅ GARANTERA: checkout-total == varukorgens total (cart_total_override), i både SEK och EUR
+  if (desiredCartTotal != null) {
+    const currentSum = sumFromGql(gqlLineItems);
+    const diff = Number((desiredCartTotal - currentSum).toFixed(2));
+
+    if (diff !== 0 && gqlLineItems.length) {
+      // Justera första raden minimalt (öresnivå) så att totalen blir exakt
+      const first = gqlLineItems[0];
+      const q1 = Math.max(1, parseInt(first.quantity || 1, 10));
+      const curUnit = Number(first.originalUnitPrice?.amount || 0);
+
+      // Fördela diff över första radens qty (så enhetspris fortfarande är logiskt)
+      const newUnit = Number((curUnit + (diff / q1)).toFixed(2));
+      first.originalUnitPrice = toMoneyInput(newUnit);
+
+      gqlLineItems[0] = first;
     }
+  }
 
-    // 2) Custom-rad (saknar variant_id, men har title + price)
-    // Viktigt: detta är dina rader när backend satte custom:true pga prisoverride
-    const title = String(li.title || 'Trycksak').trim();
-    const price = toMoney(li.price);
+  const gqlInput = {
+    note: restDraft.note || 'Pressify Draft från varukorg',
 
-    // Om title saknas helt och pris = 0, är raden i praktiken ogiltig
-    if (!title) return null;
+    presentmentCurrencyCode: requestedPresentment,
 
-    const out = {
-      title,
-      quantity: qty,
-      originalUnitPrice: price
-    };
-    if (attrs.length) out.customAttributes = attrs;
+    taxExempt: true,
 
-    return out;
-  })
-  .filter(Boolean);
-
-if (!gqlLineItems.length) {
-  // Gör felet självinstruerande istället för "502 bad gateway"
-  return res.status(400).json({
-    error: 'no_line_items_after_mapping',
-    message: 'Efter mappning till GraphQL blev lineItems tomt. Kontrollera att line_items innehåller variant_id eller custom title/price.',
-    debug: {
-      incoming_count: restLineItems.length,
-      incoming_sample: restLineItems.slice(0, 2)
-    }
-  });
-}
-
-
-  const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
-
-const gqlInput = {
-  note: restDraft.note || 'Pressify Draft från varukorg',
-
-  // ✅ DETTA gör att checkout kan bli EUR (istället för bara "engelsk SEK")
-  presentmentCurrencyCode: requestedPresentment,
-
-  // 🔒 Tvinga alltid 0 skatt / ingen “beräknad skatt” i checkout
-  taxExempt: true,
-
-  lineItems: gqlLineItems
-};
+    lineItems: gqlLineItems
+  };
 
   r = await axios.post(
     `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
