@@ -3468,12 +3468,15 @@ let gqlLineItems = (restLineItems || [])
     const title = String(li.title || 'Trycksak').trim();
     if (!title) return null;
 
-    const out = {
-      title,
-      quantity: qty,
-      // ✅ KORREKT fält för custom-rader
-      originalUnitPriceWithCurrency: toMoneyInput(unit)
-    };
+  const out = {
+  title,
+  quantity: qty,
+  // ✅ KORREKT fält för custom-rader
+  originalUnitPriceWithCurrency: toMoneyInput(unit),
+
+  // ✅ KRITISK: annars blir ordern “no shipping required” och Shopify döljer Delivery-steget
+  requiresShipping: true
+};
     if (attrs.length) out.customAttributes = attrs;
     return out;
   })
