@@ -449,9 +449,11 @@ const PUBLIC_BASE_URL =
 
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
-
 function pfExtractCurrencyFromPayload(body = {}) {
+  // ✅ Prioritet: market_currency (från Liquid/market) → currency → presentment → fallback
   const raw =
+    body.market_currency ??
+    body.marketCurrency ??
     body.currency ??
     body.presentmentCurrency ??
     body.presentment_currency ??
@@ -462,8 +464,10 @@ function pfExtractCurrencyFromPayload(body = {}) {
   const cur = String(raw || '').trim().toUpperCase();
 
   if (cur === 'EUR') return 'EUR';
+  if (cur === 'SEK') return 'SEK';
   return 'SEK';
 }
+
 
 
 function pfExtractScopeFromPayload(body = {}) {
