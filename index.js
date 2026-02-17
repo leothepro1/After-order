@@ -3391,7 +3391,7 @@ try {
     return [];
   };
 
- const restDraft = payloadToShopify?.draft_order || {};
+const restDraft = payloadToShopify?.draft_order || {};
   const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
 
   const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
@@ -3422,8 +3422,7 @@ try {
   })();
 
   const getLineUnit = (li) => {
-    // Prioritet: din custom_line_total / custom_price / price
-    // (Frontend skickar unit-pris i "price"/"custom_price" redan i rätt currency)
+    // Prioritet: din custom_price / price (frontend skickar unit-pris i rätt currency)
     if (li && typeof li.custom_price !== 'undefined') return toMoneyNumber(li.custom_price);
     if (li && typeof li.price !== 'undefined') return toMoneyNumber(li.price);
     return 0;
@@ -3432,7 +3431,7 @@ try {
   const sumFromGql = (items) => {
     return (items || []).reduce((acc, it) => {
       const qty = Math.max(1, parseInt(it?.quantity || 1, 10));
-      const amt = Number(it?.originalUnitPrice?.amount || 0);
+      const amt = Number(it?.priceOverride?.amount || 0);
       return acc + (Number.isFinite(amt) ? (amt * qty) : 0);
     }, 0);
   };
@@ -3442,14 +3441,14 @@ try {
       const qty = Math.max(1, parseInt(li.quantity || 1, 10));
       const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
 
-      // 1) Variant-rad (har variant_id) — MÅSTE tvinga originalUnitPrice för att inte falla tillbaka till variantpris (särskilt i EUR)
+      // 1) Variant-rad (har variant_id) — använd priceOverride (gäller även när variantId finns)
       const variantGid = toVariantGid(li.variant_id);
       if (variantGid) {
         const unit = getLineUnit(li);
         const out = {
           variantId: variantGid,
           quantity: qty,
-          originalUnitPrice: toMoneyInput(unit)
+          priceOverride: toMoneyInput(unit)
         };
         if (attrs.length) out.customAttributes = attrs;
         return out;
@@ -3464,7 +3463,7 @@ try {
       const out = {
         title,
         quantity: qty,
-        originalUnitPrice: toMoneyInput(unit)
+        priceOverride: toMoneyInput(unit)
       };
       if (attrs.length) out.customAttributes = attrs;
 
@@ -3489,14 +3488,13 @@ try {
     const diff = Number((desiredCartTotal - currentSum).toFixed(2));
 
     if (diff !== 0 && gqlLineItems.length) {
-      // Justera första raden minimalt (öresnivå) så att totalen blir exakt
+      // Justera första raden minimalt så att totalen blir exakt
       const first = gqlLineItems[0];
       const q1 = Math.max(1, parseInt(first.quantity || 1, 10));
-      const curUnit = Number(first.originalUnitPrice?.amount || 0);
+      const curUnit = Number(first.priceOverride?.amount || 0);
 
-      // Fördela diff över första radens qty (så enhetspris fortfarande är logiskt)
       const newUnit = Number((curUnit + (diff / q1)).toFixed(2));
-      first.originalUnitPrice = toMoneyInput(newUnit);
+      first.priceOverride = toMoneyInput(newUnit);
 
       gqlLineItems[0] = first;
     }
