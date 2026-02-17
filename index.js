@@ -3364,6 +3364,7 @@ try {
   `;
 
   // --- helpers lokalt i blocket (ok) ---
+  // --- helpers lokalt i blocket (ok) ---
   const toVariantGid = (variantId) => {
     const n = Number(variantId);
     if (!Number.isFinite(n) || n <= 0) return null;
@@ -3371,6 +3372,7 @@ try {
   };
 
   const propsToCustomAttributes = (props) => {
+    // Shopify REST kan skicka properties som array [{name,value}] eller object
     if (!props) return [];
     if (Array.isArray(props)) {
       return props
@@ -3388,35 +3390,14 @@ try {
     return [];
   };
 
-const restDraft = payloadToShopify?.draft_order || {};
-const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
+  const restDraft = payloadToShopify?.draft_order || {};
+  const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
 
-const toVariantGid = (variantId) => {
-  const n = Number(variantId);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return `gid://shopify/ProductVariant/${n}`;
-};
+  const toMoney = (v) => {
+    const n = Number(String(v ?? '').replace(',', '.'));
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  };
 
-const propsToCustomAttributes = (props) => {
-  // Shopify REST kan skicka properties som array [{name,value}] eller object
-  if (!props) return [];
-  if (Array.isArray(props)) {
-    return props
-      .map(p => ({ key: String(p?.name ?? '').trim(), value: String(p?.value ?? '').trim() }))
-      .filter(a => a.key && a.value !== 'undefined');
-  }
-  if (typeof props === 'object') {
-    return Object.entries(props)
-      .map(([k, v]) => ({ key: String(k).trim(), value: String(v ?? '').trim() }))
-      .filter(a => a.key && a.value !== 'undefined');
-  }
-  return [];
-};
-
-const toMoney = (v) => {
-  const n = Number(String(v ?? '').replace(',', '.'));
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-};
 
 const gqlLineItems = restLineItems
   .map(li => {
@@ -10884,7 +10865,6 @@ app.get('/public/cart-share/resolve', async (req, res) => {
     });
   }
 });
-
 // Starta servern
 const PORT = process.env.PORT || 3000;
 
