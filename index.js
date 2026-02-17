@@ -177,27 +177,32 @@ function cartShareBuildRedisKey(tokenHash) {
 function pfPickShopByCurrency(requestedCurrency) {
   const c = String(requestedCurrency || '').trim().toUpperCase();
 
-  // Default: befintlig SEK-shop (din nuvarande SHOP + ACCESS_TOKEN)
-  const fallback = {
+  const sek = {
     shop: process.env.SHOP,
     token: process.env.ACCESS_TOKEN,
     currency_used: 'SEK'
   };
 
-  if (c === 'EUR') {
-    const eurShop = process.env.SHOP_EUR;
-    const eurTok  = process.env.ACCESS_TOKEN_EUR;
+  const eur = {
+    shop: process.env.SHOP_EUR,
+    token: process.env.ACCESS_TOKEN_EUR,
+    currency_used: 'EUR'
+  };
 
-    // 🔒 Robust: om EUR begärs men saknas config → hårt stopp (aldrig risk för SEK->EUR-fel)
-    if (!eurShop || !eurTok) {
+  // 🔒 SEK är alltid SEK (får aldrig "falla" till EUR)
+  if (c === 'SEK') return sek;
+
+  // 🔒 EUR kräver config (får aldrig "falla" till SEK)
+  if (c === 'EUR') {
+    if (!eur.shop || !eur.token) {
       return { error: 'EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)' };
     }
-
-    return { shop: eurShop, token: eurTok, currency_used: 'EUR' };
+    return eur;
   }
 
-  // SEK (eller okänt) → fallback
-  return fallback;
+  // ✅ Okänt/ej skickat → global fallback = EUR (om konfig finns), annars SEK.
+  if (eur.shop && eur.token) return eur;
+  return sek;
 }
 
 function pfAppendLocaleToInvoiceUrl(invoiceUrl, locale) {
@@ -450,7 +455,7 @@ const PUBLIC_BASE_URL =
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
 function pfExtractCurrencyFromPayload(body = {}) {
-  // ✅ Prioritet: market_currency (från Liquid/market) → currency → presentment → fallback
+  // ✅ Prioritet: market_currency (från Liquid/market) → currency → presentment → (ingen fallback här)
   const raw =
     body.market_currency ??
     body.marketCurrency ??
@@ -465,8 +470,47 @@ function pfExtractCurrencyFromPayload(body = {}) {
 
   if (cur === 'EUR') return 'EUR';
   if (cur === 'SEK') return 'SEK';
-  return 'SEK';
+  return null; // okänd / saknas → löses via request-inferens + global fallback
 }
+
+function pfInferCurrencyFromRequest(req) {
+  // Målet: aldrig "råka" byta valuta p.g.a. saknad body.currency.
+  // Vi infererar bara när payload saknar tydlig valuta.
+  const get = (k) => {
+    try { return String(req.get(k) || ''); } catch { return ''; }
+  };
+
+  const host =
+    get('x-forwarded-host') ||
+    get('host') ||
+    '';
+
+  const origin = get('origin');
+  const referer = get('referer');
+  const s = `${host} ${origin} ${referer}`.toLowerCase();
+
+  // Pressify / .se → SEK (skyddar befintlig live)
+  if (s.includes('pressify') || s.includes('.se')) return 'SEK';
+
+  // Stikaro / .com / .eu (anpassa vid behov) → EUR
+  if (s.includes('stikaro') || s.includes('.com') || s.includes('.eu')) return 'EUR';
+
+  return null;
+}
+
+function pfResolveCurrency(req, body = {}) {
+  // 1) Om frontend skickar valuta → den är sanningen
+  const fromBody = pfExtractCurrencyFromPayload(body);
+  if (fromBody) return fromBody;
+
+  // 2) Annars inferera från request (origin/referer/host)
+  const inferred = pfInferCurrencyFromRequest(req);
+  if (inferred) return inferred;
+
+  // 3) Slutlig global fallback (du ville ha EUR som standard)
+  return 'EUR';
+}
+
 
 
 
@@ -3190,9 +3234,8 @@ async function handleDraftCreate(req, res){
   try{
     const body = req.body || {};
 
-    // 🔒 Default = SEK (påverkar inte live .se)
-    // När frontend senare skickar EUR kan vi använda detta.
-    const requestedCurrency = pfExtractCurrencyFromPayload(body);
+ // ✅ NO-FLIP resolver: payload → inferens → global EUR fallback
+const requestedCurrency = pfResolveCurrency(req, body);
 
     let payloadToShopify = null;
 
