@@ -3394,121 +3394,160 @@ try {
 const restDraft = payloadToShopify?.draft_order || {};
   const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
 
-  const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
+const requestedPresentment =
+  (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
 
-  const toMoneyNumber = (v) => {
-    const n = Number(String(v ?? '').replace(',', '.'));
-    return Number.isFinite(n) && n >= 0 ? n : 0;
+const toMoneyNumber = (v) => {
+  const n = Number(String(v ?? '').replace(',', '.'));
+  return Number.isFinite(n) ? n : NaN;
+};
+
+const toMoneyInput = (v) => {
+  const n = toMoneyNumber(v);
+  const safe = (Number.isFinite(n) && n >= 0) ? n : 0;
+  return {
+    amount: safe.toFixed(2),
+    currencyCode: requestedPresentment
   };
+};
 
-  const toMoneyInput = (v) => {
-    const n = toMoneyNumber(v);
-    return {
-      amount: n.toFixed(2),
-      currencyCode: requestedPresentment
-    };
-  };
+const desiredCartTotal = (() => {
+  const raw =
+    body?.cart_total_override ??
+    body?.cartTotalOverride ??
+    body?.cart_total ??
+    body?.cartTotal ??
+    null;
 
-  const desiredCartTotal = (() => {
-    const raw =
-      body?.cart_total_override ??
-      body?.cartTotalOverride ??
-      body?.cart_total ??
-      body?.cartTotal ??
-      null;
+  const n = toMoneyNumber(raw);
+  return (Number.isFinite(n) && n >= 0) ? Number(n.toFixed(2)) : null;
+})();
 
-    const n = toMoneyNumber(raw);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  })();
+const getLineUnit = (li) => {
+  // Prioritet: custom_price -> price -> (custom_line_total / qty)
+  if (li && li.custom_price != null) {
+    const n = toMoneyNumber(li.custom_price);
+    if (Number.isFinite(n)) return n;
+  }
+  if (li && li.price != null) {
+    const n = toMoneyNumber(li.price);
+    if (Number.isFinite(n)) return n;
+  }
+  const qty = Math.max(1, parseInt(li?.quantity || 1, 10));
+  if (li && li.custom_line_total != null) {
+    const t = toMoneyNumber(li.custom_line_total);
+    if (Number.isFinite(t)) return Number((t / qty).toFixed(2));
+  }
+  return 0;
+};
 
-  const getLineUnit = (li) => {
-    // Prioritet: din custom_price / price (frontend skickar unit-pris i rätt currency)
-    if (li && typeof li.custom_price !== 'undefined') return toMoneyNumber(li.custom_price);
-    if (li && typeof li.price !== 'undefined') return toMoneyNumber(li.price);
-    return 0;
-  };
+const propsToCustomAttributes = (props) => {
+  if (!props) return [];
+  if (Array.isArray(props)) {
+    return props
+      .map(p => ({
+        key: String(p?.name ?? p?.key ?? '').trim(),
+        value: String(p?.value ?? '').trim()
+      }))
+      .filter(a => a.key && a.value !== 'undefined');
+  }
+  if (typeof props === 'object') {
+    return Object.entries(props)
+      .map(([k, v]) => ({ key: String(k).trim(), value: String(v ?? '').trim() }))
+      .filter(a => a.key && a.value !== 'undefined');
+  }
+  return [];
+};
 
-  const sumFromGql = (items) => {
-    return (items || []).reduce((acc, it) => {
-      const qty = Math.max(1, parseInt(it?.quantity || 1, 10));
-      const amt = Number(it?.priceOverride?.amount || 0);
-      return acc + (Number.isFinite(amt) ? (amt * qty) : 0);
-    }, 0);
-  };
+const toVariantGid = (variantId) => {
+  const n = Number(variantId);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return `gid://shopify/ProductVariant/${n}`;
+};
 
-  let gqlLineItems = restLineItems
-    .map(li => {
-      const qty = Math.max(1, parseInt(li.quantity || 1, 10));
-      const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
+// ---- KORREKT GraphQL lineItems ----
+// Variant-rader: priceOverride (MoneyInput)  ✅
+// Custom-rader: originalUnitPriceWithCurrency (MoneyInput) ✅
+let gqlLineItems = (restLineItems || [])
+  .map(li => {
+    const qty = Math.max(1, parseInt(li.quantity || 1, 10));
+    const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
 
-      // 1) Variant-rad (har variant_id) — använd priceOverride (gäller även när variantId finns)
-      const variantGid = toVariantGid(li.variant_id);
-      if (variantGid) {
-        const unit = getLineUnit(li);
-        const out = {
-          variantId: variantGid,
-          quantity: qty,
-          priceOverride: toMoneyInput(unit)
-        };
-        if (attrs.length) out.customAttributes = attrs;
-        return out;
-      }
+    const variantGid = toVariantGid(li.variant_id);
+    const unit = getLineUnit(li);
 
-      // 2) Custom-rad (saknar variant_id, men har title + price)
-      const title = String(li.title || 'Trycksak').trim();
-      const unit = getLineUnit(li);
-
-      if (!title) return null;
-
+    if (variantGid) {
       const out = {
-        title,
+        variantId: variantGid,
         quantity: qty,
+        // ✅ DETTA är nyckeln: tvinga pris på variant-rader
         priceOverride: toMoneyInput(unit)
       };
       if (attrs.length) out.customAttributes = attrs;
-
       return out;
-    })
-    .filter(Boolean);
-
-  if (!gqlLineItems.length) {
-    return res.status(400).json({
-      error: 'no_line_items_after_mapping',
-      message: 'Efter mappning till GraphQL blev lineItems tomt. Kontrollera att line_items innehåller variant_id eller custom title/price.',
-      debug: {
-        incoming_count: restLineItems.length,
-        incoming_sample: restLineItems.slice(0, 2)
-      }
-    });
-  }
-
-  // ✅ GARANTERA: checkout-total == varukorgens total (cart_total_override), i både SEK och EUR
-  if (desiredCartTotal != null) {
-    const currentSum = sumFromGql(gqlLineItems);
-    const diff = Number((desiredCartTotal - currentSum).toFixed(2));
-
-    if (diff !== 0 && gqlLineItems.length) {
-      // Justera första raden minimalt så att totalen blir exakt
-      const first = gqlLineItems[0];
-      const q1 = Math.max(1, parseInt(first.quantity || 1, 10));
-      const curUnit = Number(first.priceOverride?.amount || 0);
-
-      const newUnit = Number((curUnit + (diff / q1)).toFixed(2));
-      first.priceOverride = toMoneyInput(newUnit);
-
-      gqlLineItems[0] = first;
     }
+
+    const title = String(li.title || 'Trycksak').trim();
+    if (!title) return null;
+
+    const out = {
+      title,
+      quantity: qty,
+      // ✅ KORREKT fält för custom-rader
+      originalUnitPriceWithCurrency: toMoneyInput(unit)
+    };
+    if (attrs.length) out.customAttributes = attrs;
+    return out;
+  })
+  .filter(Boolean);
+
+if (!gqlLineItems.length) {
+  return res.status(400).json({
+    error: 'no_line_items_after_mapping',
+    message: 'Efter mappning till GraphQL blev lineItems tomt.',
+    debug: { incoming_count: restLineItems.length, incoming_sample: restLineItems.slice(0, 2) }
+  });
+}
+
+// ---- GARANTERA: checkout-total == varukorgens total ----
+// Justera första raden med priceOverride/originalUnitPriceWithCurrency tills totalsumman matchar.
+if (desiredCartTotal != null) {
+  const sumNow = gqlLineItems.reduce((acc, it) => {
+    const q = Math.max(1, parseInt(it.quantity || 1, 10));
+    const money =
+      it.priceOverride ||
+      it.originalUnitPriceWithCurrency ||
+      null;
+    const a = money ? Number(money.amount) : 0;
+    return acc + (Number.isFinite(a) ? a * q : 0);
+  }, 0);
+
+  const diff = Number((desiredCartTotal - sumNow).toFixed(2));
+
+  if (diff !== 0) {
+    const first = gqlLineItems[0];
+    const q1 = Math.max(1, parseInt(first.quantity || 1, 10));
+
+    const moneyKey = first.priceOverride ? 'priceOverride' : 'originalUnitPriceWithCurrency';
+    const curUnit = Number(first[moneyKey]?.amount || 0);
+
+    // Fördela diff över qty på första raden
+    const newUnit = Number((curUnit + (diff / q1)).toFixed(2));
+
+    // clamp (Shopify accepterar inte negativa pengar)
+    const safeUnit = Math.max(0, newUnit);
+
+    first[moneyKey] = toMoneyInput(safeUnit);
+    gqlLineItems[0] = first;
   }
+}
 
-  const gqlInput = {
-    note: restDraft.note || 'Pressify Draft från varukorg',
-
-    presentmentCurrencyCode: requestedPresentment,
-
-    taxExempt: true,
-
-    lineItems: gqlLineItems
-  };
+const gqlInput = {
+  note: restDraft.note || 'Pressify Draft från varukorg',
+  presentmentCurrencyCode: requestedPresentment,
+  taxExempt: true,
+  lineItems: gqlLineItems
+};
 
   r = await axios.post(
     `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
