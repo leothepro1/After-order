@@ -3451,19 +3451,39 @@ if (!gqlLineItems.length) {
   const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
 
   const gqlInput = {
-    note: restDraft.note || 'Pressify Draft från varukorg',
+  note: restDraft.note || 'Pressify Draft från varukorg',
 
-    // ✅ DETTA gör att checkout kan bli EUR (istället för bara "engelsk SEK")
-    presentmentCurrencyCode: requestedPresentment,
+  // ✅ Tvinga draften som momsbefriad
+  taxExempt: true,
 
-    lineItems: gqlLineItems
-  };
+  presentmentCurrencyCode: requestedPresentment,
 
-  r = await axios.post(
-    `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
-    { query: DRAFT_ORDER_CREATE_MUTATION, variables: { input: gqlInput } },
-    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN_USED, 'Content-Type':'application/json' } }
-  );
+  // ✅ Se till att alla rader är icke-taxable
+  lineItems: gqlLineItems.map(li => ({
+    ...li,
+    taxable: false
+  }))
+};
+
+
+// ✅ Tvinga ordern tax-exempt
+payloadToShopify.draft_order = payloadToShopify.draft_order || {};
+payloadToShopify.draft_order.tax_exempt = true;
+
+// ✅ Tvinga varje rad icke-taxable
+if (Array.isArray(payloadToShopify.draft_order.line_items)) {
+  payloadToShopify.draft_order.line_items = payloadToShopify.draft_order.line_items.map(li => ({
+    ...li,
+    taxable: false
+  }));
+}
+
+r = await axios.post(
+  `https://${SHOP_USED}/admin/api/2025-07/draft_orders.json`,
+  payloadToShopify,
+  { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN_USED, 'Content-Type':'application/json' } }
+);
+
 
 } catch (err) {
   const status = err?.response?.status || 500;
