@@ -3520,13 +3520,34 @@ if (desiredCartTotal != null) {
   }
 }
 
+// 1) Plocka shipping address från payload (REST draft order / eller body)
+const rawShip =
+  restDraft.shipping_address ||
+  body.shipping_address ||
+  body.shippingAddress ||
+  null;
+
+// 2) Mappa till DraftOrderAddressInput (GraphQL)
+const shippingAddress = rawShip ? {
+  firstName:  rawShip.first_name ? String(rawShip.first_name) : undefined,
+  lastName:   rawShip.last_name  ? String(rawShip.last_name)  : undefined,
+  address1:   rawShip.address1   ? String(rawShip.address1)   : undefined,
+  address2:   rawShip.address2   ? String(rawShip.address2)   : undefined,
+  city:       rawShip.city       ? String(rawShip.city)       : undefined,
+  zip:        rawShip.zip        ? String(rawShip.zip)        : undefined,
+  province:   rawShip.province   ? String(rawShip.province)   : undefined,
+  countryCode: rawShip.country_code ? String(rawShip.country_code).toUpperCase() : undefined,
+  phone:      rawShip.phone      ? String(rawShip.phone)      : undefined
+} : null;
+
+// 3) Bygg input – inkludera shippingAddress om den finns
 const gqlInput = {
   note: restDraft.note || 'Pressify Draft från varukorg',
   presentmentCurrencyCode: requestedPresentment,
   taxExempt: true,
-  lineItems: gqlLineItems
+  lineItems: gqlLineItems,
+  ...(shippingAddress ? { shippingAddress } : {})
 };
-
   r = await axios.post(
     `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
     { query: DRAFT_ORDER_CREATE_MUTATION, variables: { input: gqlInput } },
@@ -10567,9 +10588,10 @@ const expTo   = pressifyAddBusinessDays(now, useExp.maxDays);
     const stdDesc = pressifySvShortRange(stdFrom, stdTo);
     const expDesc = pressifySvShortRange(expFrom, expTo);
 
-    // Exakt två rater, titlar utan datum – och utan min/max_delivery_date
- // Exakt två rater, titlar utan datum – och utan min/max_delivery_date
-const currency = pressifyPickCarrierCurrency(rateReq);
+const currencyRaw = pressifyPickCarrierCurrency(rateReq);
+const currency = (currencyRaw && /^[A-Z]{3}$/.test(String(currencyRaw).toUpperCase()))
+  ? String(currencyRaw).toUpperCase()
+  : PRESSIFY_DEFAULT_CURRENCY;
 
 const standardMinor = PRESSIFY_STANDARD_MINOR_BY_CURRENCY[currency] ?? PRESSIFY_STANDARD_MINOR_BY_CURRENCY[PRESSIFY_DEFAULT_CURRENCY];
 const expressMinor  = PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[currency]  ?? PRESSIFY_EXPRESS_MINOR_BY_CURRENCY[PRESSIFY_DEFAULT_CURRENCY];
@@ -10584,7 +10606,7 @@ const rates = [
     phone_required: false
   },
   {
-    service_name: 'Expressfrakt',
+    service_name: 'Express',
     service_code: 'EXPRESS',
     total_price: String(expressMinor),
     currency,
