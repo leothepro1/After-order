@@ -3364,7 +3364,7 @@ try {
     }
   `;
 
-  // --- helpers lokalt i blocket (ok) ---
+
   // --- helpers lokalt i blocket (ok) ---
   const toVariantGid = (variantId) => {
     const n = Number(variantId);
@@ -3441,11 +3441,7 @@ const getLineUnit = (li) => {
   return 0;
 };
 
-const toVariantGid = (variantId) => {
-  const n = Number(variantId);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return `gid://shopify/ProductVariant/${n}`;
-};
+
 
 // ---- KORREKT GraphQL lineItems ----
 // Variant-rader: priceOverride (MoneyInput)  ✅
