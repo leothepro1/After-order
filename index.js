@@ -174,6 +174,42 @@ function cartShareBuildRedisKey(tokenHash) {
   return `cart_share:${tokenHash}`;
 }
 
+function pfPickShopByCurrency(requestedCurrency) {
+  const c = String(requestedCurrency || '').trim().toUpperCase();
+
+  // Default: befintlig SEK-shop (din nuvarande SHOP + ACCESS_TOKEN)
+  const fallback = {
+    shop: process.env.SHOP,
+    token: process.env.ACCESS_TOKEN,
+    currency_used: 'SEK'
+  };
+
+  if (c === 'EUR') {
+    const eurShop = process.env.SHOP_EUR;
+    const eurTok  = process.env.ACCESS_TOKEN_EUR;
+
+    // 🔒 Robust: om EUR begärs men saknas config → hårt stopp (aldrig risk för SEK->EUR-fel)
+    if (!eurShop || !eurTok) {
+      return { error: 'EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)' };
+    }
+
+    return { shop: eurShop, token: eurTok, currency_used: 'EUR' };
+  }
+
+  // SEK (eller okänt) → fallback
+  return fallback;
+}
+
+function pfAppendLocaleToInvoiceUrl(invoiceUrl, locale) {
+  try {
+    const l = String(locale || '').toLowerCase().startsWith('sv') ? 'sv' : 'en';
+    const u = new URL(invoiceUrl);
+    u.searchParams.set('locale', l);
+    return u.toString();
+  } catch {
+    return invoiceUrl; // fail-safe
+  }
+}
 
 
 
@@ -3288,11 +3324,24 @@ payloadToShopify = purgeInvalidEmails(payloadToShopify);
 
 let r;
 try {
+  const pick = pfPickShopByCurrency(requestedCurrency);
+  if (pick && pick.error) {
+    try { setCorsOnError(req, res); } catch {}
+    return res.status(500).json({
+      error: 'currency_shop_not_configured',
+      message: pick.error,
+      requestedCurrency
+    });
+  }
+
+  const { shop: SHOP_USED, token: ACCESS_TOKEN_USED, currency_used } = pick;
+
   r = await axios.post(
-    `https://${SHOP}/admin/api/2025-07/draft_orders.json`,
+    `https://${SHOP_USED}/admin/api/2025-07/draft_orders.json`,
     payloadToShopify,
-    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN, 'Content-Type':'application/json' } }
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN_USED, 'Content-Type':'application/json' } }
   );
+
 } catch (err) {
   // Gör felet synligt (så du slipper “internal”)
   const status = err?.response?.status || 500;
@@ -3307,14 +3356,25 @@ if (!draft || !draft.invoice_url) {
   return res.status(502).json({ error: 'draft_order saknar invoice_url' });
 }
 
-return res.json({
-  ok: true,
-  draft_order_id: draft.id,
-  name: draft.name,
-  invoice_url: draft.invoice_url,
-  invoiceUrl: draft.invoice_url,
-  url: draft.invoice_url
-});
+  const localeFromClient = body.locale || body.lang || body.language || null;
+  const localizedInvoiceUrl = pfAppendLocaleToInvoiceUrl(draft.invoice_url, localeFromClient);
+
+  return res.json({
+    ok: true,
+    draft_order_id: draft.id,
+    name: draft.name,
+
+    // ✅ alltid den URL vi vill att frontend ska redirecta till
+    invoice_url: localizedInvoiceUrl,
+    invoiceUrl: localizedInvoiceUrl,
+    url: localizedInvoiceUrl,
+
+    // ✅ robust sanity info för frontend (förhindrar fel redirect)
+    currency_used,
+    shop_used: SHOP_USED,
+    locale_used: (String(localeFromClient || '').toLowerCase().startsWith('sv') ? 'sv' : 'en')
+  });
+
 
   } catch (e){
     console.error('[draft create] error:', e?.response?.data || e.message);
