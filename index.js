@@ -3441,24 +3441,6 @@ const getLineUnit = (li) => {
   return 0;
 };
 
-const propsToCustomAttributes = (props) => {
-  if (!props) return [];
-  if (Array.isArray(props)) {
-    return props
-      .map(p => ({
-        key: String(p?.name ?? p?.key ?? '').trim(),
-        value: String(p?.value ?? '').trim()
-      }))
-      .filter(a => a.key && a.value !== 'undefined');
-  }
-  if (typeof props === 'object') {
-    return Object.entries(props)
-      .map(([k, v]) => ({ key: String(k).trim(), value: String(v ?? '').trim() }))
-      .filter(a => a.key && a.value !== 'undefined');
-  }
-  return [];
-};
-
 const toVariantGid = (variantId) => {
   const n = Number(variantId);
   if (!Number.isFinite(n) || n <= 0) return null;
