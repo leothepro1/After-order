@@ -3045,22 +3045,17 @@ async function buildCustomLinesFromGeneric(items, requestedCurrency = 'SEK'){
     // Default = requestedCurrency (SEK idag)
     propsSafe = appendHiddenCurrency(propsSafe, requestedCurrency);
 
-    let taxable = true; // default moms = på
-    if (vid && typeof vTaxMap[vid] === 'boolean') {
-      taxable = vTaxMap[vid];
-    } else if (pid && typeof pTaxMap[pid] === 'boolean') {
-      taxable = pTaxMap[pid];
-    }
+const taxable = false;
 
-    lines.push({
-      custom: true,
-      title: String(it.title || it.productTitle || 'Trycksak'),
-      quantity: qty,
-      price: normalizePrice(unitCustom),
-      taxable, // ⬅️ viktigt
-      requires_shipping: true,
-      properties: propsSafe
-    });
+lines.push({
+  custom: true,
+  title: String(it.title || it.productTitle || 'Trycksak'),
+  quantity: qty,
+  price: normalizePrice(unitCustom),
+  taxable,
+  requires_shipping: true,
+  properties: propsSafe
+});
   }
   return lines;
 }
@@ -3223,17 +3218,20 @@ if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft
       typeof vTaxMap[vid] === 'boolean' ? vTaxMap[vid] :
       (typeof pTaxMap[pid] === 'boolean' ? pTaxMap[pid] : true);
 
-    if (hasCustomPrice) {
-      return {
-        custom: true,
-        title: String(li.title || 'Trycksak'),
-        quantity: qty,
-        price: normalizePrice(li.price),
-        taxable: inferredTaxable,
-        requires_shipping: true,
-        properties: props
-      };
-    }
+  if (hasCustomPrice) {
+  return {
+    custom: true,
+    title: String(li.title || 'Trycksak'),
+    quantity: qty,
+    price: normalizePrice(li.price),
+
+    // 🔒 Alltid 0 skatt
+    taxable: false,
+
+    requires_shipping: true,
+    properties: props
+  };
+}
 
     const out = {
       ...(li.variant_id ? { variant_id: li.variant_id } : {}),
@@ -3250,17 +3248,20 @@ if (body.shopify && body.shopify.draft_order && Array.isArray(body.shopify.draft
       };
     }
 
-    if (!out.variant_id) {
-      return {
-        custom: true,
-        title: String(li.title || 'Trycksak'),
-        quantity: qty,
-        price: normalizePrice(0),
-        taxable: inferredTaxable,
-        requires_shipping: true,
-        properties: props
-      };
-    }
+  if (!out.variant_id) {
+  return {
+    custom: true,
+    title: String(li.title || 'Trycksak'),
+    quantity: qty,
+    price: normalizePrice(0),
+
+    // 🔒 Alltid 0 skatt
+    taxable: false,
+
+    requires_shipping: true,
+    properties: props
+  };
+}
 
     return out;
   });
@@ -3450,14 +3451,17 @@ if (!gqlLineItems.length) {
 
   const requestedPresentment = (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
 
-  const gqlInput = {
-    note: restDraft.note || 'Pressify Draft från varukorg',
+const gqlInput = {
+  note: restDraft.note || 'Pressify Draft från varukorg',
 
-    // ✅ DETTA gör att checkout kan bli EUR (istället för bara "engelsk SEK")
-    presentmentCurrencyCode: requestedPresentment,
+  // ✅ DETTA gör att checkout kan bli EUR (istället för bara "engelsk SEK")
+  presentmentCurrencyCode: requestedPresentment,
 
-    lineItems: gqlLineItems
-  };
+  // 🔒 Tvinga alltid 0 skatt / ingen “beräknad skatt” i checkout
+  taxExempt: true,
+
+  lineItems: gqlLineItems
+};
 
   r = await axios.post(
     `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
