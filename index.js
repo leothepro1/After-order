@@ -3363,8 +3363,10 @@ try {
     }
   `;
 
-  // --- helpers lokalt i blocket (ok) ---
-  // --- helpers lokalt i blocket (ok) ---
+   const restDraft = payloadToShopify?.draft_order || {};
+  const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
+
+  // --- helpers (EN gång, ingen dubbel deklaration) ---
   const toVariantGid = (variantId) => {
     const n = Number(variantId);
     if (!Number.isFinite(n) || n <= 0) return null;
@@ -3372,7 +3374,6 @@ try {
   };
 
   const propsToCustomAttributes = (props) => {
-    // Shopify REST kan skicka properties som array [{name,value}] eller object
     if (!props) return [];
     if (Array.isArray(props)) {
       return props
@@ -3389,6 +3390,99 @@ try {
     }
     return [];
   };
+
+  const toMoney = (v) => {
+    const n = Number(String(v ?? '').replace(',', '.'));
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  };
+
+  // --- map REST line_items -> GraphQL lineItems ---
+  const gqlLineItems = restLineItems
+    .map(li => {
+      const qty = Math.max(1, parseInt(li.quantity || 1, 10));
+      const attrs = propsToCustomAttributes(li.properties || li.custom_attributes || null);
+
+      // ✅ Robust variant-id: variant_id OR id OR variantId
+      const rawVariantId = (li.variant_id ?? li.id ?? li.variantId ?? null);
+      const variantGid = toVariantGid(rawVariantId);
+
+      // 1) Variant-rad
+      if (variantGid) {
+        const out = { variantId: variantGid, quantity: qty };
+        if (attrs.length) out.customAttributes = attrs;
+        return out;
+      }
+
+      // 2) Custom-rad (title + price)
+      const title = String(li.title || '').trim();
+      const price = toMoney(li.price);
+
+      if (!title) return null;
+
+      const out = { title, quantity: qty, originalUnitPrice: price };
+      if (attrs.length) out.customAttributes = attrs;
+      return out;
+    })
+    .filter(Boolean);
+
+  if (!gqlLineItems.length) {
+    return res.status(400).json({
+      error: 'no_line_items_after_mapping',
+      message: 'Efter mappning till GraphQL blev lineItems tomt. Kontrollera att line_items innehåller variant_id/id eller custom title/price.',
+      debug: {
+        incoming_count: restLineItems.length,
+        incoming_sample: restLineItems.slice(0, 2)
+      }
+    });
+  }
+
+  const requestedPresentment =
+    (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
+
+  const gqlInput = {
+    note: restDraft.note || 'Pressify Draft från varukorg',
+
+    // ✅ Valuta i checkout
+    presentmentCurrencyCode: requestedPresentment,
+
+    // ✅ Stoppa moms/tax i draft checkout (robust “ex moms”)
+    taxExempt: true,
+    taxesIncluded: false,
+
+    lineItems: gqlLineItems
+  };
+
+  r = await axios.post(
+    `https://${SHOP_USED}/admin/api/2025-10/graphql.json`,
+    { query: DRAFT_ORDER_CREATE_MUTATION, variables: { input: gqlInput } },
+    { headers: { 'X-Shopify-Access-Token': ACCESS_TOKEN_USED, 'Content-Type': 'application/json' } }
+  );
+
+  // ✅ GraphQL: fånga top-level errors (annars blir det “saknar invoiceUrl”)
+  const gqlTopErrors = r?.data?.errors || null;
+  if (Array.isArray(gqlTopErrors) && gqlTopErrors.length) {
+    return res.status(502).json({
+      error: 'shopify_graphql_errors',
+      errors: gqlTopErrors
+    });
+  }
+
+  const userErrors = r?.data?.data?.draftOrderCreate?.userErrors || [];
+  if (userErrors.length) {
+    return res.status(502).json({ error: 'shopify_user_errors', userErrors });
+  }
+
+  const draft = r?.data?.data?.draftOrderCreate?.draftOrder || null;
+  if (!draft || !draft.invoiceUrl) {
+    return res.status(502).json({
+      error: 'draft_order saknar invoiceUrl',
+      debug: {
+        hasDraft: !!draft,
+        draftKeys: draft ? Object.keys(draft) : null,
+        presentmentAsked: requestedPresentment
+      }
+    });
+  }
 
   const restDraft = payloadToShopify?.draft_order || {};
   const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
