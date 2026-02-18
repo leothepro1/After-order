@@ -20,12 +20,12 @@
       "type": "select",
       "default": 1,
       "choices": [
-        { "value": 1, "code": "6x4", "label": "6x4 cm", "w_cm": 4, "h_cm": 4, "area_cm2": 16 },
-        { "value": 2, "code": "8x6", "label": "8x6 cm", "w_cm": 6, "h_cm": 6, "area_cm2": 36 },
-        { "value": 3, "code": "10x8", "label": "10x8 cm", "w_cm": 8, "h_cm": 8, "area_cm2": 64 },
-        { "value": 4, "code": "12x10", "label": "12x10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
-        { "value": 5, "code": "14x12", "label": "14×12 cm", "w_cm": 12, "h_cm": 12, "area_cm2": 144 },
-        { "value": 6, "code": "16x14", "label": "16×14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 },
+        { "value": 1, "code": "4x4", "label": "4x4 cm", "w_cm": 4, "h_cm": 4, "area_cm2": 16 },
+        { "value": 2, "code": "6x6", "label": "6x6 cm", "w_cm": 6, "h_cm": 6, "area_cm2": 36 },
+        { "value": 3, "code": "8x8", "label": "8x8 cm", "w_cm": 8, "h_cm": 8, "area_cm2": 64 },
+        { "value": 4, "code": "10x10", "label": "10x10 cm", "w_cm": 10, "h_cm": 10, "area_cm2": 100 },
+        { "value": 5, "code": "12x12", "label": "12x12 cm", "w_cm": 12, "h_cm": 12, "area_cm2": 144 },
+        { "value": 6, "code": "14x14", "label": "14x14 cm", "w_cm": 14, "h_cm": 14, "area_cm2": 196 },
 {
   "value": "custom",
   "code": "custom",
