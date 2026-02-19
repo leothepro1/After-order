@@ -1,5 +1,5 @@
 {
-  "id": "klistermärkennova",
+  "id": "klistermärken",
   "title": "klistermärken",
         "i18n": { "en": { "title": "stickers" } },
   "version": "1.2.0",
@@ -15,7 +15,7 @@
   },
     {
       "id": "size",
-      "label": "Storlek (BxH)",
+      "label": "Size (W×H)",
       "i18n": { "en": { "label": "Size (W×H)" } },
       "type": "select",
       "default": 1,
@@ -63,7 +63,7 @@
     },
     {
       "id": "qty",
-      "label": "Antal",
+      "label": "Quantity",
              "i18n": { "en": { "label": "Quantity" } },
       "type": "select",
       "default": 50,
