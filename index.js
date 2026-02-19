@@ -173,37 +173,20 @@ function cartShareTokenHash(token) {
 function cartShareBuildRedisKey(tokenHash) {
   return `cart_share:${tokenHash}`;
 }
-
-function pfPickShopByCurrency(requestedCurrency) {
-  const c = String(requestedCurrency || '').trim().toUpperCase();
-
-  const sek = {
-    shop: process.env.SHOP,
-    token: process.env.ACCESS_TOKEN,
-    currency_used: 'SEK'
-  };
-
+function pfPickShopByCurrency(_requestedCurrency) {
   const eur = {
     shop: process.env.SHOP_EUR,
     token: process.env.ACCESS_TOKEN_EUR,
     currency_used: 'EUR'
   };
 
-  // 🔒 SEK är alltid SEK (får aldrig "falla" till EUR)
-  if (c === 'SEK') return sek;
-
-  // 🔒 EUR kräver config (får aldrig "falla" till SEK)
-  if (c === 'EUR') {
-    if (!eur.shop || !eur.token) {
-      return { error: 'EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)' };
-    }
-    return eur;
+  // 🔒 EUR-only: utan config -> hårt fel (ingen fallback till SEK)
+  if (!eur.shop || !eur.token) {
+    return { error: 'EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)' };
   }
-
-  // ✅ Okänt/ej skickat → global fallback = EUR (om konfig finns), annars SEK.
-  if (eur.shop && eur.token) return eur;
-  return sek;
+  return eur;
 }
+
 
 function pfAppendLocaleToInvoiceUrl(invoiceUrl, locale) {
   try {
@@ -454,60 +437,16 @@ const PUBLIC_BASE_URL =
 
 const PRESSIFY_DISCOUNT_SAVED_KEY = 'discount_saved';
 
-function pfExtractCurrencyFromPayload(body = {}) {
-  // ✅ Prioritet: market_currency (från Liquid/market) → currency → presentment → (ingen fallback här)
-  const raw =
-    body.market_currency ??
-    body.marketCurrency ??
-    body.currency ??
-    body.presentmentCurrency ??
-    body.presentment_currency ??
-    body.currencyCode ??
-    body.currency_code ??
-    null;
-
-  const cur = String(raw || '').trim().toUpperCase();
-
-  if (cur === 'EUR') return 'EUR';
-  if (cur === 'SEK') return 'SEK';
-  return null; // okänd / saknas → löses via request-inferens + global fallback
+function pfExtractCurrencyFromPayload(_body = {}) {
+  return 'EUR';
 }
 
-function pfInferCurrencyFromRequest(req) {
-  // Målet: aldrig "råka" byta valuta p.g.a. saknad body.currency.
-  // Vi infererar bara när payload saknar tydlig valuta.
-  const get = (k) => {
-    try { return String(req.get(k) || ''); } catch { return ''; }
-  };
-
-  const host =
-    get('x-forwarded-host') ||
-    get('host') ||
-    '';
-
-  const origin = get('origin');
-  const referer = get('referer');
-  const s = `${host} ${origin} ${referer}`.toLowerCase();
-
-  // Pressify / .se → SEK (skyddar befintlig live)
-  if (s.includes('pressify') || s.includes('.se')) return 'SEK';
-
-  // Stikaro / .com / .eu (anpassa vid behov) → EUR
-  if (s.includes('stikaro') || s.includes('.com') || s.includes('.eu')) return 'EUR';
-
-  return null;
+function pfInferCurrencyFromRequest(_req) {
+  return 'EUR';
 }
 
-function pfResolveCurrency(req, body = {}) {
-  // 1) Om frontend skickar valuta → den är sanningen
-  const fromBody = pfExtractCurrencyFromPayload(body);
-  if (fromBody) return fromBody;
-
-  // 2) Annars inferera från request (origin/referer/host)
-  const inferred = pfInferCurrencyFromRequest(req);
-  if (inferred) return inferred;
-
-  // 3) Slutlig global fallback (du ville ha EUR som standard)
+function pfResolveCurrency(_req, _body = {}) {
+  // 🔒 EUR-only, utan undantag
   return 'EUR';
 }
 
@@ -3012,7 +2951,7 @@ function appendHiddenIds(props, pid, vid) {
   return arr;
 }
 
-function appendHiddenCurrency(props, currency) {
+function appendHiddenCurrency(props, _currency) {
   const arr = Array.isArray(props) ? props.slice() : [];
   const lower = new Set(arr.map(p => String(p?.name || '').toLowerCase()));
 
@@ -3022,12 +2961,11 @@ function appendHiddenCurrency(props, currency) {
     if (!lower.has(name.toLowerCase())) arr.push({ name, value: v });
   };
 
-  // 🔒 currency måste finnas för framtida EUR
-  const cur = String(currency || '').trim().toUpperCase();
-  add('_currency', cur === 'EUR' ? 'EUR' : 'SEK');
-
+  // 🔒 EUR-only
+  add('_currency', 'EUR');
   return arr;
 }
+
 
 
 
@@ -3046,7 +2984,7 @@ function sanitizeProps(props){
   return out;
 }
 
-async function buildCustomLinesFromGeneric(items, requestedCurrency = 'SEK'){
+async function buildCustomLinesFromGeneric(items, requestedCurrency = 'EUR'){
   const lines = [];
 
   // Batcha uppslag av taxable
@@ -3235,7 +3173,7 @@ async function handleDraftCreate(req, res){
     const body = req.body || {};
 
  // ✅ NO-FLIP resolver: payload → inferens → global EUR fallback
-const requestedCurrency = pfResolveCurrency(req, body);
+const requestedCurrency = 'EUR';
 
     let payloadToShopify = null;
 
@@ -3437,8 +3375,7 @@ try {
 const restDraft = payloadToShopify?.draft_order || {};
   const restLineItems = Array.isArray(restDraft.line_items) ? restDraft.line_items : [];
 
-const requestedPresentment =
-  (String(currency_used || '').toUpperCase() === 'EUR') ? 'EUR' : 'SEK';
+const requestedPresentment = 'EUR';
 
 const toMoneyNumber = (v) => {
   const n = Number(String(v ?? '').replace(',', '.'));
@@ -4242,7 +4179,7 @@ async function readOrderSummaryForOrder(orderId) {
     const row = rows[0];
     if (!row) return null;
 
-    const currency = row.order_currency || 'SEK';
+    const currency = row.order_currency || 'EUR';
     const total = row.order_total_price != null ? Number(row.order_total_price) : 0;
 
     let linesTotal = 0;
@@ -6910,15 +6847,23 @@ app.use('/proxy/orders-meta', (req, res, next) => {
 });
 
 async function shopifyGraphQL(query, variables) {
-  const url = `https://${SHOP}/admin/api/2025-07/graphql.json`;
+  const shop = process.env.SHOP_EUR;
+  const token = process.env.ACCESS_TOKEN_EUR;
+
+  if (!shop || !token) {
+    throw new Error('EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)');
+  }
+
+  const url = `https://${shop}/admin/api/2025-07/graphql.json`;
   const res = await axios.post(url, { query, variables }, {
     headers: {
-      'X-Shopify-Access-Token': ACCESS_TOKEN,
+      'X-Shopify-Access-Token': token,
       'Content-Type': 'application/json'
     }
   });
   return res.data;
 }
+
 function gidToId(gid) {
   try { return gid.split('/').pop(); } catch { return gid; }
 }
@@ -8870,7 +8815,8 @@ async function readOrderSummaryForOrder(orderId) {
     const row = rows && rows[0] ? rows[0] : null;
     if (!row) return null;
 
-    const currency = row.order_currency || 'SEK';
+    const currency = row.order_currency || 'EUR';
+
     let totalNum = row.order_total_price != null ? Number(row.order_total_price) : NaN;
     let subtotalNum = NaN;
     let shippingNum = NaN;
@@ -10395,24 +10341,17 @@ const PRESSIFY_REGISTER_ROUTE = '/carrier/pressify/register';
 const PRESSIFY_CARRIER_NAME   = 'Pressify Delivery Dates'; // visas i Admin
 
 // 🔒 Default = SEK (påverkar inte .se)
-const PRESSIFY_DEFAULT_CURRENCY = 'SEK';
+const PRESSIFY_DEFAULT_CURRENCY = 'EUR';
 
 // Shopify CarrierService använder "minor units" i total_price (t.ex. öre/cents).
 // Vi håller SEK och lägger till fasta EUR-belopp i cents (ingen FX, bara stabilt).
 const PRESSIFY_EXPRESS_MINOR_BY_CURRENCY  = { SEK: 24900, EUR: 2490 }; // 249 kr / €24.90
 const PRESSIFY_STANDARD_MINOR_BY_CURRENCY = { SEK: 0,     EUR: 0    };
 
-// Plocka currency från Shopify rate-request först, annars fallback via locale, annars default SEK.
-function pressifyPickCarrierCurrency(rateReq) {
-  const c = String(rateReq?.currency || '').trim().toUpperCase();
-  if (c === 'SEK' || c === 'EUR') return c;
-
-  const loc = String(rateReq?.locale || '').trim().toLowerCase();
-  if (loc.startsWith('sv')) return 'SEK';
-  if (loc) return 'EUR';
-
-  return PRESSIFY_DEFAULT_CURRENCY;
+function pressifyPickCarrierCurrency(_rateReq) {
+  return 'EUR';
 }
+
 
 const PRESSIFY_DEFAULT_STD    = { minDays: 2, maxDays: 4 };
 const PRESSIFY_DEFAULT_EXP    = { minDays: 0, maxDays: 1 };
@@ -10705,13 +10644,18 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
 
     // 2) Bygg callback URL till din rate-endpoint
     const callbackUrl = `${(HOST || '').replace(/\/$/, '')}${PRESSIFY_CARRIER_ROUTE}`;
-    const headers = {
-      'X-Shopify-Access-Token': ACCESS_TOKEN,
-      'Content-Type': 'application/json'
-    };
+  if (!process.env.SHOP_EUR || !process.env.ACCESS_TOKEN_EUR) {
+  return res.status(500).json({ error: 'EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)' });
+}
 
-    // 3) Hämta ev. befintlig CarrierService
-    const listUrl = `https://${SHOP}/admin/api/2025-07/carrier_services.json`;
+const headers = {
+  'X-Shopify-Access-Token': process.env.ACCESS_TOKEN_EUR,
+  'Content-Type': 'application/json'
+};
+
+// 3) Hämta ev. befintlig CarrierService (EUR-shop)
+const listUrl = `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services.json`;
+
     const { data: listData } = await axios.get(listUrl, { headers });
     const existing = (listData?.carrier_services || []).find(cs => cs.name === PRESSIFY_CARRIER_NAME);
 
@@ -10729,7 +10673,7 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
     // 5) Skapa eller uppdatera
     if (existing) {
       const { data: updData } = await axios.put(
-        `https://${SHOP}/admin/api/2025-07/carrier_services/${existing.id}.json`,
+        `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services/${existing.id}.json`
         payload,
         { headers }
       );
@@ -10741,7 +10685,7 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
       });
     } else {
       const { data: crtData } = await axios.post(
-        `https://${SHOP}/admin/api/2025-07/carrier_services.json`,
+      `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services.json`,
         payload,
         { headers }
       );
