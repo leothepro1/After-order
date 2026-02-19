@@ -10444,15 +10444,14 @@ function pressifyAddBusinessDays(startDate, days) {
   }
   return d;
 }
-
-function pressifySvShortRange(from, to) {
-  const fmt = new Intl.DateTimeFormat('sv-SE', {
+function pressifyEnShortRange(from, to) {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Stockholm',
     weekday: 'short',
     day: 'numeric',
     month: 'short'
   });
-  const clean = s => String(s).replace(/\./g, ''); // "sep." -> "sep"
+  const clean = s => String(s).replace(/\./g, '');
   const a = clean(fmt.format(from));
   const b = clean(fmt.format(to));
   return (a === b) ? a : `${a} - ${b}`;
