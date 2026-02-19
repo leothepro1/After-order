@@ -10642,9 +10642,10 @@ app.post(PRESSIFY_REGISTER_ROUTE, async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    // 2) Bygg callback URL till din rate-endpoint
-    const callbackUrl = `${(HOST || '').replace(/\/$/, '')}${PRESSIFY_CARRIER_ROUTE}`;
-  if (!process.env.SHOP_EUR || !process.env.ACCESS_TOKEN_EUR) {
+  // 2) Bygg callback URL till din rate-endpoint
+const callbackUrl = `${(HOST || '').replace(/\/$/, '')}${PRESSIFY_CARRIER_ROUTE}`;
+
+if (!process.env.SHOP_EUR || !process.env.ACCESS_TOKEN_EUR) {
   return res.status(500).json({ error: 'EUR shop not configured (SHOP_EUR/ACCESS_TOKEN_EUR missing)' });
 }
 
@@ -10655,47 +10656,43 @@ const headers = {
 
 // 3) Hämta ev. befintlig CarrierService (EUR-shop)
 const listUrl = `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services.json`;
+const { data: listData } = await axios.get(listUrl, { headers });
+const existing = (listData?.carrier_services || []).find(cs => cs.name === PRESSIFY_CARRIER_NAME);
 
-    const { data: listData } = await axios.get(listUrl, { headers });
-    const existing = (listData?.carrier_services || []).find(cs => cs.name === PRESSIFY_CARRIER_NAME);
+// 4) Payload – håll den minimal och stabil
+const payload = {
+  carrier_service: {
+    name: PRESSIFY_CARRIER_NAME,
+    callback_url: callbackUrl,
+    active: true,
+    service_discovery: true,
+    carrier_service_type: 'api'
+  }
+};
 
-    // 4) Payload – håll den minimal och stabil
-    const payload = {
-      carrier_service: {
-        name: PRESSIFY_CARRIER_NAME,
-        callback_url: callbackUrl,
-        active: true,
-        service_discovery: true,     // låt Shopify fråga oss dynamiskt
-        carrier_service_type: 'api'  // viktigt för externa carriers
-      }
-    };
+// 5) Skapa eller uppdatera
+if (existing) {
+  const updUrl = `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services/${existing.id}.json`;
+  const { data: updData } = await axios.put(updUrl, payload, { headers });
 
-    // 5) Skapa eller uppdatera
-    if (existing) {
-      const { data: updData } = await axios.put(
-        `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services/${existing.id}.json`
-        payload,
-        { headers }
-      );
-      return res.json({
-        ok: true,
-        mode: 'updated',
-        id: updData?.carrier_service?.id || existing.id,
-        callback_url: updData?.carrier_service?.callback_url || callbackUrl
-      });
-    } else {
-      const { data: crtData } = await axios.post(
-      `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services.json`,
-        payload,
-        { headers }
-      );
-      return res.json({
-        ok: true,
-        mode: 'created',
-        id: crtData?.carrier_service?.id,
-        callback_url: crtData?.carrier_service?.callback_url || callbackUrl
-      });
-    }
+  return res.json({
+    ok: true,
+    mode: 'updated',
+    id: updData?.carrier_service?.id || existing.id,
+    callback_url: updData?.carrier_service?.callback_url || callbackUrl
+  });
+} else {
+  const crtUrl = `https://${process.env.SHOP_EUR}/admin/api/2025-07/carrier_services.json`;
+  const { data: crtData } = await axios.post(crtUrl, payload, { headers });
+
+  return res.json({
+    ok: true,
+    mode: 'created',
+    id: crtData?.carrier_service?.id,
+    callback_url: crtData?.carrier_service?.callback_url || callbackUrl
+  });
+}
+
   } catch (err) {
     console.error('PRESSIFY_REGISTER_ROUTE error:', err?.response?.data || err.message);
     return res.status(500).json({ error: 'Internal error' });
