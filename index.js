@@ -10444,7 +10444,8 @@ function pressifyAddBusinessDays(startDate, days) {
   }
   return d;
 }
-function pressifyEnShortRange(from, to) {
+
+function pressifySvShortRange(from, to) {
   const fmt = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Stockholm',
     weekday: 'short',
