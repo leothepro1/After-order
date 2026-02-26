@@ -2,9 +2,8 @@
   "id": "provetiketter",
   "title": "Klistermärken",
   "i18n": { "en": { "title": "Stickers" } },
-  "version": "2.0.0",
+  "version": "2.0.1",
   "currency": "EUR",
-
   "options": [
     {
       "id": "currency",
@@ -39,13 +38,10 @@
       "export": false
     }
   ],
-
   "tables": {},
-
   "formulas": {
     "unit_price": "(size_w_cm && size_h_cm) ? ((size_w_cm <= 9 && size_h_cm <= 9) ? 8 : (size_w_cm <= 15 && size_h_cm <= 15) ? 11 : 21) : 0",
-    "total_price": "unit_price"
+    "total_price": "unit"
   },
-
   "export": ["size_w_cm", "size_h_cm"]
 }
